@@ -1,0 +1,48 @@
+diff --git a/config.sub b/config.sub
+index 38f3d037a..0a685e8cc 100755
+--- a/config.sub
++++ b/config.sub
+@@ -1262,6 +1262,7 @@ case $cpu-$vendor in
+ 			| sparclite \
+ 			| sparcv8 | sparcv9 | sparcv9b | sparcv9v | sv1 | sx* \
+ 			| spu \
++			| symphony \
+ 			| tahoe \
+ 			| thumbv7* \
+ 			| tic30 | tic4x | tic54x | tic55x | tic6x | tic80 \
+diff --git a/gcc/config.gcc b/gcc/config.gcc
+index 039fa4694..1ac806044 100644
+--- a/gcc/config.gcc
++++ b/gcc/config.gcc
+@@ -406,6 +406,9 @@ ft32*)	cpu_type=ft32
+ moxie*)	cpu_type=moxie
+ 	target_has_targetm_common=no
+ 	;;
++symphony*)	cpu_type=symphony
++	target_has_targetm_common=no
++	;;
+ fido-*-*)
+ 	cpu_type=m68k
+ 	extra_headers=math-68881.h
+@@ -3265,6 +3268,21 @@ s390x-ibm-tpf*)
+ 	extra_options="${extra_options} s390/tpf.opt"
+ 	tmake_file="${tmake_file} s390/t-s390"
+ 	;;
++symphony-*-elf)
++	# Symphony/Dynphony: a from-scratch ISA with no hardware
++	# multiply/divide and no ELF/gas/ld toolchain of its own (see
++	# gcc-backend/symphony-gcc/README.md).  GCC only ever runs as
++	# `-S`; the resulting assembly is consumed by a custom
++	# assembler+linker (gcc-backend/tools/gcc_assembler.py), never
++	# by a real `as`/`ld`, so this target intentionally omits
++	# elfos.h (no ELF section/object machinery needed) -- symphony.h
++	# defines its own minimal ASM_OUTPUT_* macros directly, the same
++	# approach used by mmix-knuth-mmixware above for its own
++	# non-ELF object format.
++	tm_file="${tm_file} newlib-stdint.h"
++	tmake_file="${tmake_file} symphony/t-symphony"
++	use_gcc_stdint=wrap
++	;;
+ sh-*-elf* | sh[12346l]*-*-elf* | \
+   sh-*-linux* | sh[2346lbe]*-*-linux* | \
+   sh-*-netbsdelf* | shl*-*-netbsdelf*)
