@@ -57,3 +57,33 @@ unsigned int time(void) {
        for callers that need the full 64-bit counter. */
     return time_low();
 }
+
+/* Minimal atexit(): a real `int main(void){...}` function compiled by
+   this GCC port ALWAYS gets an implicit `link_call __main` inserted at
+   entry by expand_main_function (GCC's generic behaviour, not something
+   this target's .md/.cc opted into or can opt out of -- confirmed: it
+   survives -ffreestanding too, since this target defines neither
+   HAS_INIT_SECTION nor its own NAME__MAIN override). libgcc2.c's __main
+   -> __do_global_ctors always calls `atexit(__do_global_dtors)`
+   unconditionally, even when __CTOR_LIST__/__DTOR_LIST__ are the
+   trivial empty two-element arrays libgcc itself default-defines (no
+   real global constructors anywhere in this runtime or any program
+   compiled against it) -- so without a real `atexit` symbol, EVERY
+   program with a `main()` fails to link with "undefined symbol
+   'atexit'", not just ones that reference it directly. There is no
+   corresponding real `exit()` in this freestanding runtime (no OS to
+   return control to), so the registered callback table only needs to
+   exist and accept registrations up to a small fixed capacity --
+   nothing here ever walks or invokes it, matching the fact that
+   __do_global_dtors itself is dead code whenever __DTOR_LIST__ is
+   empty (the only case that occurs in practice for this runtime). */
+#define ATEXIT_MAX 8
+static void (*__dyn_atexit_fns[ATEXIT_MAX])(void);
+static unsigned int __dyn_atexit_count;
+
+int atexit(void (*function)(void)) {
+    if (__dyn_atexit_count >= ATEXIT_MAX) return 1;
+    __dyn_atexit_fns[__dyn_atexit_count] = function;
+    __dyn_atexit_count += 1;
+    return 0;
+}

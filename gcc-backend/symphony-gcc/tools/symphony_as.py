@@ -120,6 +120,20 @@ def _parse_asm_string(rest):
 
 
 def parse_int_or_symbol(tok):
+    """Returns an int for a pure numeric literal, or a bare symbol name
+    (str) for a plain symbol. A GNU-as-style `symbol+N` / `symbol-N`
+    expression (e.g. libgcc2.c's `__DTOR_LIST__ + 1`, which GCC emits
+    into .s as `__DTOR_LIST__+4` after scaling by pointer size) is split
+    into a `(symbol, addend)` tuple rather than treated as one opaque
+    symbol name -- treating the whole expression as a symbol name silently
+    produces an always-undefined symbol at link time (the linker's symbol
+    table never contains a literal "__DTOR_LIST__+4" entry), so any
+    program whose libgcc-provided startup path references such an
+    expression (e.g. main()'s implicit call to __main, which walks
+    __DTOR_LIST__) fails to link. Caught by direct end-to-end testing: a
+    trivial `int main(void){...}` program failed to link against
+    libgcc.a with "undefined symbol '__DTOR_LIST__+4'".
+    """
     tok = tok.strip()
     try:
         return int(tok, 0)
@@ -130,6 +144,11 @@ def parse_int_or_symbol(tok):
             return int(tok, 0)
         except ValueError:
             pass
+    match = re.match(r"^([A-Za-z_.$][\w.$]*)\s*([+-]\s*\d+)\s*$", tok)
+    if match:
+        symbol = match.group(1)
+        addend = int(match.group(2).replace(" ", ""), 0)
+        return (symbol, addend)
     return tok  # symbol name
 
 
@@ -341,8 +360,9 @@ class Assembler:
                     parsed_lines.append(("data", self.cur_section,
                         (v & ((1 << (8 * width)) - 1)).to_bytes(width, "big")))
                 else:
+                    symbol, sym_addend = v if isinstance(v, tuple) else (v, 0)
                     off = offsets[self.cur_section]
-                    self.relocs.append((self.cur_section, off, v, 0, f"data{width}", 0))
+                    self.relocs.append((self.cur_section, off, symbol, sym_addend, f"data{width}", 0))
                     parsed_lines.append(("data", self.cur_section, bytes(width)))
                 offsets[self.cur_section] += width
             return
@@ -382,11 +402,12 @@ class Assembler:
         v = parse_int_or_symbol(tok)
         if isinstance(v, int):
             return v
+        symbol, sym_addend = v if isinstance(v, tuple) else (v, 0)
         # Whether v is a same-unit label or a genuinely external symbol,
         # always emit a relocation -- the linker resolves ALL symbols
         # (local labels included) uniformly once it has assigned final
         # section base addresses.
-        self.relocs.append((section, offset, v, addend, kind, 0))
+        self.relocs.append((section, offset, symbol, addend + sym_addend, kind, 0))
         return 0
 
     def _encode_insn(self, mnem, operands, offset):
