@@ -31,11 +31,58 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` done (commit hash).
       out of a loop body via IR dump inspection, all demo programs still compile
       and run correctly on the native emulator.
 
+## Architecture change in progress: stable block identity
+
+Started while implementing `inline_single_call_functions`. First attempt spliced
+callee/caller by destructing both to flat IR, concatenating, and reconstructing
+SSA once (since a phi's `extra` predecessor indices are only meaningful
+relative to one specific `build_cfg()` call — see `verify.py` — so a cloned
+callee's phis couldn't be copied over as-is without first rebuilding them
+against the merged CFG). That destruct→construct round trip surfaced a real,
+inlining-independent bug: a dead phi (defined, never used) whose own operand
+is `None` on one predecessor edge (the lowerer's `&&`/`||`/`?:` join-value
+pattern applied to a value nothing reads) round-trips incorrectly — `destruct`
+correctly skips emitting a copy for the `None` edge, but the second `construct`
+re-promotes the leftover copies as a "variable" and places a phi that ends up
+reading a stale value id, breaking dominance. Patching this one bug (e.g. with
+a dead-value sweep between destruct and construct) would just be the next in a
+series of workarounds for the same underlying issue: **a phi's identity is
+tied to CFG-build-relative block indices, not to a stable block/edge
+identity**, so any pass that needs to reconstruct or repair SSA structurally
+(not just rewrite values in place, like SCCP/hoisting do) runs into this.
+
+Decision: stop and refactor now, before building more passes on top of the
+shaky foundation. `BasicBlock` gets a persistent identity that survives
+rewrites; phi operands key off block/edge identity instead of a freshly
+rebuilt CFG's positional index; `construct`, `destruct`, `verify`, `sccp`,
+`hoist_loop_invariants` get rewritten against it, and inlining gets rebuilt as
+a true SSA-preserving transform (clone-with-remapping directly on SSA, using
+real block identity to repair phis locally) instead of a destruct/construct
+round trip. This is a bigger, riskier change touching everything in
+`symphony/middle/ssa/` and `symphony/middle/analysis/`, done deliberately as
+its own step rather than folded into inlining.
+
+The in-progress `symphony/middle/ssa/inline.py` (destruct/construct approach)
+is being discarded/rebuilt once the new representation lands.
+
+- [ ] Design + implement stable block identity for `BasicBlock`/`ControlFlowGraph`
+      and edge-keyed phi operands (`analysis/cfg.py`, `analysis/dominance.py`).
+- [ ] Rewrite `construct.py` to assign/consume identities instead of CFG-build
+      positional indices for phi predecessors.
+- [ ] Rewrite `destruct.py` and `verify.py` against the same identities.
+- [ ] Re-verify `sccp.py` and `hoist.py` still work (rewrite if the
+      representation change touches their logic — both currently read
+      `phi.extra` pairs and `block.index`/`predecessors` directly).
+- [ ] Rebuild `inline_single_call_functions` as a true SSA-preserving clone:
+      clone callee blocks with a block-identity map alongside the value map,
+      clone phis directly (remapping through both maps), turn each callee
+      `return` into a jump to the continuation, and synthesize one phi at the
+      continuation keyed by the real predecessor identities — no
+      destruct/construct round trip.
+
 ## Tier 1 — hardest, migrate first
-- [ ] `inline_single_call_functions` — splices an entire callee CFG into the
-      caller mid-stream, remaps values/labels, must synthesize a new phi at the
-      continuation point merging the callee's multiple returns. Structurally
-      "run construction again, by hand, on spliced code" — hardest single pass.
+- [ ] `inline_single_call_functions` — blocked on the stable-block-identity
+      refactor above; do not resume with the destruct/construct approach.
 - [ ] `simplify_control_flow` + `thread_jumps` (same family) — deletes/merges/
       redirects blocks and edges. Every deletion must rewrite `phi.extra`'s
       `(predecessor_index, value)` pairs; block-index renumbering is the exact
