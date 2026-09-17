@@ -179,25 +179,63 @@ add:
 	link_return
 ```
 
-### 5. Assemble, link, and run a real program on the emulator
+### 5. Compile, link, and run a real program — the easy way
+
+`tools/symphony_gcc_run.py` is a one-command build-and-run wrapper: given
+a `.c` file, it drives xgcc, the assembler, and the linker (against
+`libgcc.a` and, by default, the full runtime library), then runs the
+result on the emulator and prints the outcome. This is the normal way to
+use this toolchain day to day — no need to touch the `Linker`/`ObjectFile`
+API directly unless you're extending the port itself.
+
+```sh
+export SYMPHONY_GCC_PREFIX=$PWD/build-stage1   # the build dir from step 3
+
+python3 tools/symphony_gcc_run.py my_program.c              # -O0, runs main()
+python3 tools/symphony_gcc_run.py my_program.c -O2           # optimized
+python3 tools/symphony_gcc_run.py my_program.c -o out.bin    # also save the binary
+python3 tools/symphony_gcc_run.py my_program.c --screen      # print the printf-family text screen after halt
+```
+
+It prints the step count and the return value (`r1` per the ABI) on
+halt, e.g.:
+
+```
+halted after 116 steps, r1 (return value) = 0x2a (42)
+```
+
+Run `python3 tools/symphony_gcc_run.py --help` for the full option list
+(entry symbol, `--no-runtime` for programs that don't define `main` or
+use the runtime library, `--max-steps` for long-running programs — see
+"Running the tests" above for why a large step count is normal, not a
+hang).
+
+### 6. Doing it by hand (the low-level API)
+
+For anything `symphony_gcc_run.py` doesn't cover — linking multiple
+program source files, controlling link order, or extending the port
+itself — the underlying pipeline is `tools/symphony_as.py` (assembler)
+and `tools/symphony_ld.py`'s `Linker`/`ObjectFile` classes (linker), used
+directly:
 
 ```sh
 gcc/xgcc -Bgcc/ -S -O0 my_program.c -o my_program.s
 python3 tools/symphony_as.py my_program.s -o my_program.o
 ```
 
-Link `my_program.o` against `libgcc.a` (at
-`symphony-elf/libgcc/libgcc.a` inside the build directory) and, if the
-program uses the runtime library, the compiled runtime objects
-(`gcc-backend/symphony-gcc/runtime/*.c`, compiled and assembled the same
-way) using `tools/symphony_ld.py`'s `Linker` class (see
-`tools/symphony_ld.py` for the API — there is no command-line driver
-yet, only the Python `Linker`/`ObjectFile` classes used directly). Run
-the resulting flat binary via `symphony.emulator.machine.Machine`:
+`symphony_ld.py` also has its own command-line entry point for linking
+already-assembled objects and archives without writing any Python:
+
+```sh
+python3 tools/symphony_ld.py -o out.bin my_program.o \
+    build-stage1/symphony-elf/libgcc/libgcc.a --entry main
+```
+
+Run the resulting flat binary via `symphony.emulator.machine.Machine`:
 
 ```python
 from symphony.emulator.machine import Machine
-binary = open("my_program.bin", "rb").read()
+binary = open("out.bin", "rb").read()
 m = Machine(binary, load_address=0, symphony=True)
 m.pc = entry_address       # from the linker's returned entry point
 m.regs[14] = 0x800000      # stack pointer: top of a generous RAM region
@@ -207,6 +245,10 @@ result = m.run(halt_address=0xFFFFF0, max_steps=200000)
 
 `r1` (the return-value register per the ABI) holds `_start`'s return
 value in `result` when the halt address is reached via `link_return`.
+`gcc-backend/symphony-gcc/tests/toolchain.py`'s `Toolchain` class (what
+`symphony_gcc_run.py` itself is built on) wraps this same sequence in a
+reusable, tested API if you're writing more tooling or tests against
+this pipeline.
 
 ## Running the tests
 
