@@ -208,6 +208,56 @@ result = m.run(halt_address=0xFFFFF0, max_steps=200000)
 `r1` (the return-value register per the ABI) holds `_start`'s return
 value in `result` when the halt address is reached via `link_return`.
 
+## Running the tests
+
+`gcc-backend/symphony-gcc/tests/test_gcc_backend.py` is a real, committed
+pytest regression suite for this toolchain -- compiles real C through
+`xgcc`, assembles/links with the real tools, runs the binary on
+`symphony/emulator`, and asserts on the actual result. It replaces this
+project's earlier ad hoc verification (compile/run by hand, check
+output, throw it away): every bug documented below has a dedicated
+regression test that reproduces its exact trigger shape.
+
+It is **opt-in and skipped by default**, separate from the repo's fast
+default suite (`tests/test_compiler.py`, `tests/test_integration.py`,
+which need nothing but the Python package) -- running it for real needs
+a fully built cross-compiler + libgcc + this project's custom assembler/
+linker, i.e. the entire "Build recipe" above completed once (a real GCC
+bootstrap, roughly 30-60 minutes from scratch).
+
+To run it:
+
+```sh
+export SYMPHONY_GCC_PREFIX=/path/to/build-stage1   # the stage1 build dir from step 3 above
+python3 -m pytest gcc-backend/symphony-gcc/tests/test_gcc_backend.py -v
+```
+
+`SYMPHONY_GCC_PREFIX` must point at the `build-stage1` directory itself
+(the one `../gcc-src/configure --target=symphony-elf ...` was run from):
+the tests look for `<prefix>/gcc/xgcc`, `<prefix>/gcc/as` (the assembler
+wrapper script -- reapply it per the gotcha above if you rebuilt `all-gcc`
+since last using it), and `<prefix>/symphony-elf/libgcc/libgcc.a`. Without
+`SYMPHONY_GCC_PREFIX` set, every test in the module is auto-skipped and
+the rest of the repo's test suite is unaffected.
+
+What it covers: milestone-3-style sanity (trivial functions, loops, mixed
+leaf/non-leaf calls, at `-O0`/`-O1`/`-O2`); real libgcc signed and
+unsigned multiply/divide/modulo; `malloc`/`free`/`calloc`/`realloc`
+correctness; all four `printf`/`printf1`/`printf2`/`printf3` arities with
+real format strings, verified by reading back the emulator's text-screen
+framebuffer; xfail tests documenting the known `-O1`/`-O2` reload ICE in
+`calloc()`/`__dyn_printf_unsigned()` and the `__muldi3` link-time gap (a
+future fix flips these green automatically instead of the gap silently
+going untracked); and one dedicated regression test per real bug fixed
+during this project (see "Fixed bugs" above) -- frame-pointer placement,
+missing callee-saved registers, the assembler pass1/pass2 desync, and the
+`__dyn_heap_anchor` BSS-ordering bug (plus a negative test for the
+linker's stale-object check).
+
+`gcc-backend/symphony-gcc/tests/toolchain.py` is the reusable harness
+(`Toolchain.build_and_run(c_source, tmp_path, ...)` compiles+assembles+
+links+runs a C program in one call) if you're adding more tests.
+
 ## Key design points baked into the `.md`/`.cc`/`.h` port
 
 - **7 argument/return registers (r1-r7), not 6.** The old
@@ -361,11 +411,59 @@ value in `result` when the halt address is reached via `link_return`.
   See the comment above `__dyn_printf_emit_one` in `runtime/printf.c`
   for the full before/after trace summary.
 
+### Fixed bugs found while building the regression test suite
+
+Both surfaced immediately when writing the very first end-to-end test (a
+plain `int main(void){...}` program) — no prior verification had ever
+linked a program with a real `main()` against the real linker/libgcc, so
+these went undetected through all 7 milestones:
+
+- **`symphony_as.py` didn't parse `symbol+N` relocation expressions.**
+  GCC-emitted libgcc source (`libgcc2.c`'s `__main`/`__do_global_ctors`)
+  references `__DTOR_LIST__ + 1`, which reaches `.s` as `__DTOR_LIST__+4`
+  (scaled by pointer size). `parse_int_or_symbol` treated the whole
+  string as one opaque symbol name (since `int("__DTOR_LIST__+4", 0)`
+  raises), so the linker saw a relocation to a symbol
+  (`"__DTOR_LIST__+4"`) that could never be defined — an always-broken
+  link for anything pulling in that libgcc object, with no diagnostic
+  pointing at the real cause. Fixed by splitting a trailing `+N`/`-N`
+  off into a proper `(symbol, addend)` pair before emitting the
+  relocation.
+- **No `atexit()`.** GCC's `expand_main_function` always emits an
+  implicit `link_call __main` at the start of any real `main()` (this
+  target defines no `HAS_INIT_SECTION`/`NAME__MAIN` override, and it
+  survives `-ffreestanding` too), and libgcc's `__main` →
+  `__do_global_ctors` unconditionally calls
+  `atexit(__do_global_dtors)` even when `__CTOR_LIST__`/`__DTOR_LIST__`
+  are libgcc's own trivial empty two-element arrays (no real global
+  constructors anywhere in this runtime). Without a real `atexit`
+  symbol, **every** program defining `main()` failed to link, not just
+  ones calling `atexit` directly. Fixed with a minimal `atexit()` in
+  `runtime/intrinsics.c`: registers into a small fixed-size table and
+  does nothing else — there is no real `exit()` in this freestanding
+  runtime (no OS to return to), so nothing ever needs to walk or invoke
+  the table, consistent with `__do_global_dtors` being dead code
+  whenever `__DTOR_LIST__` is empty (the only case that occurs here).
+
+Both verified end-to-end: `int main(void){int a=6,b=7; return
+a*b+a/b;}` compiled, assembled, linked against real `libgcc.a` +
+`runtime/intrinsics.c`, and run on the emulator, before and after each
+fix.
+
 ### Known gaps / real unresolved bugs (for whoever picks this up next)
 
 - **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) hits a real LRA/
   reload ICE ("maximum number of generated reload insns per insn
-  achieved") and is excluded from libgcc entirely. Not root-caused.
+  achieved") *inside libgcc's own build* at `-O2` (libgcc's required
+  optimization level) and is excluded from libgcc entirely
+  (`LIB2FUNCS_EXCLUDE` in `libgcc-config/symphony/t-symphony`). Not
+  root-caused. Note the failure mode for user code: compiling a 64-bit
+  multiply/divide in an ordinary program does NOT ICE (GCC just emits a
+  libcall like any other target) — the gap only surfaces at **link
+  time**, as an undefined-symbol error for `__muldi3`/`__divdi3`/etc.,
+  since they're simply absent from `libgcc.a`. Exercised by
+  `test_gcc_backend.py`'s `test_64bit_multiply_links` (xfail, documents
+  the link failure rather than a compile ICE).
 - **A whole class of "reload insns" ICEs** beyond the 64-bit case above,
   confirmed to trigger in at least: a loop containing a call combined
   with `-fmove-loop-invariants` (mitigated by compiling the runtime
