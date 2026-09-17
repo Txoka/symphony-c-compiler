@@ -30,8 +30,27 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` done (commit hash).
       failures, zero regressions), confirmed hoisting actually moves computation
       out of a loop body via IR dump inspection, all demo programs still compile
       and run correctly on the native emulator.
+- [x] Stable block identity (`b896352`, `9d4c5d5`) — see "Architecture change:
+      stable block identity" below for the full writeup. `BasicBlock` now
+      carries a persistent `label` assigned once at creation (every block has
+      one, including the entry and previously-unlabeled anonymous fallthrough
+      blocks); `FunctionIR.blocks` is the primary representation and
+      `FunctionIR.instructions` is a compatibility property that flattens
+      blocks to the legacy linear form (for anything, including the backend
+      and `legalize.py`, that still wants a flat sequence) and re-splits on
+      assignment. `construct.py`, `verify.py`, `sccp.py`, `hoist.py`, and
+      `destruct.py` all key phi predecessors and block lookups off `label`
+      instead of `block.index`/positional `cfg.blocks[i]`. Verified: full
+      suite green on both ISAs (same 31 pre-existing failures, zero
+      regressions), a targeted nested-loop/short-circuit/ternary stress
+      program round-trips through construct→sccp→hoist→destruct→verify with
+      identical block labels at every stage and produces the correct result
+      on the native emulator, and all example programs still compile and run
+      identically. This unblocks `inline_single_call_functions` as a true
+      SSA-preserving clone (see the now-completed checklist immediately
+      below).
 
-## Architecture change in progress: stable block identity
+## Architecture change: stable block identity
 
 Started while implementing `inline_single_call_functions`. First attempt spliced
 callee/caller by destructing both to flat IR, concatenating, and reconstructing
@@ -65,14 +84,14 @@ its own step rather than folded into inlining.
 The in-progress `symphony/middle/ssa/inline.py` (destruct/construct approach)
 is being discarded/rebuilt once the new representation lands.
 
-- [ ] Design + implement stable block identity for `BasicBlock`/`ControlFlowGraph`
-      and edge-keyed phi operands (`analysis/cfg.py`, `analysis/dominance.py`).
-- [ ] Rewrite `construct.py` to assign/consume identities instead of CFG-build
+- [x] Design + implement stable block identity for `BasicBlock`/`ControlFlowGraph`
+      and label-keyed phi operands (`analysis/cfg.py`, `analysis/dominance.py`).
+- [x] Rewrite `construct.py` to assign/consume identities instead of CFG-build
       positional indices for phi predecessors.
-- [ ] Rewrite `destruct.py` and `verify.py` against the same identities.
-- [ ] Re-verify `sccp.py` and `hoist.py` still work (rewrite if the
-      representation change touches their logic — both currently read
-      `phi.extra` pairs and `block.index`/`predecessors` directly).
+- [x] Rewrite `destruct.py` and `verify.py` against the same identities.
+- [x] Re-verify `sccp.py` and `hoist.py` still work (rewritten against
+      `block.label`/`cfg.by_label` in place of `block.index`/positional
+      `cfg.blocks[i]`).
 - [ ] Rebuild `inline_single_call_functions` as a true SSA-preserving clone:
       clone callee blocks with a block-identity map alongside the value map,
       clone phis directly (remapping through both maps), turn each callee
@@ -81,13 +100,18 @@ is being discarded/rebuilt once the new representation lands.
       destruct/construct round trip.
 
 ## Tier 1 — hardest, migrate first
-- [ ] `inline_single_call_functions` — blocked on the stable-block-identity
-      refactor above; do not resume with the destruct/construct approach.
+- [ ] `inline_single_call_functions` — the stable-block-identity refactor
+      above is done, so this is now unblocked: build it as a true
+      SSA-preserving clone (see the checklist item under "Architecture
+      change: stable block identity"), not the destruct/construct approach.
 - [ ] `simplify_control_flow` + `thread_jumps` (same family) — deletes/merges/
       redirects blocks and edges. Every deletion must rewrite `phi.extra`'s
-      `(predecessor_index, value)` pairs; block-index renumbering is the exact
-      bug class that already bit `construct.py`, `destruct.py`, and `sccp.py`
-      once each (see commit `1d13c89` fix and prior stage-1 fixes).
+      `(predecessor_label, value)` pairs (`redirect_edge`/`remove_block` in
+      `analysis/cfg.py` centralize this bookkeeping); labels are stable now,
+      so this is no longer the block-index-renumbering bug class that used
+      to bite `construct.py`, `destruct.py`, and `sccp.py` (see commit
+      `1d13c89` fix and prior stage-1 fixes) — but phi operands for a
+      removed predecessor still need explicit cleanup.
 - [ ] `remove_dead_values` — needs phi-awareness: phi operands are uses, and a
       wholly-dead phi (including dead phi cycles) should be prunable.
 - [ ] `reduce_induction_strength` — induction-variable recognition is a phi
