@@ -46,3 +46,23 @@ index 039fa4694..1ac806044 100644
  sh-*-elf* | sh[12346l]*-*-elf* | \
    sh-*-linux* | sh[2346lbe]*-*-linux* | \
    sh-*-netbsdelf* | shl*-*-netbsdelf*)
+diff --git a/libgcc/config.host b/libgcc/config.host
+index ee10e99b0a..d0328c8683 100644
+--- a/libgcc/config.host
++++ b/libgcc/config.host
+@@ -1519,6 +1519,15 @@ sparc64-*-linux*)		# 64-bit SPARC's running GNU/Linux
+ 	;;
+ sparc64-*-netbsd*)
+ 	;;
++symphony*-*-elf*)
++	# Symphony/Dynphony: no ELF section/startup convention of its own
++	# (see gcc-backend/symphony-gcc/README.md) -- no crt*.o extra_parts,
++	# no gcc/config.gcc elfos.h. tmake_file pulls in the libgcc-side
++	# t-symphony fragment (config/symphony/t-symphony, a different file
++	# from gcc/config/symphony/t-symphony) for LIB2ADD/LIB2FUNCS_EXCLUDE.
++	tmake_file="$tmake_file symphony/t-symphony"
++	extra_parts=
++	;;
+ tic6x-*-uclinux)
+ 	tmake_file="${tmake_file} t-softfp-sfdf t-softfp-excl t-softfp \
+ 		c6x/t-elf  c6x/t-uclinux t-crtstuff-pic t-libgcc-pic \
