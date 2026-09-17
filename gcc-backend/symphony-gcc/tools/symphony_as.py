@@ -62,6 +62,20 @@ def pad_fixed_width(data):
     return bytes(out)
 
 
+def encode_width(data, fixed_width):
+    """Symphony (fixed_width=True): pad every raw sub-instruction to 4
+    bytes via pad_fixed_width above. Dynphony (fixed_width=False): emit the
+    raw variable-length bytes as-is -- no padding at all. This mirrors
+    symphony/targets/symphony/assembler.py's Assembler.emit exactly (its
+    `if not self.target.fixed_instruction_width: self.code.extend(data);
+    return` early-out), which is the reference dyncc's own backend already
+    uses for both encodings of this identical ISA -- ported here rather
+    than re-derived so GCC-driven and dyncc-driven Dynphony code stay
+    byte-for-byte identical too, exactly like the Symphony path already is.
+    """
+    return pad_fixed_width(data) if fixed_width else bytes(data)
+
+
 INSN_SLOT = 4  # every Symphony sub-instruction occupies exactly 4 bytes
 LINK_CALL_SLOTS = 3    # counter, add-immediate, jmp -> 12 bytes
 LA_SLOTS = 3            # mov-hi16, lsl, or-lo16 -> 12 bytes (isa.constant)
@@ -157,8 +171,13 @@ class Assembler:
     records relocations for anything referencing a symbol not yet known to
     be a fixed numeric value within this translation unit."""
 
-    def __init__(self, unit_name):
+    def __init__(self, unit_name, fixed_width=True):
         self.unit_name = unit_name
+        # True: Symphony (pad every sub-instruction to 4 bytes). False:
+        # Dynphony (emit the identical instruction encoding variable-length,
+        # unpadded) -- see encode_width()/self._enc() above, mirroring
+        # symphony/targets/symphony/assembler.py's Assembler.emit.
+        self.fixed_width = fixed_width
         self.sections = {"text": bytearray(), "data": bytearray(), "bss_size": 0}
         self.cur_section = "text"
         self.labels = {}       # name -> (section, offset)
@@ -166,6 +185,9 @@ class Assembler:
         self.pending_bss = []  # (name, size, align) emitted while in .bss
         self.relocs = []       # (section, offset, symbol, addend, kind)
         self._local_counter = 0
+
+    def _enc(self, data):
+        return encode_width(data, self.fixed_width)
 
     # ---- directive/line parsing -------------------------------------
 
@@ -372,6 +394,8 @@ class Assembler:
     # ---- instruction sizing -------------------------------------------
 
     def _insn_size(self, mnem, operands):
+        if not self.fixed_width:
+            return self._insn_size_dynphony(mnem, operands)
         if mnem == "link_call":
             return INSN_SLOT * LINK_CALL_SLOTS
         if mnem == "link_return":
@@ -392,6 +416,68 @@ class Assembler:
             return INSN_SLOT
         # ALU 3-operand forms: add/sub/and/or/xor/lsl/lsr/asr/nor/nand
         return INSN_SLOT
+
+    def _is_register(self, tok):
+        try:
+            parse_register_operand(tok)
+            return True
+        except ValueError:
+            return False
+
+    def _insn_size_dynphony(self, mnem, operands):
+        """Dynphony (variable-length) instruction sizes -- computed from
+        the exact same opcode-to-size mapping pad_fixed_width/encode_width
+        use (register form: 3 bytes for most ALU/load/store ops, 2 bytes
+        for the single-operand I/O opcodes; immediate form: +1 byte for
+        the U16 immediate), never a separate invented table. This mirrors
+        _encode_insn's own branching (register-operand try/except
+        ValueError pattern) exactly, purely to determine operand FORM
+        (register vs. immediate) -- it never resolves a symbol or records
+        a relocation, unlike _encode_insn, so it is safe to call during
+        pass 1 before labels are known and before pass 2 does the real,
+        reloc-recording encode.
+        """
+        if mnem == "mov":
+            _, s = operands
+            return len(isa.mov(Register.ZR, Register.ZR, not self._is_register(s)))
+        alu_names = {"add", "sub", "and", "or", "xor", "lsl", "lsr", "asr", "nor", "nand"}
+        if mnem in alu_names or mnem == "cmp":
+            b = operands[-1]
+            return len(isa.alu("add", Register.ZR, Register.ZR, Register.ZR, not self._is_register(b)))
+        if mnem == "jmp" or mnem in COND_JUMP:
+            (t,) = operands
+            return len(isa.jump("jmp", Register.ZR, not self._is_register(t)))
+        if mnem in ("store_32", "store_16", "store_8", "load_32", "load_16", "load_8"):
+            return len(isa.store(4, Register.ZR, Register.ZR))
+        if mnem == "push":
+            return len(isa.push(Register.SP))
+        if mnem == "pop":
+            return len(isa.pop(Register.SP))
+        if mnem == "nop":
+            return len(isa.mov(Register.ZR, Register.ZR))
+        if mnem == "input" or mnem == "keyboard" or mnem in ("time_0", "time_1") or mnem == "counter":
+            return 2
+        if mnem == "output":
+            (v,) = operands
+            return len(isa.output(Register.ZR, False)) if self._is_register(v) else len(isa.output(0, True))
+        if mnem == "screen":
+            _, value = operands
+            return len(isa.screen(0, Register.ZR, False)) if self._is_register(value) else len(isa.screen(0, 0, True))
+        if mnem == "link_return":
+            return len(isa.link_return())
+        if mnem == "link_call":
+            (t,) = operands
+            if self._is_register(t):
+                tr = parse_register_operand(t)
+                return len(isa.link_call(tr, return_offset=9))
+            # Symbol/label target: counter + add-immediate + jmp-immediate
+            # (matches _encode_insn's own symbol-target branch exactly).
+            return len(isa.counter(Register.R13)) + \
+                   len(isa.alu("add", Register.R13, Register.R13, 12, True)) + \
+                   len(isa.jump("jmp", 0, True))
+        if mnem == "la":
+            return len(isa.constant(Register.R1, 0))  # always 12 bytes unpadded too
+        raise ValueError(f"unsupported Symphony GCC mnemonic for Dynphony sizing: {mnem} {operands}")
 
     # ---- instruction encoding -------------------------------------------
 
@@ -418,13 +504,13 @@ class Assembler:
             dr = parse_register_operand(d)
             try:
                 sr = parse_register_operand(s)
-                return pad_fixed_width(isa.mov(dr, sr))
+                return self._enc(isa.mov(dr, sr))
             except ValueError:
                 imm = parse_int_or_symbol(s)
                 if isinstance(imm, int):
                     if imm < 0:
                         imm &= 0xFFFF
-                    return pad_fixed_width(isa.mov(dr, imm, True))
+                    return self._enc(isa.mov(dr, imm, True))
                 raise ValueError(f"mov with unresolved symbol operand not supported: {s}")
 
         alu_names = {"add", "sub", "and", "or", "xor", "lsl", "lsr", "asr", "nor", "nand"}
@@ -434,61 +520,61 @@ class Assembler:
             ar = parse_register_operand(a)
             try:
                 br = parse_register_operand(b)
-                return pad_fixed_width(isa.alu(mnem, dr, ar, br, False))
+                return self._enc(isa.alu(mnem, dr, ar, br, False))
             except ValueError:
                 imm = parse_int_or_symbol(b)
                 if not isinstance(imm, int):
                     raise ValueError(f"ALU immediate operand must be a literal: {b}")
                 if imm < 0:
                     imm &= 0xFFFF
-                return pad_fixed_width(isa.alu(mnem, dr, ar, imm, True))
+                return self._enc(isa.alu(mnem, dr, ar, imm, True))
 
         if mnem == "cmp":
             a, b = operands
             ar = parse_register_operand(a)
             try:
                 br = parse_register_operand(b)
-                return pad_fixed_width(isa.alu("cmp", Register.FLAGS, ar, br, False))
+                return self._enc(isa.alu("cmp", Register.FLAGS, ar, br, False))
             except ValueError:
                 imm = parse_int_or_symbol(b)
                 if imm < 0:
                     imm &= 0xFFFF
-                return pad_fixed_width(isa.alu("cmp", Register.FLAGS, ar, imm, True))
+                return self._enc(isa.alu("cmp", Register.FLAGS, ar, imm, True))
 
         if mnem == "jmp" or mnem in COND_JUMP:
             (t,) = operands
             name = "jmp" if mnem == "jmp" else COND_JUMP[mnem]
             try:
                 tr = parse_register_operand(t)
-                return pad_fixed_width(isa.jump(name, tr))
+                return self._enc(isa.jump(name, tr))
             except ValueError:
                 val = self._resolve_or_reloc(t, section, offset, "jump_u16")
-                return pad_fixed_width(isa.jump(name, val & 0xFFFF, True))
+                return self._enc(isa.jump(name, val & 0xFFFF, True))
 
         if mnem in ("store_32", "store_16", "store_8"):
             size = {"store_32": 4, "store_16": 2, "store_8": 1}[mnem]
             mem, val = operands
             addr_reg = parse_mem_operand(mem)
             val_reg = parse_register_operand(val)
-            return pad_fixed_width(isa.store(size, addr_reg, val_reg))
+            return self._enc(isa.store(size, addr_reg, val_reg))
 
         if mnem in ("load_32", "load_16", "load_8"):
             size = {"load_32": 4, "load_16": 2, "load_8": 1}[mnem]
             dst, mem = operands
             dst_reg = parse_register_operand(dst)
             addr_reg = parse_mem_operand(mem)
-            return pad_fixed_width(isa.load(size, dst_reg, addr_reg))
+            return self._enc(isa.load(size, dst_reg, addr_reg))
 
         if mnem == "push":
             (r,) = operands
-            return pad_fixed_width(isa.push(parse_register_operand(r)))
+            return self._enc(isa.push(parse_register_operand(r)))
 
         if mnem == "pop":
             (r,) = operands
-            return pad_fixed_width(isa.pop(parse_register_operand(r)))
+            return self._enc(isa.pop(parse_register_operand(r)))
 
         if mnem == "nop":
-            return pad_fixed_width(isa.mov(Register.ZR, Register.ZR))
+            return self._enc(isa.mov(Register.ZR, Register.ZR))
 
         # Raw I/O opcodes (docs/isa.txt): no .md pattern exists for these
         # (GCC has no generic notion of "read a keypress" or "write a
@@ -498,70 +584,84 @@ class Assembler:
         # and this assembler recognizes the mnemonics directly.
         if mnem == "input":
             (d,) = operands
-            return pad_fixed_width(isa.input_(parse_register_operand(d)))
+            return self._enc(isa.input_(parse_register_operand(d)))
 
         if mnem == "output":
             (v,) = operands
             try:
                 vr = parse_register_operand(v)
-                return pad_fixed_width(isa.output(vr, False))
+                return self._enc(isa.output(vr, False))
             except ValueError:
                 imm = parse_int_or_symbol(v)
                 if not isinstance(imm, int):
                     raise ValueError(f"output immediate operand must be a literal: {v}")
                 if imm < 0:
                     imm &= 0xFFFF
-                return pad_fixed_width(isa.output(imm, True))
+                return self._enc(isa.output(imm, True))
 
         if mnem == "keyboard":
             (d,) = operands
-            return pad_fixed_width(isa.keyboard(parse_register_operand(d)))
+            return self._enc(isa.keyboard(parse_register_operand(d)))
 
         if mnem in ("time_0", "time_1"):
             (d,) = operands
             part = 0 if mnem == "time_0" else 1
-            return pad_fixed_width(isa.time(part, parse_register_operand(d)))
+            return self._enc(isa.time(part, parse_register_operand(d)))
 
         if mnem == "screen":
             setting, value = operands
             sr = parse_register_operand(setting)
             try:
                 vr = parse_register_operand(value)
-                return pad_fixed_width(isa.screen(sr, vr, False))
+                return self._enc(isa.screen(sr, vr, False))
             except ValueError:
                 imm = parse_int_or_symbol(value)
                 if not isinstance(imm, int):
                     raise ValueError(f"screen immediate operand must be a literal: {value}")
                 if imm < 0:
                     imm &= 0xFFFF
-                return pad_fixed_width(isa.screen(sr, imm, True))
+                return self._enc(isa.screen(sr, imm, True))
 
         if mnem == "counter":
             (d,) = operands
-            return pad_fixed_width(isa.counter(parse_register_operand(d)))
+            return self._enc(isa.counter(parse_register_operand(d)))
 
         if mnem == "link_return":
-            return pad_fixed_width(isa.link_return())
+            return self._enc(isa.link_return())
 
         if mnem == "link_call":
             (t,) = operands
+            # return_offset must equal the ACTUAL remaining byte length of
+            # this link_call sequence's own jmp sub-instruction (the last
+            # sub-instruction, whose address r13 is set to point past) --
+            # 12 for Symphony (every sub-instruction padded to a 4-byte
+            # slot) but only 9/10 for Dynphony (real unpadded lengths:
+            # counter=2 + add-immediate=4 + jmp-register=3, or
+            # jmp-immediate=4), matching symphony/targets/symphony/
+            # assembler.py's own Assembler._call_bytes
+            # (`return_offset=12 if fixed_instruction_width else None`,
+            # where isa.link_call's own default is 9/10 for the None case).
+            # Hardcoding 12 unconditionally here (the pre-Dynphony-support
+            # bug) computed a return address 2-3 bytes past the real next
+            # instruction in Dynphony mode, corrupting control flow on
+            # every non-leaf call as soon as link_return jumped back.
             try:
                 tr = parse_register_operand(t)
-                return pad_fixed_width(isa.link_call(tr, return_offset=12))
+                offset_val = 12 if self.fixed_width else None
+                return self._enc(isa.link_call(tr, return_offset=offset_val))
             except ValueError:
-                # Symbol/label target: counter + add-immediate + jmp-immediate,
-                # matching symphony/targets/symphony/assembler.py's own
-                # fixed_instruction_width return_offset=12. The jmp's target
-                # is a relocation resolved at link time (jump_u16 kind: the
-                # linker will need the symbol to land in U16 range, or we'd
-                # need a materialized-address call form -- see note in
-                # symphony_ld.py about this known limitation).
-                counter_bytes = pad_fixed_width(isa.counter(Register.R13))
-                add_bytes = pad_fixed_width(
-                    isa.alu("add", Register.R13, Register.R13, 12, True))
+                # Symbol/label target: counter + add-immediate + jmp-immediate.
+                # The jmp's target is a relocation resolved at link time
+                # (jump_u16 kind: the linker will need the symbol to land in
+                # U16 range, or we'd need a materialized-address call form --
+                # see note in symphony_ld.py about this known limitation).
+                return_offset = 12 if self.fixed_width else 10
+                counter_bytes = self._enc(isa.counter(Register.R13))
+                add_bytes = self._enc(
+                    isa.alu("add", Register.R13, Register.R13, return_offset, True))
                 jmp_offset = offset + len(counter_bytes) + len(add_bytes)
                 val = self._resolve_or_reloc(t, section, jmp_offset, "jump_u16")
-                jmp_bytes = pad_fixed_width(isa.jump("jmp", val & 0xFFFF, True))
+                jmp_bytes = self._enc(isa.jump("jmp", val & 0xFFFF, True))
                 return counter_bytes + add_bytes + jmp_bytes
 
         if mnem == "la":
@@ -574,14 +674,14 @@ class Assembler:
             # rewrites it in place once the symbol's address is known
             # (see symphony_ld.py's "abs32_la" reloc handling).
             self.relocs.append((section, offset, s, 0, "abs32_la", int(dr)))
-            return pad_fixed_width(isa.constant(dr, 0))
+            return self._enc(isa.constant(dr, 0))
 
         raise ValueError(f"unsupported Symphony GCC mnemonic: {mnem} {operands}")
 
     # ---- object emission -------------------------------------------
 
     def to_object(self):
-        obj = ObjectFile(unit_name=self.unit_name)
+        obj = ObjectFile(unit_name=self.unit_name, fixed_width=self.fixed_width)
         obj.text = bytes(self.sections["text"])
         obj.data = bytes(self.sections["data"])
         bss_total = self.sections["bss_size"]
@@ -609,10 +709,10 @@ class Assembler:
         return obj
 
 
-def assemble_file(path):
+def assemble_file(path, fixed_width=True):
     text = Path(path).read_text()
     unit_name = Path(path).stem
-    asm = Assembler(unit_name)
+    asm = Assembler(unit_name, fixed_width=fixed_width)
     asm.assemble(text)
     return asm.to_object()
 
@@ -620,15 +720,24 @@ def assemble_file(path):
 def main(argv):
     # GNU-as-compatible enough calling convention for GCC's own driver:
     # `as -o OUT.o IN.s` (possibly with other flags GCC passes that we
-    # can safely ignore, e.g. --traditional-format).
+    # can safely ignore, e.g. --traditional-format). `-mdynphony` is the
+    # one flag we DO act on: symphony.h's ASM_SPEC forwards GCC's own
+    # -mdynphony straight through here, selecting the variable-length
+    # Dynphony encoding instead of the default Symphony fixed-width one
+    # (see encode_width()/_insn_size_dynphony above).
     out_path = None
     in_path = None
+    fixed_width = True
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "-o":
             out_path = argv[i + 1]
             i += 2
+            continue
+        if a == "-mdynphony":
+            fixed_width = False
+            i += 1
             continue
         if a.startswith("-"):
             i += 1
@@ -638,7 +747,7 @@ def main(argv):
     if in_path is None or out_path is None:
         print("usage: symphony_as.py [-o OUT.o] IN.s", file=sys.stderr)
         return 1
-    obj = assemble_file(in_path)
+    obj = assemble_file(in_path, fixed_width=fixed_width)
     obj.save(out_path)
     return 0
 

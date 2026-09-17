@@ -51,6 +51,16 @@ def pad_fixed_width(data):
     return bytes(out)
 
 
+def encode_width(data, fixed_width):
+    """Same opcode-to-size mapping as symphony_as.py's encode_width -- pad
+    to 4 bytes per sub-instruction for Symphony, or emit raw variable-length
+    bytes for Dynphony. Used by _apply_reloc's abs32_la case, which
+    re-encodes isa.constant() in place at link time and must produce
+    exactly as many bytes as the assembler originally reserved for the
+    placeholder it is overwriting."""
+    return pad_fixed_width(data) if fixed_width else bytes(data)
+
+
 class Linker:
     def __init__(self, load_address=0):
         self.load_address = load_address
@@ -100,7 +110,28 @@ class Linker:
             out |= obj.undefined
         return out
 
+    def _check_consistent_width(self):
+        """All linked objects must share the same Symphony-vs-Dynphony
+        encoding -- symphony_as.py records each object's mode (see
+        ObjectFile.fixed_width) from whether -mdynphony was passed when it
+        was assembled. Mixing the two would silently misinterpret byte
+        boundaries (Symphony expects every sub-instruction padded to a
+        4-byte slot; Dynphony packs them back-to-back), so this is checked
+        explicitly rather than left to manifest as a mysterious runtime
+        crash. Returns the single shared mode."""
+        widths = {obj.unit_name: obj.fixed_width for obj in self.objects}
+        modes = set(widths.values())
+        if len(modes) > 1:
+            symphony_objs = sorted(n for n, w in widths.items() if w)
+            dynphony_objs = sorted(n for n, w in widths.items() if not w)
+            raise ValueError(
+                "cannot link a mix of Symphony (fixed-width) and Dynphony "
+                "(variable-length) objects in one image -- Symphony: "
+                f"{symphony_objs}, Dynphony: {dynphony_objs}")
+        return modes.pop() if modes else True
+
     def link(self, entry_symbol=None):
+        fixed_width = self._check_consistent_width()
         # Lay out sections: all .text first, then .data, then .bss.
         text_base = {}
         data_base = {}
@@ -183,7 +214,7 @@ class Linker:
                 target = symtab[lookup] + reloc.addend
                 site = base[reloc.section] + reloc.offset
                 self._apply_reloc(image, site, target, reloc.kind, obj.unit_name,
-                                   reloc.symbol, reloc.reg)
+                                   reloc.symbol, reloc.reg, fixed_width)
 
         entry_addr = None
         if entry_symbol is not None:
@@ -193,7 +224,7 @@ class Linker:
         return bytes(image), symtab, entry_addr
 
     @staticmethod
-    def _apply_reloc(image, site, target, kind, unit_name, symbol, reg=0):
+    def _apply_reloc(image, site, target, kind, unit_name, symbol, reg=0, fixed_width=True):
         if kind == "jump_u16":
             if not (0 <= target <= 0xFFFF):
                 raise ValueError(
@@ -202,6 +233,12 @@ class Linker:
                     "a materialized-address call sequence is needed for "
                     "programs whose code exceeds 64KiB (not yet implemented "
                     "in symphony_ld.py; fine for milestone-4-scale tests)")
+            # The U16 immediate always occupies the last 2 bytes of the
+            # 4-byte immediate-jump encoding (isa.jump(..., immediate=True)
+            # is [opcode|0x10, 15] + u16(target), 4 bytes total) whether or
+            # not that 4-byte form itself gets padded further -- it never
+            # does, since it's already exactly 4 bytes raw. Same byte
+            # offset in both Symphony and Dynphony, no mode branch needed.
             image[site + 2:site + 4] = target.to_bytes(2, "big")
             return
         if kind == "abs32_la":
@@ -210,8 +247,12 @@ class Linker:
             # known target address -- isa.constant() always emits exactly
             # 3 sub-instructions regardless of value, so this is a
             # byte-for-byte drop-in replacement for the placeholder
-            # sequence the assembler emitted at this site.
-            encoded = pad_fixed_width(isa.constant(Register(reg), target))
+            # sequence the assembler emitted at this site (padded to 12
+            # bytes for Symphony, unpadded variable length -- but always
+            # the same length isa.constant() itself produces -- for
+            # Dynphony, matching whichever mode the assembler used to size
+            # and reserve this site in the first place).
+            encoded = encode_width(isa.constant(Register(reg), target), fixed_width)
             image[site:site + len(encoded)] = encoded
             return
         if kind in ("data1", "data2", "data4"):

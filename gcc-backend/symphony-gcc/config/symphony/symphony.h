@@ -260,6 +260,18 @@ typedef struct symphony_args
    target). */
 #define PREFERRED_DEBUGGING_TYPE NO_DEBUG
 
+/* Forward -mdynphony straight through to `as` (symphony_as.py), the
+   standard GCC mechanism for a target flag that changes assembler
+   behavior but no codegen decision (see e.g. moxie's `%{mel:-EL}` for
+   the analogous case).  symphony_as.py records the resulting encoding
+   mode (Symphony fixed-width padding vs. Dynphony variable-length, see
+   symphony/targets/symphony/assembler.py's Assembler.emit for the
+   reference logic this mirrors) into each object file it produces, so
+   symphony_ld.py never needs its own separate flag -- it just reads the
+   mode off the objects being linked and fails loudly on a mismatch
+   instead of silently mixing encodings. */
+#define ASM_SPEC "%{mdynphony:-mdynphony}"
+
 /* --- Assembler output ---
 
    GCC never invokes a real `as`/`ld` for this target: the driver only

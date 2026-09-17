@@ -56,6 +56,13 @@ class ObjectFile:
     symbols: list = field(default_factory=list)
     relocs: list = field(default_factory=list)
     undefined: set = field(default_factory=set)
+    # True (default): Symphony fixed 4-byte-padded encoding. False: Dynphony
+    # variable-length encoding of the identical instruction set (see
+    # symphony/targets/symphony/assembler.py's Assembler.emit -- this
+    # mirrors target.fixed_instruction_width exactly). Objects assembled in
+    # different modes must never be linked together -- symphony_ld.py
+    # checks this explicitly rather than silently mixing encodings.
+    fixed_width: bool = True
 
     def to_dict(self):
         return {
@@ -74,6 +81,7 @@ class ObjectFile:
                 for r in self.relocs
             ],
             "undefined": sorted(self.undefined),
+            "fixed_width": self.fixed_width,
         }
 
     @classmethod
@@ -93,6 +101,9 @@ class ObjectFile:
             for r in d["relocs"]
         ]
         obj.undefined = set(d["undefined"])
+        # Default True for older object files saved before this field
+        # existed (all pre-existing objects were Symphony fixed-width).
+        obj.fixed_width = d.get("fixed_width", True)
         return obj
 
     def save(self, path):

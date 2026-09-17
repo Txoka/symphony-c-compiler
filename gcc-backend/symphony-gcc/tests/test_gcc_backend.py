@@ -669,3 +669,130 @@ compute:
         assert list(machine_o0.outputs) == list(machine_o2.outputs)
         # 3-disk Towers of Hanoi: 2*2^3-1 = 7 moves, 4 output() calls each.
         assert len(machine_o2.outputs) == 28
+
+
+# ---------------------------------------------------------------------
+# Dynphony (variable-length encoding) support in the custom assembler+
+# linker. Symphony (the default, exercised by every test above) pads
+# every sub-instruction to a fixed 4-byte slot; Dynphony is the identical
+# instruction set/RTL/ABI emitted back-to-back with no padding at all --
+# GCC's codegen is unchanged either way (-mdynphony only flips
+# symphony.h's ASM_SPEC, which forwards -mdynphony to `as`/symphony_as.py
+# so it knows which encoding to produce; see symphony.opt's comment).
+# libgcc.a and runtime/*.c are only ever built in Symphony mode today (a
+# real, current limitation -- see README.md), so these tests use
+# self-contained programs with no libgcc/runtime dependency.
+# ---------------------------------------------------------------------
+
+class TestDynphonyEncoding:
+    def test_dynphony_smaller_than_symphony(self, toolchain, tmp_path):
+        """Sanity check that -mdynphony actually produces the
+        variable-length encoding, not a no-op: the identical -O0
+        instruction sequence must assemble to fewer bytes than the
+        Symphony (fixed 4-byte-padded) encoding of the same source,
+        since Dynphony packs sub-instructions back-to-back with no
+        padding at all."""
+        src = "int add(int a, int b) { return a + b; }"
+        sym_obj = toolchain.compile_and_assemble(
+            src, tmp_path, name="dynphony_size_sym", optimize="-O0", dynphony=False
+        )
+        dyn_obj = toolchain.compile_and_assemble(
+            src, tmp_path, name="dynphony_size_dyn", optimize="-O0", dynphony=True
+        )
+        assert sym_obj.fixed_width is True
+        assert dyn_obj.fixed_width is False
+        assert len(dyn_obj.text) < len(sym_obj.text)
+
+    def test_dynphony_arithmetic_runs_correctly(self, toolchain, tmp_path):
+        """Assembles, links (no libgcc -- pure register/ALU code, no
+        multiply/divide), and RUNS a real GCC-compiled function in
+        Dynphony mode on symphony.emulator.Machine(symphony=False) --
+        confirms actual correct execution, not just that it assembles."""
+        src = "int add(int a, int b) { return a + b; }"
+        result, machine, symtab = toolchain.build_and_run(
+            src, tmp_path, name="dynphony_add", optimize="-O0", dynphony=True,
+            entry_symbol="add", with_runtime=False,
+        )
+        # add() reads its arguments from r1/r2 per the ABI -- set them
+        # directly and re-run rather than relying on build_and_run's
+        # zero-initialized registers, since add(0, 0) would trivially
+        # "pass" even with a broken calling convention.
+        machine.pc = symtab["add"]
+        machine.regs[14] = 0x800000
+        machine.regs[13] = 0xFFFFF0
+        machine.regs[1] = 17
+        machine.regs[2] = 25
+        result = machine.run(halt_address=0xFFFFF0, max_steps=2000)
+        assert machine.regs[1] == 42
+
+    def test_dynphony_link_call_and_global_and_loop(self, toolchain, tmp_path):
+        """Regression test for a real bug found and fixed while adding
+        Dynphony support to symphony_as.py: link_call's symbol-target
+        form hardcoded return_offset=12 (correct ONLY for Symphony, where
+        every link_call sub-instruction is padded to a 4-byte slot, so
+        the whole sequence is exactly 12 bytes). In Dynphony mode the
+        real unpadded sequence is only 10 bytes (counter=2 +
+        add-immediate=4 + jmp-immediate=4), so the old hardcoded 12
+        computed a return address 2 bytes past the real next
+        instruction -- link_return's `jmp r13` then jumped into the
+        middle of an unrelated instruction instead of back to the
+        caller, corrupting control flow on the very first non-leaf call.
+        Caught by actually running this exact program on the emulator
+        (traced live: execution jumped straight from the callee's
+        link_return into the CALLEE's own entry point again instead of
+        back to the caller, an infinite-recursion-shaped hang) --
+        not by inspection.
+
+        This program exercises link_call to a symbol (helper), `la`
+        (materialized address of a global), and a backward jmp loop
+        together -- the combination that most directly depends on
+        Dynphony's variable-length instruction sizes being computed
+        correctly and consistently between symphony_as.py's pass-1
+        sizing and its pass-2 encoding.
+        """
+        src = """
+        int g = 10;
+        int helper(int x) { return x + g; }
+        int compute(int a, int b) {
+            int s = 0;
+            for (int i = 0; i < b; i++) {
+                s = helper(s + a);
+            }
+            return s;
+        }
+        """
+        result, machine, symtab = toolchain.build_and_run(
+            src, tmp_path, name="dynphony_multi", optimize="-O0", dynphony=True,
+            entry_symbol="compute", with_runtime=False,
+        )
+        machine.pc = symtab["compute"]
+        machine.regs[14] = 0x800000
+        machine.regs[13] = 0xFFFFF0
+        machine.regs[1] = 3   # a
+        machine.regs[2] = 4   # b (loop count)
+        result = machine.run(halt_address=0xFFFFF0, max_steps=5000)
+        # s=0; 4 iterations of s = helper(s+a) = (s+a)+g(10):
+        # 3+10=13, 13+3+10=26, 26+3+10=39, 39+3+10=52
+        assert machine.regs[1] == 52
+
+    def test_dynphony_symphony_objects_cannot_be_mixed(self, toolchain, tmp_path):
+        """The linker must refuse to link a Symphony (fixed-width) object
+        together with a Dynphony (variable-length) one -- mixing them
+        would silently misinterpret byte boundaries (Symphony expects
+        every sub-instruction in its own padded 4-byte slot; Dynphony
+        packs them back-to-back), which would manifest as a confusing
+        emulator crash deep into execution rather than a clear build-time
+        error without this check."""
+        src = "int add(int a, int b) { return a + b; }"
+        sym_obj = toolchain.compile_and_assemble(
+            src, tmp_path, name="mix_sym", optimize="-O0", dynphony=False
+        )
+        dyn_obj = toolchain.compile_and_assemble(
+            src, tmp_path, name="mix_dyn", optimize="-O0", dynphony=True
+        )
+        from symphony_ld import Linker
+        linker = Linker()
+        linker.add_object(sym_obj)
+        linker.add_object(dyn_obj)
+        with pytest.raises(ValueError, match="Symphony.*Dynphony|Dynphony.*Symphony"):
+            linker.link()

@@ -97,8 +97,10 @@ class Toolchain:
             )
         return result.stderr  # warnings, if any
 
-    def assemble(self, asm_path, obj_path):
+    def assemble(self, asm_path, obj_path, dynphony=False):
         cmd = [sys.executable, str(self.as_py), str(asm_path), "-o", str(obj_path)]
+        if dynphony:
+            cmd.append("-mdynphony")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise CompileError(
@@ -107,19 +109,23 @@ class Toolchain:
             )
 
     def compile_and_assemble(self, c_source, tmp_path, name="unit",
-                              optimize="-O0", extra_flags=()):
+                              optimize="-O0", extra_flags=(), dynphony=False):
         """Compiles a C source string to an ObjectFile, via real xgcc + the
         real assembler (not a shortcut) -- tmp_path is a pytest `tmp_path`
-        fixture or any writable directory."""
+        fixture or any writable directory. `dynphony=True` passes -mdynphony
+        to both xgcc (so symphony.h's ASM_SPEC forwards it to `as`) and
+        directly to the assembler step, selecting the variable-length
+        Dynphony encoding instead of the default Symphony fixed-width one."""
         c_path = tmp_path / f"{name}.c"
         c_path.write_text(c_source)
         asm_path = tmp_path / f"{name}.s"
         obj_path = tmp_path / f"{name}.o"
-        self.compile_to_asm(c_path, asm_path, optimize=optimize, extra_flags=extra_flags)
-        self.assemble(asm_path, obj_path)
+        flags = (*extra_flags, "-mdynphony") if dynphony else extra_flags
+        self.compile_to_asm(c_path, asm_path, optimize=optimize, extra_flags=flags)
+        self.assemble(asm_path, obj_path, dynphony=dynphony)
         return ObjectFile.load(obj_path)
 
-    def assemble_asm_source(self, asm_source, tmp_path, name="unit"):
+    def assemble_asm_source(self, asm_source, tmp_path, name="unit", dynphony=False):
         """Assembles hand-written .s source directly (no xgcc step) -- for
         tests that need to construct a specific instruction/data layout the
         C frontend wouldn't reliably produce (e.g. the assembler
@@ -127,7 +133,7 @@ class Toolchain:
         asm_path = tmp_path / f"{name}.s"
         asm_path.write_text(asm_source)
         obj_path = tmp_path / f"{name}.o"
-        self.assemble(asm_path, obj_path)
+        self.assemble(asm_path, obj_path, dynphony=dynphony)
         return ObjectFile.load(obj_path)
 
     # ---- runtime library objects (cached across tests in a session) ---
@@ -162,16 +168,23 @@ class Toolchain:
 
     # ---- link + run -----------------------------------------------------
 
-    def link(self, objects, entry_symbol="main", load_address=0):
+    def link(self, objects, entry_symbol="main", load_address=0, with_libgcc=True):
         linker = Linker(load_address=load_address)
         for obj in objects:
             linker.add_object(obj)
-        linker.add_archive(str(self.libgcc))
+        if with_libgcc:
+            linker.add_archive(str(self.libgcc))
         return linker.link(entry_symbol=entry_symbol)
 
     def run_image(self, image, entry, *, stack_pointer=DEFAULT_STACK_POINTER,
-                   halt_address=DEFAULT_HALT_ADDRESS, max_steps=DEFAULT_MAX_STEPS):
-        machine = Machine(image, load_address=0, symphony=True)
+                   halt_address=DEFAULT_HALT_ADDRESS, max_steps=DEFAULT_MAX_STEPS,
+                   fixed_width=True):
+        # `symphony=` selects the emulator's byte-decoding mode: True reads
+        # every sub-instruction from a padded 4-byte slot (Symphony), False
+        # reads variable-length instructions back-to-back (Dynphony) -- must
+        # match whichever mode the image was actually assembled+linked in,
+        # or decoding desyncs immediately.
+        machine = Machine(image, load_address=0, symphony=fixed_width)
         machine.pc = entry
         machine.regs[14] = stack_pointer
         machine.regs[13] = halt_address
@@ -181,13 +194,15 @@ class Toolchain:
     def link_and_run(self, objects, *, entry_symbol="main", load_address=0,
                       stack_pointer=DEFAULT_STACK_POINTER,
                       halt_address=DEFAULT_HALT_ADDRESS,
-                      max_steps=DEFAULT_MAX_STEPS):
+                      max_steps=DEFAULT_MAX_STEPS, with_libgcc=True,
+                      fixed_width=True):
         image, symtab, entry = self.link(
-            objects, entry_symbol=entry_symbol, load_address=load_address
+            objects, entry_symbol=entry_symbol, load_address=load_address,
+            with_libgcc=with_libgcc,
         )
         result, machine = self.run_image(
             image, entry, stack_pointer=stack_pointer, halt_address=halt_address,
-            max_steps=max_steps,
+            max_steps=max_steps, fixed_width=fixed_width,
         )
         return result, machine, symtab
 
@@ -195,7 +210,7 @@ class Toolchain:
 
     def build_and_run(self, c_source, tmp_path, *, name="prog", optimize="-O0",
                        with_runtime=True, runtime_order=None,
-                       runtime_optimize="-O0", **run_kwargs):
+                       runtime_optimize="-O0", dynphony=False, **run_kwargs):
         """`with_runtime=False` only works for programs that do NOT define
         `main` (use `entry_symbol` for a differently-named entry point
         instead, e.g. via `run_kwargs`) -- GCC's expand_main_function
@@ -205,13 +220,23 @@ class Toolchain:
         linking a `main()`-defined program needs at least intrinsics.c's
         `atexit` (see its definition and comment) even if the test itself
         never touches I/O, heap, or printf.
+
+        `dynphony=True` builds the Dynphony (variable-length) encoding
+        instead of the default Symphony fixed-width one. libgcc.a and
+        runtime/*.c are only ever built in Symphony mode today (a real,
+        documented limitation -- see README.md), so `dynphony=True` forces
+        `with_runtime=False` and `with_libgcc=False`: a Dynphony test
+        program must be self-contained (no libgcc calls, no printf/malloc),
+        matching this codebase's real current Dynphony support surface.
         """
         objects = [self.compile_and_assemble(c_source, tmp_path, name=name,
-                                              optimize=optimize)]
-        if with_runtime:
+                                              optimize=optimize, dynphony=dynphony)]
+        if with_runtime and not dynphony:
             objects += self.full_runtime_objects(
                 tmp_path, optimize=runtime_optimize, order=runtime_order
             )
+        run_kwargs.setdefault("with_libgcc", not dynphony)
+        run_kwargs.setdefault("fixed_width", not dynphony)
         return self.link_and_run(objects, **run_kwargs)
 
 
