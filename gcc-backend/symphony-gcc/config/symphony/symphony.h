@@ -95,9 +95,74 @@
    non-leaf functions that need it save/restore it explicitly in the
    prologue/epilogue (see symphony_expand_prologue/epilogue), matching
    how symphony/targets/symphony/backend.py treats r13 as an ordinary
-   value that just happens to also serve as the call-return slot. */
+   value that just happens to also serve as the call-return slot.
+
+   r11 (HARD_FRAME_POINTER_REGNUM) MUST be fixed here.
+   symphony_frame_pointer_required() (symphony.cc) unconditionally
+   returns true -- this target never allows r11 to be reused as a
+   general register, matching the documented FIXED_REGISTERS contract
+   in GCC's own tm.texi ("the frame pointer, except on machines where
+   that can be used as a general register when no frame pointer is
+   needed"). An earlier version of this port left r11 UNFIXED, which
+   let IRA/LRA treat it as an ordinary GENERAL_REGS value eligible for
+   copy-propagation into pseudos -- e.g. ivopts/move-loop-invariants
+   hoisting a loop-invariant copy of r11 into a pseudo compared every
+   loop iteration. Since r11 is in fact permanently pinned to the
+   frame-pointer role and this target's REG_CLASS_CONTENTS gives LRA
+   no alternative register class to fall back to, LRA's equivalence/
+   reload-substitution loop for that pseudo could never converge,
+   hitting reload's "maximum number of generated reload insns per insn
+   achieved (90)" internal compiler error on perfectly ordinary user
+   code (no 64-bit arithmetic, no VLA, no recursion needed --
+   confirmed via a minimal reproducer: a fill loop + insertion-sort
+   loop + sum loop over a 16-byte char array at -O2, and gdb-traced
+   into lra_constraints at lra-constraints.cc:5392, where
+   original_insn was exactly "(set (reg N) (reg 11 r11))" and
+   subsequent retries kept minting fresh pseudo copies of r11 without
+   ever converging). Marking r11 fixed here stops GCC from ever
+   placing a general pseudo's value there or substituting it as an
+   equivalence target, removing that trigger.  Root-cause note for
+   whoever continues this investigation: fixing r11 measurably helps
+   (confirmed: the exact reproducer above, which never compiled at any
+   optimization level above -Os before this fix, now compiles and
+   runs correctly at -O2) but is NOT a complete fix for the "reload
+   insns" ICE class documented in this README's Known gaps section --
+   -O1 still ICEs on the same reproducer, and a second, independently
+   confirmed trigger (examples/towers_of_hanoi.c's move_pile, a plain
+   recursive function with no loops at all, passing highest_disk - 1
+   as an argument across its own recursive call) ICEs at every
+   optimization level including -Os both before AND after this fix.
+   Traced via gdb the same way: a spilled pseudo (register allocator
+   ran out of the only 4 callee-saved hard registers, r8-r10 and r12,
+   and had to spill one candidate to a stack slot) whose reload before
+   a subsequent use is re-emitted over and over
+   ("(set (reg N)(reg M))" with M incrementing every retry) without
+   ever being accepted as satisfying constraints board-wide. This is
+   LRA failing to converge on an ordinary register-pressure spill/
+   reload, not something r11-specific -- a distinct manifestation of
+   the same underlying "this target's flat, single-class register file
+   gives LRA very little room to maneuver once genuinely register-
+   starved" structural issue, but NOT solved by the r11 fix above and
+   NOT solved by a register-class-based fix tried and reverted during
+   this investigation (see the git history / prior comment on this
+   line for the attempt: reserving r12 as a dedicated address-reload
+   scratch class measurably REGRESSED this same reproducer at -O2,
+   because it reduces the callee-saved register pool from 4 to 3,
+   increasing spill pressure faster than it relieves address-reload
+   pressure -- a net loss, confirmed by A/B rebuilding and testing
+   both variants against the same reproducer set). Whoever picks this
+   up next should look at why LRA's per-insn retry loop
+   (lra_constraints's curr_insn/original_insn bookkeeping around
+   lra-constraints.cc:5375-5392) fails to terminate for a spilled
+   pseudo's reload specifically when it's read again after a
+   subsequent call, rather than assuming another register-class tweak
+   will fix it -- the evidence above suggests this needs a genuine
+   LRA-level or spill-strategy fix, not just a target-description
+   register-class rebalancing, since taking a register away to hand
+   LRA more "room to maneuver" this way made things worse, not
+   better. */
 #define FIXED_REGISTERS \
-  { 1,0,0,0,0,0,0,0, 0,0,0,0, 0,0,1,1 }
+  { 1,0,0,0,0,0,0,0, 0,0,0,1, 0,0,1,1 }
 
 /* 1 means the ABI allows an ordinary call to clobber this register
    (i.e. the caller must not assume it survives a call): r1-r7 and
