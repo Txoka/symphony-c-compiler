@@ -117,7 +117,24 @@ symphony_legitimize_address (rtx x, rtx, machine_mode)
 static bool
 symphony_frame_pointer_required (void)
 {
-  return cfun->calls_alloca || crtl->has_nonlocal_goto;
+  /* Always require a real, live hard frame pointer (r11), matching
+     moxie's approach (TARGET_FRAME_POINTER_REQUIRED hook_bool_void_true)
+     rather than moxie's original assumption that eliminating
+     FRAME_POINTER_REGNUM/ARG_POINTER_REGNUM references to
+     STACK_POINTER_REGNUM-relative ones (per ELIMINABLE_REGS in
+     symphony.h) happens automatically whenever this hook returns false.
+     It does not: GCC only actually performs that substitution when SP
+     is provably constant across the whole function AND nothing forces
+     frame_pointer_needed some other way, and in practice this target's
+     generated code kept using bare `r11` as a live base register
+     without this port's prologue ever initializing it, corrupting
+     unrelated data whenever r11 held stale contents from a callee (this
+     was caught by an emulator-level runtime miscompare during milestone
+     4's libgcc multiply/divide verification, not a build-time error).
+     Always requiring and always materializing the frame pointer sidesteps
+     this correctly rather than depending on elimination heuristics this
+     target's addressing modes don't actually support. */
+  return true;
 }
 
 HOST_WIDE_INT
@@ -152,6 +169,41 @@ symphony_expand_prologue (void)
       rtx r13 = gen_rtx_REG (SImode, R13_REGNUM);
       emit_insn (gen_movsi_push (r13));
     }
+  /* Save the CALLER's r11 (hard frame pointer) before clobbering it below.
+     r11 is classified callee-saved in CALL_USED_REGISTERS (symphony.h),
+     which tells GCC's generated code at every call site that r11 survives
+     a call unscathed -- callers rely on this and never re-load
+     frame-relative locals through it after a call. Because
+     symphony_expand_prologue/epilogue are fully custom (bypassing GCC's
+     normal generic callee-saved-register spill loop, which specifically
+     excludes the hard frame pointer on the assumption the port's own
+     prologue handles it), this push/pop is the ONLY thing that fulfills
+     that contract. Missing this corrupted every later frame-relative
+     access in a caller after any non-leaf callee returned -- caught by
+     milestone 4's emulator-level multiply/divide verification (compute()
+     calling __divsi3/__modsi3/__udivsi3/__umodsi3 in sequence, each of
+     which is itself non-leaf via __udivmodsi4 and so also establishes its
+     own frame pointer), not a build-time error. */
+  rtx hfp = gen_rtx_REG (SImode, HARD_FRAME_POINTER_REGNUM);
+  emit_insn (gen_movsi_push (hfp));
+  /* Materialize the hard frame pointer (r11) as sp *before* the frame is
+     allocated, i.e. r11 points at the TOP of this function's frame (just
+     below the saved r13/r11 slots), not the bottom. STARTING_FRAME_OFFSET
+     is left at its GCC default of 0 and FRAME_GROWS_DOWNWARD is set
+     (symphony.h), so GCC assigns every local a NEGATIVE offset from
+     FRAME_POINTER_REGNUM (r11), counting down from the frame pointer's
+     position. If r11 were instead set to the *bottom* of the frame (sp
+     after the `sub` below), those negative offsets would land below the
+     allocated frame entirely -- directly inside the red zone where a
+     callee's own prologue pushes, corrupting locals the moment any
+     non-leaf call happened. Caught by milestone 4's emulator-level
+     multiply/divide verification (compute()'s locals were clobbered by
+     __divsi3's own r13/r11 saves). With r11 == pre-allocation sp,
+     locals at r11-4, r11-8, ... correctly land inside [sp, r11), and
+     symphony_initial_elimination_offset's `size` offset (frame-pointer
+     to stack-pointer) is exactly right: r11 - size == post-allocation
+     sp. */
+  emit_insn (gen_movsi (hfp, stack_pointer_rtx));
   if (size)
     {
       /* addsi3's "I" constraint only accepts an UNSIGNED 16-bit
@@ -177,6 +229,12 @@ void
 symphony_expand_epilogue (void)
 {
   HOST_WIDE_INT size = get_frame_size () + crtl->outgoing_args_size;
+  rtx hfp = gen_rtx_REG (SImode, HARD_FRAME_POINTER_REGNUM);
+  /* Undo the frame allocation first (mirrors the prologue in reverse: sp
+     is currently at post-allocation position, i.e. r11 - size, per the
+     new top-of-frame r11 convention in symphony_expand_prologue; adding
+     size back brings sp up to exactly where the saved r11 was pushed,
+     regardless of frame size, so the following pop is always correct). */
   if (size)
     {
       if (IN_RANGE (size, 0, 65535))
@@ -188,6 +246,7 @@ symphony_expand_epilogue (void)
           emit_insn (gen_addsi3 (stack_pointer_rtx, stack_pointer_rtx, tmp));
         }
     }
+  emit_insn (gen_movsi_pop (hfp));
   if (!symphony_call_is_leaf ())
     {
       rtx r13 = gen_rtx_REG (SImode, R13_REGNUM);
@@ -354,5 +413,16 @@ symphony_output_cbranch (rtx *operands, bool inverted)
 #define TARGET_HARD_REGNO_MODE_OK symphony_hard_regno_mode_ok
 #undef TARGET_HARD_REGNO_NREGS
 #define TARGET_HARD_REGNO_NREGS symphony_hard_regno_nregs
+
+/* No ELF (no elfos.h), but named sections are still just plain-text
+   `.section NAME` pseudo-ops as far as this target's own assembler is
+   concerned -- no real ELF section-header/flags semantics needed, the
+   same reasoning mmix.h uses for the same non-ELF situation.  Without
+   this, TARGET_ASM_NAMED_SECTION defaults to default_no_named_section,
+   which is a hard gcc_unreachable() -- reached even for plain
+   function/data placement (e.g. -ffunction-sections, or just libgcc's
+   own build), not just an exotic corner case. */
+#undef TARGET_ASM_NAMED_SECTION
+#define TARGET_ASM_NAMED_SECTION default_elf_asm_named_section
 
 struct gcc_target targetm = TARGET_INITIALIZER;

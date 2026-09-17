@@ -180,18 +180,56 @@
   "load_32\t%0, [%1]"
   [(set_attr "length" "3")])
 
+;; Plain same-mode loads (the movhi/movqi expand's memory-source case, and
+;; whatever else GCC needs a bare HImode/QImode value for without also
+;; widening it to SImode -- e.g. libgcc2.c's __clz_tab[] byte lookups).
 (define_insn "*load_hi"
   [(set (match_operand:HI 0 "register_operand" "=r")
-        (zero_extend:HI (mem:HI (match_operand:SI 1 "register_operand" "r"))))]
+        (mem:HI (match_operand:SI 1 "register_operand" "r")))]
   ""
   "load_16\t%0, [%1]"
   [(set_attr "length" "3")])
 
 (define_insn "*load_qi"
   [(set (match_operand:QI 0 "register_operand" "=r")
-        (zero_extend:QI (mem:QI (match_operand:SI 1 "register_operand" "r"))))]
+        (mem:QI (match_operand:SI 1 "register_operand" "r")))]
   ""
   "load_8\t%0, [%1]"
+  [(set_attr "length" "3")])
+
+;; Zero-extending SImode loads: the ISA's load_16/load_8 already zero-fill
+;; the upper bits of the destination register (docs/isa.txt), so these are
+;; free -- no separate extension instruction needed, matching how
+;; load_16/load_8 are used for narrow-to-SI loads throughout normal
+;; (non-libgcc) codegen too.
+(define_insn "*zero_extendqisi2_mem"
+  [(set (match_operand:SI 0 "register_operand" "=r")
+        (zero_extend:SI (mem:QI (match_operand:SI 1 "register_operand" "r"))))]
+  ""
+  "load_8\t%0, [%1]"
+  [(set_attr "length" "3")])
+
+(define_insn "*zero_extendhisi2_mem"
+  [(set (match_operand:SI 0 "register_operand" "=r")
+        (zero_extend:SI (mem:HI (match_operand:SI 1 "register_operand" "r"))))]
+  ""
+  "load_16\t%0, [%1]"
+  [(set_attr "length" "3")])
+
+;; Zero-extending a value already in a register (no memory operand): the
+;; ISA has no dedicated extend instruction, so mask with an AND immediate.
+(define_insn "zero_extendqisi2"
+  [(set (match_operand:SI 0 "register_operand" "=r")
+        (zero_extend:SI (match_operand:QI 1 "register_operand" "r")))]
+  ""
+  "and\t%0, %1, 255"
+  [(set_attr "length" "3")])
+
+(define_insn "zero_extendhisi2"
+  [(set (match_operand:SI 0 "register_operand" "=r")
+        (zero_extend:SI (match_operand:HI 1 "register_operand" "r")))]
+  ""
+  "and\t%0, %1, 65535"
   [(set_attr "length" "3")])
 
 ;; -------------------------------------------------------------------

@@ -10,9 +10,6 @@
 ; GCC writes into the .s file header so the downstream assembler knows
 ; which encoding to use; it changes no codegen decision.
 
-HeaderInclude
-config/symphony/symphony-protos.h
-
 mdynphony
 Target Var(symphony_dynphony) Init(0)
 Generate assembly annotated for the Dynphony (variable-length) encoding instead of Symphony (fixed 4-byte) encoding.  Both share identical instruction selection; this only marks which downstream assembler encoding is intended.
