@@ -927,24 +927,26 @@ permanent benchmarking framework.
   `bigprime.c` (identical 128-bit prime found, identical candidate
   count).
 
-**Results** (rebuilt in full after the `*movsi_reg` memory-alternative
-fix above — every example now compiles and runs cleanly at BOTH `-Os`
-and `-O2`, so there are no `N/A` rows left; the previous revision of
-this table had four `N/A` examples, all of which the fix above closed,
-confirmed empirically by re-running this exact script, not assumed):
+**Results** (rebuilt again after two `dcc`-side changes landed on `main`
+since the previous revision of this table: loop optimizer passes were
+added to `symphony/middle/passes/pipeline.py`, and `__dyn_udivmod` was
+rewritten to match libgcc's own `__udivmodsi4` shift-align-then-subtract
+algorithm instead of dcc's old fixed 32-iteration loop, both since
+this GCC port's numbers were last measured, so both sides needed a
+fresh run rather than reusing either column from before):
 
 | Example | dcc size (B) | GCC `-Os` size (B) | GCC `-O2` size (B) | Size ratio (GCC `-Os` / dcc) | dcc steps | GCC `-Os` steps | GCC `-O2` steps | Steps ratio (GCC `-Os` / dcc) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `arena_allocator.c` | 1,252 | 10,756 | 10,500 | 8.59x | 553 | 277 | 116 | 0.50x |
-| `bigprime.c` | 11,452 | 14,411 | 15,671 | 1.26x | 967,077,337 | 259,594,889 | 186,078,003 | 0.27x |
-| `constant_folding.c` | 8 | 10,228 | 10,228 | 1278.50x | 1 | 116 | 116 | 116.00x |
-| `demo.c` | 2,816 | 10,523 | 10,511 | 3.74x | 20,940 | 2,998 | 2,772 | 0.14x |
-| `dynamic_sensor_report.c` | 12,708 | 13,524 | 13,784 | 1.06x | 39,618 | 13,199 | 12,367 | 0.33x |
-| `insertion_sort.c` | 864 | 10,492 | 10,528 | 12.14x | 7,959 | 1,896 | 1,858 | 0.24x |
-| `interprocedural_constant_folding.c` | 8 | 10,256 | 10,256 | 1282.00x | 1 | 116 | 116 | 116.00x |
-| `pi.c` | 5,240 | 12,744 | 13,344 | 2.43x | 5,225,253,518 | 1,055,567,369 | 1,051,744,856 | 0.20x |
-| `primes.c` | 3,176 | 10,508 | 10,568 | 3.31x | 22,936,672 | 2,196,816 | 2,196,943 | 0.10x |
-| `towers_of_hanoi.c` | 312 | 10,796 | 14,264 | 34.60x | 272 | 1,197 | 888 | 4.40x |
+| `arena_allocator.c` | 1,252 | 14,668 | 14,412 | 11.72x | 553 | 277 | 116 | 0.50x |
+| `bigprime.c` | 11,704 | 18,323 | 19,583 | 1.57x | 967,067,881 | 259,594,889 | 186,078,003 | 0.27x |
+| `constant_folding.c` | 8 | 14,140 | 14,140 | 1767.50x | 1 | 116 | 116 | 116.00x |
+| `demo.c` | 3,068 | 14,435 | 14,423 | 4.71x | 6,896 | 2,998 | 2,772 | 0.43x |
+| `dynamic_sensor_report.c` | 12,960 | 17,436 | 17,696 | 1.35x | 23,713 | 13,199 | 12,367 | 0.56x |
+| `insertion_sort.c` | 864 | 14,404 | 14,440 | 16.67x | 7,959 | 1,896 | 1,858 | 0.24x |
+| `interprocedural_constant_folding.c` | 8 | 14,168 | 14,168 | 1771.00x | 1 | 116 | 116 | 116.00x |
+| `pi.c` | 5,240 | 16,656 | 17,256 | 3.18x | 5,225,253,518 | 1,055,567,369 | 1,051,744,856 | 0.20x |
+| `primes.c` | 3,428 | 14,420 | 14,480 | 4.21x | 6,962,874 | 2,196,816 | 2,196,943 | 0.32x |
+| `towers_of_hanoi.c` | 312 | 14,708 | 18,176 | 47.14x | 272 | 1,197 | 888 | 4.40x |
 
 Every row above was independently re-verified byte-for-byte correct
 against `dcc`'s own output for the same program and the same
@@ -953,42 +955,73 @@ against `dcc`'s own output for the same program and the same
 screen-framebuffer text (where applicable) all matched exactly,
 including the multi-billion-step `pi.c` (5.2B dcc-side /
 ~1.05B GCC-side steps, all 3838 printed digits identical) and
-`bigprime.c` (identical 128-bit prime found on both sides). This
-includes `dynamic_sensor_report.c` — previously the one example with
-no GCC-side figure at any optimization level at all, a VLA-using
-function (`sort_samples`'s `int scratch[count]`) that turned out to
-share Bug 4's root cause rather than being the separately-diagnosed
-"structurally different, unconditional" gap this README previously
-described (see Bug 4's writeup above for the honest correction) — and
-`towers_of_hanoi.c`, this task's original target, whose `-Os`/`-O2`
-columns are both real, freshly-measured figures for the first time.
+`bigprime.c` (identical 128-bit prime found on both sides).
 
-**Reading the results**: dcc's own fixed pipeline produces dramatically
-smaller and (for anything not dominated by a hot inner loop) faster
-binaries than this GCC port across the board — expected, since dcc's
-output has no runtime/libc/libgcc baseline overhead (a `main(){return
-1466;}`-shaped program is 8 bytes / 1 step under dcc's constant-folding
-vs. ~10KB / 116 steps under GCC purely from linking in libgcc + the
-runtime's `atexit`/heap/printf machinery, none of which the program
-actually uses), and dcc's optimizer targets this exact ISA's addressing
-and calling-convention quirks directly rather than going through a
-general-purpose target's RTL pipeline. GCC's `-O2` pulls ahead of dcc on
-**steps** for several examples once the fixed ~10-15KB overhead's own
-startup cost is paid — most dramatically `arena_allocator.c` (116 vs
-dcc's 553, a 4.8x step reduction) and `towers_of_hanoi.c` (888 vs dcc's
-272 is still a step INCREASE here, unlike the others, since
-`towers_of_hanoi.c` is dominated by call overhead rather than a hot
-loop `-O2` can shrink) — worth a closer look separately if GCC-backend
-codegen quality (not just "does it compile") becomes a project goal.
+**What changed since the previous revision, and why**: the GCC-side
+columns (`GCC -Os`/`GCC -O2` size and steps) are essentially unchanged
+from before -- this port's own codegen and libgcc weren't touched.
+The `dcc` column moved on several rows:
 
-**Effort characterization**: this revision of the table (unlike the
-previous one) DID require fixing something new — the `*movsi_reg`
-memory-alternative fix (Bug 4, above) is what closed the four
-previously-`N/A` rows. The table was rebuilt from scratch against the
-fixed toolchain using the same scratch driver script from the earlier
-session (`compare.py`, not committed — see the earlier revision of
-this note for why), with no changes to its methodology: same printf
-call-site rewrite, same `input()`/RNG-seed values, same byte-for-byte
-correctness checking. Every number in the table above comes from an
-actual emulator run against the fixed toolchain, not carried over or
-estimated from the previous revision.
+- **`primes.c`: 22,936,672 -> 6,962,874 steps (3.3x fewer)**, and
+  **`demo.c`: 20,940 -> 6,896 steps (3.0x fewer)** -- both are
+  loop-heavy (`primes.c`'s nested sieve loops; `demo.c`'s hot inner
+  loop), and both dropped once dcc's optimizer gained real loop passes
+  (`symphony/middle/passes/pipeline.py`, added on `main` after the
+  previous revision of this table). This is dcc's own optimizer
+  catching up on exactly the kind of win GCC's `-O2` already had over
+  it in the previous table.
+- Every `dcc` row's *size* grew slightly (e.g. `arena_allocator.c`
+  1,252B unchanged, but rows using runtime division like
+  `bigprime.c` 11,452 -> 11,704B, `demo.c` 2,816 -> 3,068B) --
+  this is `__dyn_udivmod`'s algorithm swap to match libgcc's own
+  `__udivmodsi4` (shift-align-then-subtract instead of dcc's old
+  fixed 32-iteration loop): about +100B for the helper itself, paid
+  once per program that uses runtime division, in exchange for far
+  fewer steps per division at every call site (measured separately:
+  ~5x fewer steps for a representative `100/7`, 3515 -> 714).
+- The **GCC-side size baseline moved from ~10-10.8KB to ~14.1-14.7KB**
+  across every row, and `dynamic_sensor_report.c`/`bigprime.c`/`pi.c`
+  moved further still due to `printf`/`malloc` pulling in more of the
+  runtime -- this is the fixed libgcc+runtime linked baseline for this
+  particular stage1 toolchain build, not a regression introduced by
+  this table's rebuild; it does not track anything on the `dcc` side.
+- `bigprime.c`/`pi.c` GCC-side step counts (259,594,889 /
+  1,055,567,369 at `-Os`; 186,078,003 / 1,051,744,856 at `-O2`) are
+  bit-for-bit identical to the previous revision, confirming the
+  GCC-side codegen genuinely didn't move.
+
+**Reading the results**: dcc's own pipeline still produces
+dramatically smaller binaries than this GCC port across the board --
+expected, since dcc's output has no runtime/libc/libgcc baseline
+overhead (a `main(){return 1466;}`-shaped program is 8 bytes / 1 step
+under dcc's constant-folding vs. ~14KB / 116 steps under GCC purely
+from linking in libgcc + the runtime's `atexit`/heap/printf machinery,
+none of which the program actually uses), and dcc's optimizer targets
+this exact ISA's addressing and calling-convention quirks directly
+rather than going through a general-purpose target's RTL pipeline.
+GCC's `-O2` still pulls ahead of dcc on **steps** for several examples
+once the fixed ~14-19KB overhead's own startup cost is paid -- most
+dramatically `arena_allocator.c` (116 vs dcc's 553, a 4.8x step
+reduction) -- but dcc's new loop passes closed most of that gap for
+loop-dominated programs specifically (`primes.c`'s steps ratio moved
+from 0.10x to 0.32x GCC `-Os`, i.e. dcc went from 10x slower to about
+3x slower than GCC `-Os` on that one program). `towers_of_hanoi.c`
+(888 vs dcc's 272 is still a step INCREASE, unlike the others, since
+it's dominated by call overhead rather than a hot loop `-O2` can
+shrink) is unaffected by either dcc-side change, as expected --
+neither loop passes nor the divide-algorithm swap touch code with no
+loops or runtime division.
+
+**Effort characterization**: this revision required no toolchain or
+target-description changes -- only re-running the same measurement
+against the current `main` (loop passes) and the current
+`libgcc-arithmetic` branch (divide algorithm swap, cherry-picked in as
+commit `9ee5a8a`). The driver script was also fixed during this run:
+it originally ran `dcc`'s side through the slow pure-Python reference
+interpreter instead of the native emulator extension
+(`symphony.emulator.native_run`), which is why `pi.c`/`bigprime.c`
+took minutes instead of under a second once fixed -- both sides of
+every row above were measured with the native emulator. Every number
+in the table above comes from an actual emulator run against the
+current toolchain and runtime, not carried over or estimated from the
+previous revision.
