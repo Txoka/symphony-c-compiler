@@ -274,11 +274,12 @@ typedef struct symphony_args
 
 /* --- Assembler output ---
 
-   GCC never invokes a real `as`/`ld` for this target: the driver only
-   ever runs it as `-S` (see symphony-gcc's SPECs below), and the
-   resulting .s is consumed by gcc-backend/tools/gcc_assembler.py, a
-   from-scratch assembler+linker.  Syntax below is chosen for that
-   tool's convenience, not for GNU as compatibility. */
+   GCC never invokes a real GNU `as`/`ld` for this target: the `gcc/as`
+   inside a build tree is a wrapper script shelling out to this project's
+   own from-scratch assembler, tools/symphony_as.py (see the README's
+   "gcc/as gotcha"), and tools/symphony_ld.py is the matching linker.
+   Syntax below is chosen for that tool's convenience, not for GNU as
+   compatibility. */
 
 #define ASM_COMMENT_START "#"
 #define ASM_APP_ON ""
@@ -300,9 +301,10 @@ typedef struct symphony_args
   asm_fprintf ((FILE), "%U%s", (NAME))
 
 /* Internal (compiler-generated, non-global) label names: ".<PREFIX><NUM>",
-   e.g. ".L7" -- matches the local-label convention gcc_assembler.py
-   already normalizes/namespaces (see namespace_local_labels() there),
-   so compiler-generated labels from multiple translation units never
+   e.g. ".L7" -- matches the local-label convention tools/symphony_as.py
+   already normalizes/namespaces (each translation unit's local labels are
+   kept in its own object-file namespace), so compiler-generated labels
+   from multiple translation units never
    collide once concatenated. No '*' escape (a GNU-as-specific "don't
    prefix this symbol" marker) is needed since this target's assembler
    is entirely custom and never applies such a prefix in the first

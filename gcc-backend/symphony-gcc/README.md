@@ -3,16 +3,19 @@
 This is a **real** GCC backend for the Symphony/Dynphony ISA (`docs/isa.txt`) —
 not the moxie-hijack comparison backend at `gcc-backend/dynphony/`
 (branch `gcc-comparison-backend`). GCC emits genuine target assembly for
-`symphony-elf` from its own `.md`/`.cc`/`.h` port; there is no ELF, no `as`,
-no `ld` — the resulting `.s` is meant to be consumed by a custom
-assembler+linker (extending `gcc-backend/tools/gcc_assembler.py`, not yet
-built — see status below) that produces a flat binary runnable on
+`symphony-elf` from its own `.md`/`.cc`/`.h` port; there is no ELF, no
+real `as`, no `ld` — the resulting `.s` is consumed by this project's own
+from-scratch assembler+linker (`tools/symphony_as.py`/`symphony_ld.py`,
+DONE — see "Status" below) that produces a flat binary runnable on
 `symphony/emulator`, the same shape dyncc's own backend already produces.
 
-Triple: `symphony-elf`. Dynphony (the variable-length encoding of the same
-ISA) is meant to be exposed later via a `-mdynphony` target option
-(`symphony.opt`'s `mdynphony`, currently unused/unimplemented in codegen),
-not a second triple or multilib.
+Triple: `symphony-elf`. Dynphony (the variable-length encoding of the
+identical instruction set/RTL/ABI) is exposed via the `-mdynphony` target
+option (`symphony.opt`'s `mdynphony`) rather than a second triple or
+multilib — GCC's own codegen decisions never change between the two, only
+the final byte encoding the assembler+linker produce (see "Dynphony
+support" below for exactly what does and doesn't work in this mode
+today).
 
 ## Why no ELF/gas/ld
 
@@ -350,11 +353,53 @@ links+runs a C program in one call) if you're adding more tests.
   optimization.
 - **A new `la dest, symbol` pseudo-mnemonic** (`symphony_output_move` in
   `symphony.cc`, for `SYMBOL_REF`/`LABEL_REF` constants) that does not
-  exist in `docs/isa.txt` today — invented here as a placeholder the
-  future custom assembler (milestone 5) must specifically recognize and
-  expand into whatever real load-address sequence the ISA/assembler
-  ultimately supports. This is a concrete open contract between this
-  target's codegen and the not-yet-written assembler/linker.
+  exist in `docs/isa.txt` today — invented here as a placeholder that
+  `tools/symphony_as.py` specifically recognizes and expands into a real
+  materialized-address sequence (`isa.constant()`'s 3-sub-instruction
+  hi16/lsl/or-lo16 form), resolved by `tools/symphony_ld.py`'s
+  `abs32_la` relocation once the symbol's address is known at link time.
+
+## Dynphony support
+
+`-mdynphony` selects Dynphony's variable-length encoding of the
+identical instruction set/RTL/ABI Symphony uses — GCC's own codegen
+(instruction selection, register allocation, everything in `symphony.md`/
+`symphony.cc`) makes exactly the same decisions either way; only the
+final byte encoding differs, and that is handled entirely by
+`tools/symphony_as.py`/`symphony_ld.py` outside GCC itself, mirroring how
+dyncc's own backend already supports both encodings
+(`symphony/targets/symphony/assembler.py`'s `Assembler.emit`, gated on
+`target.fixed_instruction_width`).
+
+**How the flag flows through the toolchain**: `symphony.h`'s `ASM_SPEC`
+(`"%{mdynphony:-mdynphony}"`) forwards GCC's own `-mdynphony` straight
+through to `as` (`symphony_as.py`), the standard GCC mechanism for a
+target flag that changes assembler behavior but no codegen decision (the
+same pattern moxie uses for its own `-mel`/`-meb` endianness flag).
+`symphony_as.py` records the resulting mode on every object file it
+produces (`ObjectFile.fixed_width`); `symphony_ld.py` reads that flag
+back off the objects being linked, refuses to link a mix of Symphony and
+Dynphony objects in one image (a clear `ValueError`, not a silent
+mis-decode), and uses it to patch relocations (`abs32_la`, and
+`link_call`'s return-offset math — see bug 11 below) correctly for
+whichever encoding was actually used.
+
+**What works today, verified by actually running GCC-compiled Dynphony
+code on the emulator** (`Machine(..., symphony=False)`, the variable-
+length decode path), not just by assembling it: a self-contained
+arithmetic function, and a program exercising `link_call` to a symbol,
+`la` (a materialized global address), and a backward-jump loop together
+— see `test_gcc_backend.py`'s `TestDynphonyEncoding` class. The
+variable-length encoding is measurably smaller than Symphony's for the
+same instructions, as expected (a trivial `add()` at `-O0`: 71 bytes
+Dynphony vs. 84 bytes Symphony).
+
+**What doesn't work yet**: `libgcc.a` and `runtime/*.c` are only ever
+built in Symphony mode, so a Dynphony program needing multiply/divide
+(libgcc) or malloc/printf/etc. (the runtime library) cannot currently be
+linked — only self-contained Dynphony programs work end to end today.
+See "Known gaps" below for what a Dynphony `libgcc.a`/runtime build
+would need.
 
 ## Status (update as work proceeds)
 
@@ -420,303 +465,373 @@ links+runs a C program in one call) if you're adding more tests.
   also fixed). Verified: `malloc(16)`+`free()`+`printf1()` in one
   function prints the correct value end to end.
   A third real bug (`printf3()` hanging when preceded by two or more
-  `malloc()` calls) was found and fixed since — see "Fixed bugs found
-  after milestone 6" below; it turned out to be a heap-layout/linker
+  `malloc()` calls) was found and fixed since — see "Bugs found and
+  fixed" below (bug 5); it turned out to be a heap-layout/linker
   bug, not a printf3 bug at all.
 - **Milestone 7** (this README) — DONE (this update).
 
-### Fixed bugs found after milestone 6
+## Bugs found and fixed
 
-- **`__dyn_heap_anchor` BSS-ordering bug (linker), previously manifesting
-  as "`printf3()` hangs after 2+ `malloc()` calls".** `runtime/heap.c`'s
-  `malloc()` used to compute "start of heap" as the address right after
-  its own `__dyn_heap_anchor[7]` BSS array, relying on that array being
-  the LAST symbol in the whole linked image — true only by accident of
-  link/object order, since `symphony_ld.py`'s `Linker.link()` lays out
-  each object's BSS in whatever order objects were added, with no
-  guarantee `heap.o`'s BSS comes last. As soon as another object's BSS
-  symbol landed after it (normal in any real multi-file link), the
-  first `malloc()`'s returned block silently overlapped that neighbor's
-  storage instead of free memory, and the block's own field-initializing
-  stores corrupted it — traced to `__dyn_heap_end` itself in the
-  reproducer, whose corrupted value was later read and used as a jump
-  target, landing execution in garbage memory several calls downstream
-  (hence looking printf3/5-argument-specific: reproducing needs 2+
-  `malloc()` calls to grow the pointer into a collision, and enough
-  call depth afterward for the corruption to surface as a visible
-  crash). Root-caused via emulator single-stepping down to the exact
-  corrupting store and its target address, not by inspection. Fixed by
-  having `Linker.link()` synthesize `__dyn_heap_anchor` itself, as a
-  zero-size marker equal to the address right after ALL objects'
-  sections are laid out (computed last, so it's correct regardless of
-  link order) — `heap.c` now just has `extern unsigned char
-  __dyn_heap_anchor[];`, no real BSS storage, and the linker raises a
-  clear error if any input object still defines it as a real symbol
-  (stale pre-fix `.o` files). Verified: the original repro (`malloc()`
-  x2 then `printf3(...)`) hangs before this fix and halts cleanly with
-  the correct return value after it, both via actual emulator execution.
-  See the comment above `__dyn_printf_emit_one` in `runtime/printf.c`
-  for the full before/after trace summary.
+Every real bug found across this whole project's history, in the order
+found (roughly commit order), consolidated from what used to be three
+separate, overlapping sections ("Fixed bugs found after milestone 6",
+"Fixed bugs found while building the regression test suite", and the
+FIXED-marked entries buried inside "Known gaps") plus the four codegen
+bugs from the target's very first commit that were never written up
+here at all. "Known gaps" below now covers only what is still genuinely
+open. For each bug: what broke, root cause, how it was found, the fix,
+and the commit.
 
-### Fixed bugs found while building the regression test suite
+1. **Four initial codegen bugs (target bring-up, commit `d16f1fb`).**
+   Found and fixed while getting the very first version of the target
+   description to compile *any* real code at all (a trivial `add()` and
+   a small multi-function stress program), before any of the milestone
+   numbering below existed:
+   - An **over-permissive memory constraint** caused an `-O0` reload
+     explosion (too many candidate reload alternatives for LRA to
+     resolve cheaply on this small, single-register-class target).
+   - A **prologue/epilogue ICE from `addsi3` with a negative immediate**
+     against a constraint that only accepted unsigned values -- the
+     frame-size adjustment computed a negative displacement in a case
+     the insn pattern's own constraint couldn't represent.
+   - **Missing mem<-constant store expansion** -- storing an immediate
+     constant directly to memory had no lowering path, since this ISA's
+     `store_32`/`store_16`/`store_8` only ever take a register operand
+     (see "No store-immediate" in "Key design points" below); GCC's
+     generic store-immediate pattern needed an explicit `force_reg`
+     first.
+   - **Double-wrapped call-address RTL**: GCC's generic call-expansion
+     code re-legitimized an already-valid `(mem (symbol_ref ...))`
+     callee address, wrapping it in a second, spurious `mem`.
+   Fixed by making `movsi`/`movhi`/`movqi` and `call`/`call_value`
+   `define_expand`s (not plain `define_insn`s) that normalize these
+   cases -- forcing constants into registers before a memory store, and
+   avoiding the double-wrap for already-legitimate call addresses --
+   before falling through to the real `define_insn`s. Found via direct
+   iteration against the stage1 compiler while bringing up the trivial
+   `add()`/stress-program reproducers (not a dedicated investigation
+   technique -- straightforward "it doesn't compile yet, why" debugging
+   against GCC's own ICE/error output). Verified: both reproducers
+   compile and run correctly on the emulator at `-O0` and `-O2` after
+   the fix.
 
-Both surfaced immediately when writing the very first end-to-end test (a
-plain `int main(void){...}` program) — no prior verification had ever
-linked a program with a real `main()` against the real linker/libgcc, so
-these went undetected through all 7 milestones:
+2. **Frame pointer materialized at the bottom of the frame instead of
+   the top (commit `4ed9415`).** `symphony_expand_prologue` originally
+   materialized r11 (hard frame pointer) *after* `sub sp,sp,size` -- at
+   the bottom of the frame. With `FRAME_GROWS_DOWNWARD` and the default
+   `STARTING_FRAME_OFFSET=0`, GCC assigns every local a *negative*
+   offset from r11, so locals ended up below the allocated frame
+   entirely -- inside the red zone a callee's own prologue writes into,
+   silently corrupting caller locals the moment any non-leaf call
+   happened. Found by actually running code on the emulator (a
+   `malloc()`+`free()`+`printf1()` integration test), not by
+   inspection. Fixed by materializing r11 as `sp` *before*
+   `sub sp,sp,size`, so locals at `r11-4`, `r11-8`, ... land inside the
+   allocated frame; `symphony_frame_pointer_required` was also made to
+   always return true. Regression test:
+   `test_gcc_backend.py`'s `test_frame_pointer_top_of_frame`.
 
-- **`symphony_as.py` didn't parse `symbol+N` relocation expressions.**
-  GCC-emitted libgcc source (`libgcc2.c`'s `__main`/`__do_global_ctors`)
-  references `__DTOR_LIST__ + 1`, which reaches `.s` as `__DTOR_LIST__+4`
-  (scaled by pointer size). `parse_int_or_symbol` treated the whole
-  string as one opaque symbol name (since `int("__DTOR_LIST__+4", 0)`
-  raises), so the linker saw a relocation to a symbol
-  (`"__DTOR_LIST__+4"`) that could never be defined — an always-broken
-  link for anything pulling in that libgcc object, with no diagnostic
-  pointing at the real cause. Fixed by splitting a trailing `+N`/`-N`
-  off into a proper `(symbol, addend)` pair before emitting the
-  relocation.
-- **No `atexit()`.** GCC's `expand_main_function` always emits an
-  implicit `link_call __main` at the start of any real `main()` (this
-  target defines no `HAS_INIT_SECTION`/`NAME__MAIN` override, and it
-  survives `-ffreestanding` too), and libgcc's `__main` →
-  `__do_global_ctors` unconditionally calls
-  `atexit(__do_global_dtors)` even when `__CTOR_LIST__`/`__DTOR_LIST__`
-  are libgcc's own trivial empty two-element arrays (no real global
-  constructors anywhere in this runtime). Without a real `atexit`
-  symbol, **every** program defining `main()` failed to link, not just
-  ones calling `atexit` directly. Fixed with a minimal `atexit()` in
-  `runtime/intrinsics.c`: registers into a small fixed-size table and
-  does nothing else — there is no real `exit()` in this freestanding
-  runtime (no OS to return to), so nothing ever needs to walk or invoke
-  the table, consistent with `__do_global_dtors` being dead code
-  whenever `__DTOR_LIST__` is empty (the only case that occurs here).
+3. **Missing callee-saved r8-r10/r12 saves (commit `1744570`).**
+   `CALL_USED_REGISTERS` in `symphony.h` declares r8-r10 and r12
+   callee-saved (a caller may assume they survive an ordinary call),
+   but `symphony_expand_prologue`/`_epilogue` only ever pushed/popped
+   r13 and r11 -- nothing saved the others, so a non-leaf function
+   holding a live value in one of them across its own call had it
+   silently clobbered by the callee. Found via the same emulator
+   integration test as bug 2 above (a subtler second version of this
+   bug -- placing the new saves *between* `mov r11,sp` and
+   `sub sp,sp,size`, aliasing a callee-saved register's spill slot with
+   a real local at the same negative r11 offset -- was itself found and
+   fixed within the same investigation before landing the final,
+   correct fix). Fixed by pushing/popping exactly the callee-saved
+   registers a function's RTL actually uses (`df_regs_ever_live_p`),
+   placed *before* r11 is materialized. Regression test:
+   `test_gcc_backend.py`'s
+   `test_callee_saved_registers_survive_nested_calls`.
 
-Both verified end-to-end: `int main(void){int a=6,b=7; return
-a*b+a/b;}` compiled, assembled, linked against real `libgcc.a` +
-`runtime/intrinsics.c`, and run on the emulator, before and after each
-fix.
+4. **Assembler pass1/pass2 layout desync (commit `edf4f89`).**
+   `symphony_as.py`'s pass 1 wrote data-directive bytes (`.ascii`, etc.)
+   directly into `self.sections` while pass 2 independently re-tracked
+   byte offsets from zero for instruction encoding -- any translation
+   unit with a string literal preceding code in the same section (i.e.
+   almost anything using `printf`) had every relocation site after that
+   point silently corrupted by the directive's length, jumping to
+   garbage at runtime with no build-time diagnostic. Found via direct
+   emulator-level testing: a linked `link_call` jumped to the wrong
+   address whenever a string literal preceded it in the same
+   translation unit. Fixed by making pass 2 the sole writer to
+   `self.sections`, consuming both `"data"` and `"insn"` entries from
+   one ordered list built in pass 1. `.ascii`/`.asciz`/`.string`
+   directives (previously entirely unimplemented -- string literals were
+   silently dropped) and the raw I/O opcode mnemonics were added in the
+   same commit. Regression test: `test_gcc_backend.py`'s
+   `TestBugRegressions::test_assembler_pass1_pass2_desync` (assembles
+   hand-written `.s` with the pre-fix assembler via `git show
+   edf4f89~1:...` and confirms it hangs; the fixed assembler returns the
+   correct value).
 
-### Known gaps / real unresolved bugs (for whoever picks this up next)
+5. **`__dyn_heap_anchor` BSS-ordering bug in the linker, previously
+   manifesting as "`printf3()` hangs after 2+ `malloc()` calls" (commit
+   `4196956`).** `runtime/heap.c`'s `malloc()` used to compute "start of
+   heap" as the address right after its own `__dyn_heap_anchor[7]` BSS
+   array, relying on that array being the LAST symbol in the whole
+   linked image -- true only by accident of link/object order, since
+   `symphony_ld.py`'s `Linker.link()` lays out each object's BSS in
+   whatever order objects were added, with no guarantee `heap.o`'s BSS
+   comes last. As soon as another object's BSS symbol landed after it
+   (normal in any real multi-file link), the first `malloc()`'s
+   returned block silently overlapped that neighbor's storage instead
+   of free memory, and the block's own field-initializing stores
+   corrupted it -- traced to `__dyn_heap_end` itself in the reproducer,
+   whose corrupted value was later read and used as a jump target,
+   landing execution in garbage memory several calls downstream (hence
+   looking printf3/5-argument-specific: reproducing needs 2+ `malloc()`
+   calls to grow the pointer into a collision, and enough call depth
+   afterward for the corruption to surface as a visible crash).
+   Root-caused via emulator single-stepping down to the exact
+   corrupting store and its target address, not by inspection. Fixed by
+   having `Linker.link()` synthesize `__dyn_heap_anchor` itself, as a
+   zero-size marker equal to the address right after ALL objects'
+   sections are laid out (computed last, so it's correct regardless of
+   link order) -- `heap.c` now just has `extern unsigned char
+   __dyn_heap_anchor[];`, no real BSS storage, and the linker raises a
+   clear error if any input object still defines it as a real symbol
+   (stale pre-fix `.o` files). Verified: the original repro (`malloc()`
+   x2 then `printf3(...)`) hangs before this fix and halts cleanly with
+   the correct return value after it, both via actual emulator
+   execution. Regression test: `test_gcc_backend.py`'s
+   `TestBugRegressions::test_heap_anchor_bss_ordering_bug` (plus a
+   negative test for the linker's stale-object error).
 
-**Update (second follow-up session): the rest of the "reload insns" ICE
-class documented below (`towers_of_hanoi.c`'s `move_pile`, and — it
-turned out — almost everything else in this section) has now been
-root-caused and fixed via `*movsi_reg`'s missing memory alternatives
-(see "Bug 4" below), NOT via `TARGET_SECONDARY_RELOAD`. That hook was
-seriously investigated first (per the task brief that prompted this
-session) and found to be structurally the wrong mechanism for this
-failure — see the explanation under Bug 4 for why, confirmed by
-reading LRA's own `check_and_process_move` in `lra-constraints.cc`,
-not just by trying it and giving up. The real fix (adding `m`
-alternatives to `movsi`'s insn pattern) closed `move_pile`, and as a
-side effect — confirmed empirically, not assumed — also closed
-`calloc()` at `-O2`, `__dyn_printf_unsigned()` at `-O1`/`-O2`, the
-`dynamic_sensor_report.c` VLA gap, and every other example in the
-comparison table below that previously hit this ICE class. Full
-before/after regression-suite and comparison-table numbers are in the
-sections below. `calloc()` at `-O1` specifically and the libgcc-
-internal 64-bit-arithmetic build ICE remain genuinely open — see Bug 4
-and the "still open after Bug 4" notes for exactly what and why.**
+6. **`symphony_as.py` didn't parse `symbol+N` relocation expressions
+   (commit `a1c54f4`).** GCC-emitted libgcc source (`libgcc2.c`'s
+   `__main`/`__do_global_ctors`) references `__DTOR_LIST__ + 1`, which
+   reaches `.s` as `__DTOR_LIST__+4` (scaled by pointer size).
+   `parse_int_or_symbol` treated the whole string as one opaque symbol
+   name (since `int("__DTOR_LIST__+4", 0)` raises), so the linker saw a
+   relocation to a symbol that could never be defined -- an
+   always-broken link for anything pulling in that libgcc object, with
+   no diagnostic pointing at the real cause. Found via direct
+   end-to-end testing: the very first `int main(void){...}` program
+   ever linked against the real linker/libgcc (no prior milestone had
+   done this) failed with "undefined symbol '__DTOR_LIST__+4'". Fixed
+   by splitting a trailing `+N`/`-N` off into a proper
+   `(symbol, addend)` pair before emitting the relocation.
 
-**Earlier update (first follow-up session, preserved for history): the
-"reload insns" ICE class was investigated in depth — root-caused via a
-minimal reproducer and gdb-traced LRA internals, not guesswork — and
-TWO real, distinct target-description bugs were found and fixed. This
-closed one of the originally-documented trigger cases
-(`insertion_sort.c`'s `main` at `-O2`) and fixed a separate, more
-serious silent-hang correctness bug the ICE investigation surfaced
-along the way. It did NOT close the rest of the ICE class at the time
-(64-bit arithmetic in libgcc, `calloc`/`__dyn_printf_unsigned` at
-`-O1`/`-O2`, `towers_of_hanoi.c`'s `move_pile`, or VLAs) — see below,
-and see Bug 4 above for how most of the rest was closed since.**
+7. **No `atexit()` (commit `a1c54f4`, same investigation as bug 6).**
+   GCC's `expand_main_function` always emits an implicit
+   `link_call __main` at the start of any real `main()` (this target
+   defines no `HAS_INIT_SECTION`/`NAME__MAIN` override, and it survives
+   `-ffreestanding` too), and libgcc's `__main` -> `__do_global_ctors`
+   unconditionally calls `atexit(__do_global_dtors)` even when
+   `__CTOR_LIST__`/`__DTOR_LIST__` are libgcc's own trivial empty
+   two-element arrays (no real global constructors anywhere in this
+   runtime). Without a real `atexit` symbol, **every** program defining
+   `main()` failed to link, not just ones calling `atexit` directly.
+   Fixed with a minimal `atexit()` in `runtime/intrinsics.c`: registers
+   into a small fixed-size table and does nothing else -- there is no
+   real `exit()` in this freestanding runtime, so nothing ever needs to
+   walk or invoke the table. Both bugs 6 and 7 verified end-to-end:
+   `int main(void){int a=6,b=7; return a*b+a/b;}` compiled, assembled,
+   linked against real `libgcc.a` + `runtime/intrinsics.c`, and run on
+   the emulator, before and after each fix.
 
-- **Bug 1 (FIXED): `r11` (the hard frame pointer) was not marked
-  `FIXED_REGISTERS`.** This let IRA/LRA treat it as an ordinary
-  `GENERAL_REGS` value eligible for copy-propagation into pseudos —
-  e.g. `ivopts` hoisting a loop-invariant copy of `r11` into a pseudo
-  compared every loop iteration. Since `r11` is permanently pinned to
-  the frame-pointer role (`symphony_frame_pointer_required()` always
-  returns `true`) and this target's flat register-class structure (see
-  `symphony.h`'s `enum reg_class`) gives LRA no fallback, the resulting
-  equivalence-substitution loop for that pseudo could never converge,
-  hitting reload's "maximum number of generated reload insns per insn
-  achieved (90)" cap on ordinary user code with no 64-bit arithmetic,
-  VLA, or recursion involved — confirmed via a minimal reproducer (a
-  fill loop + insertion-sort loop + sum loop over a 16-byte char array,
-  structurally identical to `examples/insertion_sort.c`'s `main`) and
-  gdb-traced into `lra_constraints` (`lra-constraints.cc:5392`), where
-  the original insn was exactly `(set (reg N) (reg 11 r11))` and
-  subsequent retries kept minting fresh pseudo copies of `r11` without
-  converging. **Fixed** by marking `r11` `FIXED_REGISTERS` in
-  `symphony.h`, matching GCC's own documented contract ("the frame
-  pointer, except on machines where that can be used as a general
-  register when no frame pointer is needed"). **Verified**:
-  `examples/insertion_sort.c`'s `main` now compiles at `-O2` (it
-  previously ICE'd there only — `-Os`/`-O0` were always fine), and the
-  reproducer above produces the byte-identical correct result at `-O0`
-  and `-O2` on the emulator. Regression test:
-  `test_gcc_backend.py`'s `test_frame_pointer_not_reused_as_general_register`.
-- **Bug 2 (FIXED, found while investigating bug 1): a real correctness
-  bug, not an ICE.** `symphony_expand_prologue`/`_epilogue` only saved/
-  restored `r13` (the ABI link register) for **non-leaf** functions, on
-  the assumption a leaf function "never touches r13". That assumption
-  is false: `CALL_USED_REGISTERS` marks `r13` an ordinary allocatable
-  register, so GCC's register allocator can (and, under register
-  pressure, does) pick it to hold an arbitrary local in a **leaf**
-  function, silently destroying the caller's return address — the leaf
-  function's own `link_return` (`jmp r13`) then jumps into garbage
-  instead of back to the caller. Traced on the emulator: the reproducer
-  above, called from `main()` at `-O2`, got `r13` allocated for the
-  insertion-sort loop's `index` counter; `foo()` never returned, and
-  execution looped forever with the stack pointer/frame pointer
-  drifting upward each spurious prologue re-entry. **Fixed** by keying
-  the save/restore on whether the function's own RTL ever writes `r13`
-  (`df_regs_ever_live_p`), exactly like the other callee-saved
-  registers, instead of on leaf-vs-non-leaf. **Verified**: the same
-  reproducer called from `main()` now returns the correct, byte-
-  identical result at `-O0` and `-O2` (previously hung forever at
-  `-O2` after compiling "successfully" — this bug predates and is
-  independent of bug 1's fix, but was only reachable in practice once
-  bug 1's fix let more code compile at `-O2` in the first place).
-  Regression test: `test_gcc_backend.py`'s
-  `test_link_register_preserved_in_leaf_function`.
-- **An earlier attempt at a related, broader fix was tried and
-  reverted.** Reserving `r12` as a dedicated address-reload-scratch
-  register class (`ADDR_REGS`, steering `LRA`'s spill/stack-slot
-  address materialization there via `MODE_CODE_BASE_REG_CLASS`) was
-  built and A/B tested against the same reproducer set. It measurably
+8. **`r11` (hard frame pointer) was not marked `FIXED_REGISTERS`
+   (commit `d13c15a`).** `FIXED_REGISTERS` in `symphony.h` was
+   `{ 1,0,0,0,0,0,0,0, 0,0,0,0, 0,0,1,1 }` (r11 = index 11 = 0, i.e. NOT
+   fixed). This let IRA/LRA treat r11 as an ordinary `GENERAL_REGS`
+   value eligible for copy-propagation into pseudos -- e.g. `ivopts`
+   hoisting a loop-invariant copy of r11 into a pseudo compared every
+   loop iteration. Since r11 is permanently pinned to the frame-pointer
+   role (`symphony_frame_pointer_required()` always returns true) and
+   this target's flat register-class structure gives LRA no fallback,
+   the resulting equivalence-substitution loop for that pseudo could
+   never converge, hitting reload's "maximum number of generated reload
+   insns per insn achieved (90)" cap on ordinary user code with no
+   64-bit arithmetic, VLA, or recursion involved. Found via gdb, not
+   guesswork: a minimal reproducer (fill loop + insertion-sort loop +
+   sum loop over a 16-byte char array, structurally identical to
+   `examples/insertion_sort.c`'s `main`) was traced into
+   `lra_constraints` (`lra-constraints.cc:5392`), where the original
+   insn was exactly `(set (reg N) (reg 11 r11))` and subsequent retries
+   kept minting fresh pseudo copies of r11 without converging. Fixed by
+   marking r11 `FIXED_REGISTERS`, matching GCC's own documented
+   contract ("the frame pointer, except on machines where that can be
+   used as a general register when no frame pointer is needed").
+   Verified: `examples/insertion_sort.c`'s `main` now compiles at `-O2`
+   (previously ICE'd there only). Regression test:
+   `test_gcc_backend.py`'s
+   `test_frame_pointer_not_reused_as_general_register`.
+
+9. **`r13` (ABI link register) only saved/restored in non-leaf
+   functions (commit `d13c15a`, found while investigating bug 8).** A
+   real correctness bug, not an ICE.
+   `symphony_expand_prologue`/`_epilogue` only saved/restored r13 for
+   **non-leaf** functions, on the assumption a leaf function "never
+   touches r13". False: `CALL_USED_REGISTERS` marks r13 an ordinary
+   allocatable register, so GCC's register allocator can (and, under
+   register pressure, does) pick it to hold an arbitrary local in a
+   **leaf** function, silently destroying the caller's return address --
+   the leaf function's own `link_return` (`jmp r13`) then jumps into
+   garbage instead of back to the caller. Traced on the emulator: the
+   bug-8 reproducer, called from `main()` at `-O2`, got r13 allocated
+   for the insertion-sort loop's `index` counter; the function never
+   returned, and execution looped forever with sp/r11 drifting upward
+   each spurious prologue re-entry -- a silent infinite hang, no crash.
+   Fixed by keying the save/restore on whether the function's own RTL
+   ever writes r13 (`df_regs_ever_live_p`), exactly like the other
+   callee-saved registers, instead of on leaf-vs-non-leaf. Verified:
+   the same reproducer now returns the correct result at `-O0` and
+   `-O2` (previously hung forever at `-O2`). Regression test:
+   `test_gcc_backend.py`'s
+   `test_link_register_preserved_in_leaf_function`.
+
+10. **`*movsi_reg` had no memory ("m") alternatives at all (commit
+    `a6beb95`) -- the single fix that closed most of the remaining
+    "reload insns" ICE class.** The very first port of this target
+    split SImode moves into an always-register-to-register
+    `*movsi_reg` plus two entirely separate, non-overlapping patterns
+    (`*load_si`/`*store_si`) for memory access. That split caused
+    essentially all of the "reload insns" ICE class this project hit,
+    including `towers_of_hanoi.c`'s `move_pile` and, it turned out
+    empirically, most of the other affected examples too.
+    **Investigation**: `TARGET_SECONDARY_RELOAD` was tried first (per
+    an explicit task brief) and found to be structurally the wrong
+    hook, confirmed by reading `check_and_process_move` in
+    `lra-constraints.cc` (where `targetm.secondary_reload` is actually
+    called from) -- that function bails whenever either side of a move
+    is a `MEM`, so it only ever governs register-class-to-register-
+    class copies, never memory-operand access; this target also has
+    only one real register class (`GENERAL_REGS` == `ALL_REGS`), so
+    there is no second class to move a value through even where the
+    hook does apply. **Root cause**, found the same way as bugs 8/9
+    (gdb, breakpoint at `lra_constraints`, `lra-constraints.cc:5392`,
+    applied to `move_pile` at `-O2`): under real register pressure
+    (`move_pile` has 4 live parameters that must survive its own
+    recursive call, against only 4 callee-saved hard registers), IRA
+    spills a pseudo to a stack slot. When LRA needs to reload that
+    spilled pseudo for `(set (reg 48) (reg M))` (matched against
+    `*movsi_reg`), it finds no alternative in the insn's own constraint
+    set that accepts a memory operand at all -- `*movsi_reg`'s only
+    alternatives were `r,r` and `r,I`. With no way to reload in place,
+    LRA fell back to generic equivalence/inheritance substitution,
+    minting a fresh temporary pseudo on every retry; each fresh pseudo
+    could also fail to get a hard register under the same pressure, so
+    the substitution never terminated. Not a deeper LRA bug -- a
+    target-description gap (no memory alternative to reload against)
+    masquerading as one. **Fixed** by giving `*movsi_reg` real `m`
+    alternatives (`symphony.md`), the memory operand's address still
+    constrained to a bare register only (matching
+    `symphony_legitimate_address_p` -- this ISA genuinely has no
+    base+offset addressing mode); LRA's own generic
+    `process_address_1` already knows how to legitimize a spill slot's
+    frame-relative address into that form via a scratch `ADD`, so no
+    new hook was needed once the alternative existed for it to run
+    against. `symphony_print_operand` also needed a `MEM_P` case
+    (`symphony.cc`), since `%0`/`%1` can now refer to a raw `(mem ...)`
+    directly instead of always routing through `*load_si`/`*store_si`'s
+    own template text. Two mistakes were made and caught during
+    development: widening the source predicate too far to plain
+    `general_operand` first produced a NEW, narrower ICE (fixed by a
+    dedicated `movsi_src_operand` predicate); and `store_32`'s operand
+    order was initially backwards (`value, [addr]` instead of the
+    assembler's actual `[addr], value`), caught immediately by the
+    assembler's own `parse_mem_operand` raising `ValueError` during the
+    regression run. **Verified**: `move_pile` compiles cleanly at `-Os`
+    and `-O2` (previously ICE'd above `-O0`) with byte-identical output
+    to `dcc`'s own build. **Confirmed as a side effect** (independently
+    re-run and checked, not assumed): `calloc()` at `-O2` and
+    `__dyn_printf_unsigned()` at `-O1`/`-O2` both now compile too (same
+    root cause), and every `examples/*.c` file -- including
+    `dynamic_sensor_report.c`'s VLA-using `sort_samples`, previously
+    believed a separate, structurally different gap -- now compiles
+    cleanly at both `-Os` and `-O2` and matches `dcc`'s output exactly.
+    Regression test: `test_gcc_backend.py`'s
+    `TestBugRegressions::test_movsi_memory_alternative_under_register_pressure`.
+
+11. **`link_call`'s symbol-target return-offset hardcoded for Symphony
+    only (found while adding Dynphony support to `symphony_as.py`, this
+    session).** The symbol-target branch of `link_call`'s encoding in
+    `symphony_as.py` hardcoded `return_offset=12` -- correct only for
+    Symphony, where every `link_call` sub-instruction is padded to a
+    4-byte slot, so the whole 3-sub-instruction sequence is exactly 12
+    bytes. Dynphony's real unpadded sequence is only 10 bytes
+    (`counter`=2 + `add`-immediate=4 + `jmp`-immediate=4), so the old
+    hardcoded 12 computed a return address 2 bytes past the real next
+    instruction -- `link_return`'s `jmp r13` then jumped into the middle
+    of an unrelated instruction instead of back to the caller,
+    corrupting control flow on the very first non-leaf call in
+    Dynphony mode. Found by actually running a GCC-compiled Dynphony
+    program on the emulator (not by inspection): execution decoded an
+    invalid opcode a few bytes past where the call site should have
+    returned, traced back to the wrong `add r13,r13,N` immediate. Fixed
+    by making the symbol-target branch's `return_offset` width-aware
+    (`12` for Symphony, `10` for Dynphony), matching dyncc's own
+    reference (`symphony/targets/symphony/assembler.py`'s
+    `Assembler._call_bytes`, `return_offset=12 if
+    fixed_instruction_width else None`, where `isa.link_call`'s own
+    default for the `None` case is 10). Verified before/after: the same
+    regression test fails identically against the pre-fix code (PC
+    decodes garbage at the wrong address) and passes with the fix.
+    Regression test: `test_gcc_backend.py`'s
+    `TestDynphonyEncoding::test_dynphony_link_call_and_global_and_loop`.
+
+## Known gaps / real unresolved bugs (for whoever picks this up next)
+
+- **`calloc()` at `-O1` specifically** (not `-O2`) still hits the
+  "maximum number of generated reload insns" ICE signature, even after
+  bug 10 above closed the rest of that ICE class. This is a real,
+  reproducible result (re-run directly with `xgcc -S -O1`, not
+  inferred) -- plausible given GCC's own well-known behavior of `-O1`
+  sometimes carrying *higher* register pressure than `-O2` at certain
+  points (less aggressive rematerialization/copy-propagation can leave
+  more values simultaneously live), but not further root-caused.
+  `test_calloc_compiles_at_o1` remains xfail; `test_calloc_compiles_at_o2`
+  passes.
+- **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) still hits the
+  same ICE signature *inside libgcc's own build* at `-O2` and is still
+  excluded from libgcc (`LIB2FUNCS_EXCLUDE` in
+  `libgcc-config/symphony/t-symphony`) -- rebuilding libgcc with the
+  exclusion removed, against the bug-10-fixed compiler, still ICEs. Not
+  re-investigated in depth (out of scope for the session that closed
+  bug 10, which was specifically the `move_pile`/reload-insns class) --
+  worth revisiting given how much of the rest of this ICE class turned
+  out to share one cause, but libgcc's own multi-word arithmetic
+  (`umul_ppmm`-style multi-limb macros) may plausibly hit a
+  structurally different pattern than ordinary user code did. The
+  failure mode for user code is unchanged: a 64-bit multiply/divide in
+  ordinary code compiles fine (GCC emits a libcall), the gap only
+  surfaces at **link time** as an undefined-symbol error, since
+  `__muldi3`/`__divdi3`/etc. are simply absent from `libgcc.a`.
+  Exercised by `test_gcc_backend.py`'s `test_64bit_multiply_links`
+  (xfail).
+- **No real varargs.** `printf`/`printf1`/`printf2`/`printf3` are
+  fixed-arity as a deliberate scope decision, not real `stdarg.h`
+  support.
+- **Dynphony support is real but narrower than Symphony's.** The
+  assembler+linker now correctly assemble, link, and run real
+  GCC-compiled code in Dynphony's variable-length encoding (see
+  "Dynphony support" above) -- but `libgcc.a` and
+  `runtime/*.c` are only ever built in Symphony mode today. A Dynphony
+  program that needs libgcc (multiply/divide) or the runtime library
+  (malloc/printf/etc.) cannot currently be linked; only self-contained
+  Dynphony programs work end to end. Building a Dynphony `libgcc.a`
+  would need a second `all-target-libgcc` pass with `-mdynphony` forced
+  into its build flags (not attempted -- real but currently unexercised
+  scope, not a bug).
+- **An earlier attempt at a related, broader fix for bug 10's ICE class
+  was tried and reverted.** Reserving r12 as a dedicated
+  address-reload-scratch register class (`ADDR_REGS`, steering LRA's
+  spill/stack-slot address materialization there via
+  `MODE_CODE_BASE_REG_CLASS`) was built and A/B tested. It measurably
   **regressed** register pressure elsewhere: shrinking the callee-saved
-  pool from 4 registers (`r8`-`r10`, `r12`) to 3 made spilling *more*
-  likely, not less, for cases like `towers_of_hanoi.c`'s `move_pile`
-  (below), without closing any additional cases. Not included in the
-  final fix. `TARGET_SMALL_REGISTER_CLASSES_FOR_MODE_P` (returning
-  `true` unconditionally, per its own tm.texi documentation for targets
-  with tight register files) was also tried and found measurably
-  **neutral** — no change to any reproducer or to the existing test
-  suite's xfail set — and was likewise not included, to keep the
-  committed fix minimal and to what's demonstrated beneficial.
-- **Bug 4 (FIXED, second follow-up session): `*movsi_reg` had no memory
-  ("m") alternatives at all** — the very first port of this target
-  split SImode moves into an always-register-to-register `*movsi_reg`
-  plus two entirely separate, non-overlapping patterns (`*load_si`/
-  `*store_si`) for memory access. That split is what caused essentially
-  all of the "reload insns" ICE class documented in this section,
-  including `move_pile` and (it turned out empirically) most of the
-  rest of the section below too. **Mechanism** (gdb-traced into
-  `lra_constraints`, `lra-constraints.cc:5392`, the exact same
-  breakpoint used for bugs 1/2 above, applied to
-  `examples/towers_of_hanoi.c`'s `move_pile` at `-O2`): under real
-  register pressure (`move_pile` is a leaf-adjacent recursive function
-  with 4 live parameters that must all survive its own recursive call,
-  against only 4 callee-saved hard registers), IRA has to spill a
-  pseudo (`reg 48`, `source`) to a stack slot. When LRA then needs to
-  reload that spilled pseudo for use in `(set (reg 48) (reg M))`
-  (matched against `*movsi_reg`), it finds **no alternative in the
-  insn's own constraint set that accepts a memory operand at all** —
-  `*movsi_reg`'s only alternatives were `r,r` and `r,I`. With no way to
-  reload the operand in place (the convergent, ordinary path LRA's
-  constraint machinery is built for), LRA fell back to its generic
-  equivalence/inheritance substitution path instead, repeatedly minting
-  a fresh temporary pseudo (`orig:48 source`) to stand in for the
-  spilled one on each retry; each fresh pseudo could *also* fail to get
-  a hard register under the same pressure, so the substitution never
-  terminated, hitting the reload-insn retry cap at insn 964 — the exact
-  `(set (reg 48)(reg 493))`-shaped loop this README's earlier revision
-  described as an unresolved "genuine LRA-level convergence failure."
-  It was not a deeper LRA bug at all: it was a target-description gap
-  (no memory alternative to reload against) masquerading as one.
-  **`TARGET_SECONDARY_RELOAD` was investigated first as the fix
-  mechanism** (per the brief that prompted this session) and found to
-  be structurally the wrong hook for this failure, confirmed by reading
-  `check_and_process_move` in `lra-constraints.cc` (where
-  `targetm.secondary_reload` is actually called from): that function
-  explicitly bails (`if (! REG_P (dreg) || ! REG_P (sreg)) return
-  false;`) whenever either side of the move is a `MEM`, i.e. it only
-  ever governs register-class-to-register-class copies, never memory
-  operand access. Since this target has exactly one real register
-  class (`GENERAL_REGS`, equal to `ALL_REGS` — see `symphony.h`'s `enum
-  reg_class`), there is also no second class to move a value through
-  even in the cases where the hook *does* apply. **Fixed instead** by
-  giving `*movsi_reg` real `m` alternatives (`symphony.md`,
-  `config/symphony/symphony.md`) so a spilled pseudo's memory location
-  can be presented directly to this insn's own constraint matching —
-  letting LRA reload it as an ordinary, convergent operation instead of
-  falling back to unbounded substitution. The memory operand's address
-  is still constrained to a bare register only (`(mem (match_operand
-  "register_operand" "r"))`), matching `symphony_legitimate_address_p`
-  exactly — this ISA genuinely has no base+offset addressing mode. A
-  spill slot's natural address as GCC/LRA constructs it is
-  frame-relative, `(mem (plus (reg r11) (const_int N)))`, which is
-  *not* a legitimate address here, but that turned out not to need any
-  new hook either: LRA's own generic `process_address_1`
-  (`lra-constraints.cc`) already knows how to legitimize exactly this
-  shape, by materializing the sum into a scratch pseudo via an `ADD`
-  before the load/store — it just needed an insn alternative exposing
-  a memory operand to run against, which is exactly what this fix
-  supplies. `symphony_print_operand` also needed a small fix alongside
-  this (`symphony.cc`): it previously had no `MEM_P` case at all
-  (memory operands were always printed via the separate `*load_si`/
-  `*store_si` patterns' own explicit `[%N]` template text, never via
-  `%0`/`%1` referring to a raw `(mem ...)` directly), so it now
-  dispatches a `MEM` operand to `symphony_print_operand_address` the
-  same way `output_operand`'s generic default would on a target that
-  didn't need a custom hook here. **Verified**: `move_pile` now
-  compiles cleanly at `-Os` and `-O2` (previously ICE'd at every level
-  above `-O0`) and produces byte-identical `output()` call sequences to
-  `dcc`'s own build of the same program, for the same `input()` values
-  (`[2, 0, 2, 1]`, from `tests/test_compiler.py`'s
-  `test_towers_of_hanoi_example`) — see the comparison table below for
-  the actual numbers. Regression test:
-  `test_gcc_backend.py`'s `TestBugRegressions::test_movsi_memory_alternative_under_register_pressure`.
-- **Side effect of Bug 4's fix, confirmed empirically (not assumed):**
-  the regression suite's `calloc()`-at-`-O2` and
-  `__dyn_printf_unsigned()`-at-`-O1`/`-O2` xfail tests both now XPASS
-  (i.e. those two ICEs are fixed too — same root cause), and every
-  `examples/*.c` file in the comparison table below — including
-  `dynamic_sensor_report.c`'s VLA-using `sort_samples`, previously
-  documented as an unconditional structural gap even at `-O0` — now
-  compiles cleanly at both `-Os` and `-O2` and produces byte-identical
-  output to `dcc`. This was NOT assumed from the `move_pile` fix
-  working; every one of these was independently re-run against the
-  fixed toolchain and checked. The VLA case in particular turning out
-  to share this root cause (rather than being the separately-diagnosed
-  "structurally different" gap this README previously described) was a
-  genuine surprise, confirmed rather than guessed — `sort_samples`'s
-  `int scratch[count]` local, once past the front-end's VLA lowering,
-  turns into exactly the kind of address-restricted memory access that
-  needed a real `movsi` memory alternative like everything else here.
-- **Still genuinely open after Bug 4** — real, unresolved, and not the
-  same defect as the above:
-  - **`calloc()` at `-O1` specifically** (not `-O2`) still hits the
-    same "maximum number of generated reload insns" signature. This is
-    a real, reproducible result (re-run directly with `xgcc -S -O1`,
-    not inferred) — plausible given GCC's own well-known behavior of
-    `-O1` sometimes carrying *higher* register pressure than `-O2` at
-    certain points (less aggressive rematerialization/copy-propagation
-    can leave more values simultaneously live), but not further
-    root-caused within this session. `test_calloc_compiles_at_o1_o2`
-    remains parametrized and split: `-O1` still xfails, `-O2` now
-    xpasses (adjusted to reflect this).
-  - **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) still hits the
-    same ICE signature *inside libgcc's own build* at `-O2` and is
-    still excluded from libgcc (`LIB2FUNCS_EXCLUDE` in
-    `libgcc-config/symphony/t-symphony`) — rebuilding libgcc with the
-    exclusion removed, against the Bug-4-fixed compiler, still ICEs.
-    Not re-investigated in depth this session (out of this task's
-    stated scope, which was the `move_pile`/reload-insns class, not
-    64-bit arithmetic specifically) — worth revisiting given how much
-    of the rest of this ICE class turned out to share one cause, but
-    libgcc's own multi-word arithmetic (`umul_ppmm`-style multi-limb
-    macros) may plausibly hit a structurally different pattern than
-    ordinary user code did. The failure mode for user code is
-    unchanged: a 64-bit multiply/divide in ordinary code compiles fine
-    (GCC emits a libcall), the gap only surfaces at **link time** as an
-    undefined-symbol error, since `__muldi3`/`__divdi3`/etc. are simply
-    absent from `libgcc.a`. Exercised by `test_gcc_backend.py`'s
-    `test_64bit_multiply_links` (still xfail, unchanged).
-- **No real varargs.** `printf`/`printf1`/`printf2`/`printf3` are fixed-
-  arity as a deliberate scope decision, not real `stdarg.h` support.
+  pool from 4 registers to 3 made spilling *more* likely for cases like
+  `move_pile`, without closing any additional cases. Not kept.
+  `TARGET_SMALL_REGISTER_CLASSES_FOR_MODE_P` (returning true
+  unconditionally) was also tried and found measurably **neutral** -- no
+  change to any reproducer or the xfail set -- and was likewise not
+  kept, to keep the committed fix minimal and to what's demonstrably
+  beneficial.
 
 ## dcc vs GCC comparison
 
@@ -728,14 +843,13 @@ permanent benchmarking framework.
 
 **Methodology:**
 
-- **Target is Symphony, not Dynphony.** The custom assembler/linker
-  (`tools/symphony_as.py`/`symphony_ld.py`) only implement Symphony's
-  fixed-width instruction encoding today — `-mdynphony` is accepted by
-  `symphony.opt` but is inert in codegen, and `symphony_as.py` calls
-  `pad_fixed_width` unconditionally regardless of the flag. Dynphony's
-  variable-length encoding was never wired into the GCC toolchain (a
-  known, separate future gap, out of scope here) — `dcc` was run with
-  `--target symphony` to match.
+- **Target is Symphony, not Dynphony, for this comparison.** The custom
+  assembler/linker now support both encodings correctly (see "Dynphony
+  support" above) — `-mdynphony` genuinely selects Dynphony's variable-
+  length encoding end to end. This table still uses Symphony throughout,
+  though, because `libgcc.a` and `runtime/*.c` (both needed by nearly
+  every example below) are only ever built in Symphony mode — `dcc` was
+  run with `--target symphony` to match.
 - **GCC optimization levels: both `-Os` and `-O2` are reported**, matching
   how this project's earlier moxie-based GCC comparison work compared
   against both levels rather than picking one. `dcc`'s own optimizer
