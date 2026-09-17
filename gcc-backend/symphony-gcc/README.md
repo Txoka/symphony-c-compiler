@@ -494,53 +494,150 @@ fix.
 
 ### Known gaps / real unresolved bugs (for whoever picks this up next)
 
+**Update (investigation session following the comparison below): the
+"reload insns" ICE class was investigated in depth — root-caused via a
+minimal reproducer and gdb-traced LRA internals, not guesswork — and
+TWO real, distinct target-description bugs were found and fixed. This
+closed one of the originally-documented trigger cases
+(`insertion_sort.c`'s `main` at `-O2`) and fixed a separate, more
+serious silent-hang correctness bug the ICE investigation surfaced
+along the way. It did NOT close the rest of the ICE class (64-bit
+arithmetic in libgcc, `calloc`/`__dyn_printf_unsigned` at `-O1`/`-O2`,
+`towers_of_hanoi.c`'s `move_pile`, or VLAs) — those remain open, see
+below for exactly what's still broken and why.**
+
+- **Bug 1 (FIXED): `r11` (the hard frame pointer) was not marked
+  `FIXED_REGISTERS`.** This let IRA/LRA treat it as an ordinary
+  `GENERAL_REGS` value eligible for copy-propagation into pseudos —
+  e.g. `ivopts` hoisting a loop-invariant copy of `r11` into a pseudo
+  compared every loop iteration. Since `r11` is permanently pinned to
+  the frame-pointer role (`symphony_frame_pointer_required()` always
+  returns `true`) and this target's flat register-class structure (see
+  `symphony.h`'s `enum reg_class`) gives LRA no fallback, the resulting
+  equivalence-substitution loop for that pseudo could never converge,
+  hitting reload's "maximum number of generated reload insns per insn
+  achieved (90)" cap on ordinary user code with no 64-bit arithmetic,
+  VLA, or recursion involved — confirmed via a minimal reproducer (a
+  fill loop + insertion-sort loop + sum loop over a 16-byte char array,
+  structurally identical to `examples/insertion_sort.c`'s `main`) and
+  gdb-traced into `lra_constraints` (`lra-constraints.cc:5392`), where
+  the original insn was exactly `(set (reg N) (reg 11 r11))` and
+  subsequent retries kept minting fresh pseudo copies of `r11` without
+  converging. **Fixed** by marking `r11` `FIXED_REGISTERS` in
+  `symphony.h`, matching GCC's own documented contract ("the frame
+  pointer, except on machines where that can be used as a general
+  register when no frame pointer is needed"). **Verified**:
+  `examples/insertion_sort.c`'s `main` now compiles at `-O2` (it
+  previously ICE'd there only — `-Os`/`-O0` were always fine), and the
+  reproducer above produces the byte-identical correct result at `-O0`
+  and `-O2` on the emulator. Regression test:
+  `test_gcc_backend.py`'s `test_frame_pointer_not_reused_as_general_register`.
+- **Bug 2 (FIXED, found while investigating bug 1): a real correctness
+  bug, not an ICE.** `symphony_expand_prologue`/`_epilogue` only saved/
+  restored `r13` (the ABI link register) for **non-leaf** functions, on
+  the assumption a leaf function "never touches r13". That assumption
+  is false: `CALL_USED_REGISTERS` marks `r13` an ordinary allocatable
+  register, so GCC's register allocator can (and, under register
+  pressure, does) pick it to hold an arbitrary local in a **leaf**
+  function, silently destroying the caller's return address — the leaf
+  function's own `link_return` (`jmp r13`) then jumps into garbage
+  instead of back to the caller. Traced on the emulator: the reproducer
+  above, called from `main()` at `-O2`, got `r13` allocated for the
+  insertion-sort loop's `index` counter; `foo()` never returned, and
+  execution looped forever with the stack pointer/frame pointer
+  drifting upward each spurious prologue re-entry. **Fixed** by keying
+  the save/restore on whether the function's own RTL ever writes `r13`
+  (`df_regs_ever_live_p`), exactly like the other callee-saved
+  registers, instead of on leaf-vs-non-leaf. **Verified**: the same
+  reproducer called from `main()` now returns the correct, byte-
+  identical result at `-O0` and `-O2` (previously hung forever at
+  `-O2` after compiling "successfully" — this bug predates and is
+  independent of bug 1's fix, but was only reachable in practice once
+  bug 1's fix let more code compile at `-O2` in the first place).
+  Regression test: `test_gcc_backend.py`'s
+  `test_link_register_preserved_in_leaf_function`.
+- **An earlier attempt at a related, broader fix was tried and
+  reverted.** Reserving `r12` as a dedicated address-reload-scratch
+  register class (`ADDR_REGS`, steering `LRA`'s spill/stack-slot
+  address materialization there via `MODE_CODE_BASE_REG_CLASS`) was
+  built and A/B tested against the same reproducer set. It measurably
+  **regressed** register pressure elsewhere: shrinking the callee-saved
+  pool from 4 registers (`r8`-`r10`, `r12`) to 3 made spilling *more*
+  likely, not less, for cases like `towers_of_hanoi.c`'s `move_pile`
+  (below), without closing any additional cases. Not included in the
+  final fix. `TARGET_SMALL_REGISTER_CLASSES_FOR_MODE_P` (returning
+  `true` unconditionally, per its own tm.texi documentation for targets
+  with tight register files) was also tried and found measurably
+  **neutral** — no change to any reproducer or to the existing test
+  suite's xfail set — and was likewise not included, to keep the
+  committed fix minimal and to what's demonstrated beneficial.
 - **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) hits a real LRA/
   reload ICE ("maximum number of generated reload insns per insn
   achieved") *inside libgcc's own build* at `-O2` (libgcc's required
   optimization level) and is excluded from libgcc entirely
-  (`LIB2FUNCS_EXCLUDE` in `libgcc-config/symphony/t-symphony`). Not
-  root-caused. Note the failure mode for user code: compiling a 64-bit
-  multiply/divide in an ordinary program does NOT ICE (GCC just emits a
-  libcall like any other target) — the gap only surfaces at **link
-  time**, as an undefined-symbol error for `__muldi3`/`__divdi3`/etc.,
-  since they're simply absent from `libgcc.a`. Exercised by
-  `test_gcc_backend.py`'s `test_64bit_multiply_links` (xfail, documents
-  the link failure rather than a compile ICE).
-- **A whole class of "reload insns" ICEs** beyond the 64-bit case above,
-  confirmed to trigger in at least: a loop containing a call combined
-  with `-fmove-loop-invariants` (mitigated by compiling the runtime
-  library at `-O0`, not fixed), a libcall result (e.g. a software
-  divide) feeding directly into a comparison's RTL expansion at `-O0`
-  (worked around in `calloc`'s overflow check by materializing the
-  division into a temporary first — see `runtime/heap.c`), and (newly
-  confirmed) `runtime/heap.c`'s `calloc()` and `runtime/printf.c`'s
-  `__dyn_printf_unsigned()` both ICE the same way at `-O1`/`-O2` on the
-  unmodified files from HEAD — compile the runtime at `-O0` to avoid
-  this (not fixed, worked around only).
+  (`LIB2FUNCS_EXCLUDE` in `libgcc-config/symphony/t-symphony`). **Still
+  not root-caused or fixed** — the r11/r13 fixes above did not close
+  this (libgcc is still built with these functions excluded; removing
+  the exclusion and rebuilding libgcc still ICEs the same way). Note
+  the failure mode for user code: compiling a 64-bit multiply/divide in
+  an ordinary program does NOT ICE (GCC just emits a libcall like any
+  other target) — the gap only surfaces at **link time**, as an
+  undefined-symbol error for `__muldi3`/`__divdi3`/etc., since they're
+  simply absent from `libgcc.a`. Exercised by `test_gcc_backend.py`'s
+  `test_64bit_multiply_links` (xfail, documents the link failure rather
+  than a compile ICE).
+- **`calloc()`/`__dyn_printf_unsigned()` at `-O1`/`-O2` — still not
+  fixed.** Re-confirmed still ICEing, unchanged, after the r11/r13
+  fixes above (`test_gcc_backend.py`'s `test_calloc_compiles_at_o1_o2`
+  and `test_printf_unsigned_compiles_at_o1_o2` are still xfail, not
+  flipped). Compile the runtime at `-O0` to avoid this (worked around
+  only, as before).
+- **A plain recursive function with no loops at all still ICEs at
+  every optimization level above `-O0`** — `examples/towers_of_hanoi.c`'s
+  `move_pile`, confirmed via a minimal reproducer and gdb-traced the
+  same way as bugs 1/2 above, but to a **different, distinct**
+  mechanism neither fix above addresses: a pseudo holding a value that
+  must survive the function's own recursive call (register allocator
+  ran out of the 4 callee-saved hard registers and had to spill one to
+  a stack slot) has its reload before a subsequent use re-emitted over
+  and over — `(set (reg N)(reg M))` with `M` incrementing every retry —
+  without LRA ever accepting it as satisfying constraints board-wide.
+  This is LRA failing to converge on an ordinary register-pressure
+  spill/reload, not something r11- or r13-specific. Whoever picks this
+  up next should look at why LRA's per-insn retry loop
+  (`lra_constraints`'s `curr_insn`/`original_insn` bookkeeping around
+  `lra-constraints.cc:5375`-`5392`) fails to terminate for a spilled
+  pseudo's reload specifically when it's read again after a subsequent
+  call — the evidence from the reverted `ADDR_REGS` attempt above
+  suggests this needs a genuine LRA-level or spill-strategy fix, not
+  just another register-class rebalancing (taking a register away to
+  give LRA more "room to maneuver" measurably made this exact case
+  worse, not better).
 - **This ICE class is broader than previously documented** (found while
   building the "dcc vs GCC comparison" below, testing every
-  `examples/*.c` file at `-Os` and `-O2`): it also fires on ordinary,
-  unremarkable user code that has nothing to do with 64-bit arithmetic
-  or libgcc internals — a plain recursive function
-  (`examples/towers_of_hanoi.c`'s `move_pile`), a function with several
-  live locals across a loop with an early-exit branch
-  (`examples/insertion_sort.c`'s `main` at `-O2` only — it compiles fine
-  at `-Os`/`-O0`), and a non-leaf function taking a struct pointer with a
+  `examples/*.c` file at `-Os` and `-O2`): besides `move_pile` above, it
+  also fires on a non-leaf function taking a struct pointer with a
   realloc-growth branch (`examples/dynamic_sensor_report.c`'s
   `series_push`, and separately `primes.c`'s `main` at `-O2` only). Not
-  root-caused (same "maximum number of generated reload insns per insn
-  achieved (90)" signature as the cases above, believed to be the same
-  underlying LRA/reload defect in this target's very restricted register
-  classes/addressing modes, not several unrelated bugs) — `-O0` reliably
-  avoids it for ordinary user code, same as for the runtime library.
+  root-caused — believed (not confirmed) to be the same general "LRA
+  fails to converge on a spill/reload under this target's very
+  restricted register classes/addressing modes" defect family as
+  `move_pile` above, but each case would need its own gdb trace to
+  confirm before assuming a single fix would close all of them — `-O0`
+  reliably avoids it for ordinary user code, same as for the runtime
+  library.
 - **VLAs (variable-length arrays) hit the same ICE unconditionally, at
   every optimization level including `-O0`.** Confirmed via
   `examples/dynamic_sensor_report.c`'s `sort_samples(int *values,
   unsigned int count) { int scratch[count]; ... }` — this is the one
   case in the comparison below with no `-O0` fallback at all, a genuine
   structural gap (not just an optimization-level workaround) rather than
-  a narrower reload-pressure issue. Worth root-causing separately if VLA
-  support in general C programs matters going forward.
+  a narrower reload-pressure issue. **Re-confirmed still ICEing
+  unconditionally after the r11/r13 fixes above** (unaffected, as
+  expected — this is a structurally different case from the others,
+  exactly as this README previously flagged it might be). Worth
+  root-causing separately if VLA support in general C programs matters
+  going forward.
 - **No real varargs.** `printf`/`printf1`/`printf2`/`printf3` are fixed-
   arity as a deliberate scope decision, not real `stdarg.h` support.
 
@@ -650,7 +747,7 @@ compile the example at all):
 | `constant_folding.c` | 8 | 10,228 | 10,228 | 1278.50x | 1 | 116 | 116 | 116.00x |
 | `demo.c` | 2,816 | 10,523 | 10,511 | 3.74x | 20,940 | 2,998 | 2,772 | 0.14x |
 | `dynamic_sensor_report.c` | 12,708 | N/A² | N/A² | N/A | 39,618 | N/A² | N/A² | N/A |
-| `insertion_sort.c` | 864 | 10,492 | N/A¹ | 12.14x | 7,959 | 1,896 | N/A¹ | 0.24x |
+| `insertion_sort.c` | 864 | 10,492 | 10,528 | 12.14x | 7,959 | 1,896 | 1,858 | 0.24x |
 | `interprocedural_constant_folding.c` | 8 | 10,256 | 10,256 | 1282.00x | 1 | 116 | 116 | 116.00x |
 | `pi.c` | 5,240 | N/A¹ | N/A¹ | N/A | 5,225,253,518 | N/A¹ | N/A¹ | N/A |
 | `primes.c` | 3,176 | 10,508 | N/A¹ | 3.31x | 22,936,672 | 2,196,816 | N/A¹ | 0.10x |
@@ -662,9 +759,12 @@ compiles fine at `-O0`. `-O0`-only figures (informational, not a
 substitute for the `-Os`/`-O2` columns since they're not
 optimization-level-comparable to dcc's own pipeline): `bigprime.c` —
 17,507 B / 989,717,761 steps; `pi.c` — 15,234 B / 5,326,000,237 steps;
-`insertion_sort.c` at `-O2` and `primes.c` at `-O2` — no separate `-O0`
-figure needed since `-Os` already succeeds for both; `towers_of_hanoi.c`
-— 10,884 B / 1,358 steps.
+`primes.c` at `-O2` — no separate `-O0` figure needed since `-Os`
+already succeeds; `towers_of_hanoi.c` — 10,884 B / 1,358 steps.
+`insertion_sort.c` at `-O2` now compiles and runs correctly (see the
+r11/r13 fixes above) — its `-O2` column above (10,528 B / 1,858 steps)
+is a real, freshly-measured figure, not a placeholder; output was
+checked byte-for-byte against `dcc` and matches.
 
 ² **N/A: genuine structural gap, not an optimization-level issue.**
 `dynamic_sensor_report.c`'s `sort_samples` uses a VLA
