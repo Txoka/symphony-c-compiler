@@ -287,14 +287,19 @@ leaf/non-leaf calls, at `-O0`/`-O1`/`-O2`); real libgcc signed and
 unsigned multiply/divide/modulo; `malloc`/`free`/`calloc`/`realloc`
 correctness; all four `printf`/`printf1`/`printf2`/`printf3` arities with
 real format strings, verified by reading back the emulator's text-screen
-framebuffer; xfail tests documenting the known `-O1`/`-O2` reload ICE in
-`calloc()`/`__dyn_printf_unsigned()` and the `__muldi3` link-time gap (a
-future fix flips these green automatically instead of the gap silently
-going untracked); and one dedicated regression test per real bug fixed
-during this project (see "Fixed bugs" above) -- frame-pointer placement,
-missing callee-saved registers, the assembler pass1/pass2 desync, and the
+framebuffer; xfail tests documenting the known `calloc()`-at-`-O1`
+reload ICE and the `__muldi3` link-time gap (a future fix flips these
+green automatically instead of the gap silently going untracked; the
+`-O2`/`__dyn_printf_unsigned()`-at-`-O1`/`-O2` xfails that used to be
+here were fixed and flipped to ordinary passing tests -- see the
+`*movsi_reg` memory-alternative fix, "Bug 4" in Known gaps below); and
+one dedicated regression test per real bug fixed during this project
+(see "Fixed bugs" above) -- frame-pointer placement,
+missing callee-saved registers, the assembler pass1/pass2 desync, the
 `__dyn_heap_anchor` BSS-ordering bug (plus a negative test for the
-linker's stale-object check).
+linker's stale-object check), r11-not-FIXED_REGISTERS, r13-not-
+liveness-gated-in-leaf-functions, and the `*movsi_reg` missing-memory-
+alternative bug (Bug 4 in Known gaps below).
 
 `gcc-backend/symphony-gcc/tests/toolchain.py` is the reusable harness
 (`Toolchain.build_and_run(c_source, tmp_path, ...)` compiles+assembles+
@@ -494,17 +499,37 @@ fix.
 
 ### Known gaps / real unresolved bugs (for whoever picks this up next)
 
-**Update (investigation session following the comparison below): the
+**Update (second follow-up session): the rest of the "reload insns" ICE
+class documented below (`towers_of_hanoi.c`'s `move_pile`, and — it
+turned out — almost everything else in this section) has now been
+root-caused and fixed via `*movsi_reg`'s missing memory alternatives
+(see "Bug 4" below), NOT via `TARGET_SECONDARY_RELOAD`. That hook was
+seriously investigated first (per the task brief that prompted this
+session) and found to be structurally the wrong mechanism for this
+failure — see the explanation under Bug 4 for why, confirmed by
+reading LRA's own `check_and_process_move` in `lra-constraints.cc`,
+not just by trying it and giving up. The real fix (adding `m`
+alternatives to `movsi`'s insn pattern) closed `move_pile`, and as a
+side effect — confirmed empirically, not assumed — also closed
+`calloc()` at `-O2`, `__dyn_printf_unsigned()` at `-O1`/`-O2`, the
+`dynamic_sensor_report.c` VLA gap, and every other example in the
+comparison table below that previously hit this ICE class. Full
+before/after regression-suite and comparison-table numbers are in the
+sections below. `calloc()` at `-O1` specifically and the libgcc-
+internal 64-bit-arithmetic build ICE remain genuinely open — see Bug 4
+and the "still open after Bug 4" notes for exactly what and why.**
+
+**Earlier update (first follow-up session, preserved for history): the
 "reload insns" ICE class was investigated in depth — root-caused via a
 minimal reproducer and gdb-traced LRA internals, not guesswork — and
 TWO real, distinct target-description bugs were found and fixed. This
 closed one of the originally-documented trigger cases
 (`insertion_sort.c`'s `main` at `-O2`) and fixed a separate, more
 serious silent-hang correctness bug the ICE investigation surfaced
-along the way. It did NOT close the rest of the ICE class (64-bit
-arithmetic in libgcc, `calloc`/`__dyn_printf_unsigned` at `-O1`/`-O2`,
-`towers_of_hanoi.c`'s `move_pile`, or VLAs) — those remain open, see
-below for exactly what's still broken and why.**
+along the way. It did NOT close the rest of the ICE class at the time
+(64-bit arithmetic in libgcc, `calloc`/`__dyn_printf_unsigned` at
+`-O1`/`-O2`, `towers_of_hanoi.c`'s `move_pile`, or VLAs) — see below,
+and see Bug 4 above for how most of the rest was closed since.**
 
 - **Bug 1 (FIXED): `r11` (the hard frame pointer) was not marked
   `FIXED_REGISTERS`.** This let IRA/LRA treat it as an ordinary
@@ -571,73 +596,125 @@ below for exactly what's still broken and why.**
   **neutral** — no change to any reproducer or to the existing test
   suite's xfail set — and was likewise not included, to keep the
   committed fix minimal and to what's demonstrated beneficial.
-- **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) hits a real LRA/
-  reload ICE ("maximum number of generated reload insns per insn
-  achieved") *inside libgcc's own build* at `-O2` (libgcc's required
-  optimization level) and is excluded from libgcc entirely
-  (`LIB2FUNCS_EXCLUDE` in `libgcc-config/symphony/t-symphony`). **Still
-  not root-caused or fixed** — the r11/r13 fixes above did not close
-  this (libgcc is still built with these functions excluded; removing
-  the exclusion and rebuilding libgcc still ICEs the same way). Note
-  the failure mode for user code: compiling a 64-bit multiply/divide in
-  an ordinary program does NOT ICE (GCC just emits a libcall like any
-  other target) — the gap only surfaces at **link time**, as an
-  undefined-symbol error for `__muldi3`/`__divdi3`/etc., since they're
-  simply absent from `libgcc.a`. Exercised by `test_gcc_backend.py`'s
-  `test_64bit_multiply_links` (xfail, documents the link failure rather
-  than a compile ICE).
-- **`calloc()`/`__dyn_printf_unsigned()` at `-O1`/`-O2` — still not
-  fixed.** Re-confirmed still ICEing, unchanged, after the r11/r13
-  fixes above (`test_gcc_backend.py`'s `test_calloc_compiles_at_o1_o2`
-  and `test_printf_unsigned_compiles_at_o1_o2` are still xfail, not
-  flipped). Compile the runtime at `-O0` to avoid this (worked around
-  only, as before).
-- **A plain recursive function with no loops at all still ICEs at
-  every optimization level above `-O0`** — `examples/towers_of_hanoi.c`'s
-  `move_pile`, confirmed via a minimal reproducer and gdb-traced the
-  same way as bugs 1/2 above, but to a **different, distinct**
-  mechanism neither fix above addresses: a pseudo holding a value that
-  must survive the function's own recursive call (register allocator
-  ran out of the 4 callee-saved hard registers and had to spill one to
-  a stack slot) has its reload before a subsequent use re-emitted over
-  and over — `(set (reg N)(reg M))` with `M` incrementing every retry —
-  without LRA ever accepting it as satisfying constraints board-wide.
-  This is LRA failing to converge on an ordinary register-pressure
-  spill/reload, not something r11- or r13-specific. Whoever picks this
-  up next should look at why LRA's per-insn retry loop
-  (`lra_constraints`'s `curr_insn`/`original_insn` bookkeeping around
-  `lra-constraints.cc:5375`-`5392`) fails to terminate for a spilled
-  pseudo's reload specifically when it's read again after a subsequent
-  call — the evidence from the reverted `ADDR_REGS` attempt above
-  suggests this needs a genuine LRA-level or spill-strategy fix, not
-  just another register-class rebalancing (taking a register away to
-  give LRA more "room to maneuver" measurably made this exact case
-  worse, not better).
-- **This ICE class is broader than previously documented** (found while
-  building the "dcc vs GCC comparison" below, testing every
-  `examples/*.c` file at `-Os` and `-O2`): besides `move_pile` above, it
-  also fires on a non-leaf function taking a struct pointer with a
-  realloc-growth branch (`examples/dynamic_sensor_report.c`'s
-  `series_push`, and separately `primes.c`'s `main` at `-O2` only). Not
-  root-caused — believed (not confirmed) to be the same general "LRA
-  fails to converge on a spill/reload under this target's very
-  restricted register classes/addressing modes" defect family as
-  `move_pile` above, but each case would need its own gdb trace to
-  confirm before assuming a single fix would close all of them — `-O0`
-  reliably avoids it for ordinary user code, same as for the runtime
-  library.
-- **VLAs (variable-length arrays) hit the same ICE unconditionally, at
-  every optimization level including `-O0`.** Confirmed via
-  `examples/dynamic_sensor_report.c`'s `sort_samples(int *values,
-  unsigned int count) { int scratch[count]; ... }` — this is the one
-  case in the comparison below with no `-O0` fallback at all, a genuine
-  structural gap (not just an optimization-level workaround) rather than
-  a narrower reload-pressure issue. **Re-confirmed still ICEing
-  unconditionally after the r11/r13 fixes above** (unaffected, as
-  expected — this is a structurally different case from the others,
-  exactly as this README previously flagged it might be). Worth
-  root-causing separately if VLA support in general C programs matters
-  going forward.
+- **Bug 4 (FIXED, second follow-up session): `*movsi_reg` had no memory
+  ("m") alternatives at all** — the very first port of this target
+  split SImode moves into an always-register-to-register `*movsi_reg`
+  plus two entirely separate, non-overlapping patterns (`*load_si`/
+  `*store_si`) for memory access. That split is what caused essentially
+  all of the "reload insns" ICE class documented in this section,
+  including `move_pile` and (it turned out empirically) most of the
+  rest of the section below too. **Mechanism** (gdb-traced into
+  `lra_constraints`, `lra-constraints.cc:5392`, the exact same
+  breakpoint used for bugs 1/2 above, applied to
+  `examples/towers_of_hanoi.c`'s `move_pile` at `-O2`): under real
+  register pressure (`move_pile` is a leaf-adjacent recursive function
+  with 4 live parameters that must all survive its own recursive call,
+  against only 4 callee-saved hard registers), IRA has to spill a
+  pseudo (`reg 48`, `source`) to a stack slot. When LRA then needs to
+  reload that spilled pseudo for use in `(set (reg 48) (reg M))`
+  (matched against `*movsi_reg`), it finds **no alternative in the
+  insn's own constraint set that accepts a memory operand at all** —
+  `*movsi_reg`'s only alternatives were `r,r` and `r,I`. With no way to
+  reload the operand in place (the convergent, ordinary path LRA's
+  constraint machinery is built for), LRA fell back to its generic
+  equivalence/inheritance substitution path instead, repeatedly minting
+  a fresh temporary pseudo (`orig:48 source`) to stand in for the
+  spilled one on each retry; each fresh pseudo could *also* fail to get
+  a hard register under the same pressure, so the substitution never
+  terminated, hitting the reload-insn retry cap at insn 964 — the exact
+  `(set (reg 48)(reg 493))`-shaped loop this README's earlier revision
+  described as an unresolved "genuine LRA-level convergence failure."
+  It was not a deeper LRA bug at all: it was a target-description gap
+  (no memory alternative to reload against) masquerading as one.
+  **`TARGET_SECONDARY_RELOAD` was investigated first as the fix
+  mechanism** (per the brief that prompted this session) and found to
+  be structurally the wrong hook for this failure, confirmed by reading
+  `check_and_process_move` in `lra-constraints.cc` (where
+  `targetm.secondary_reload` is actually called from): that function
+  explicitly bails (`if (! REG_P (dreg) || ! REG_P (sreg)) return
+  false;`) whenever either side of the move is a `MEM`, i.e. it only
+  ever governs register-class-to-register-class copies, never memory
+  operand access. Since this target has exactly one real register
+  class (`GENERAL_REGS`, equal to `ALL_REGS` — see `symphony.h`'s `enum
+  reg_class`), there is also no second class to move a value through
+  even in the cases where the hook *does* apply. **Fixed instead** by
+  giving `*movsi_reg` real `m` alternatives (`symphony.md`,
+  `config/symphony/symphony.md`) so a spilled pseudo's memory location
+  can be presented directly to this insn's own constraint matching —
+  letting LRA reload it as an ordinary, convergent operation instead of
+  falling back to unbounded substitution. The memory operand's address
+  is still constrained to a bare register only (`(mem (match_operand
+  "register_operand" "r"))`), matching `symphony_legitimate_address_p`
+  exactly — this ISA genuinely has no base+offset addressing mode. A
+  spill slot's natural address as GCC/LRA constructs it is
+  frame-relative, `(mem (plus (reg r11) (const_int N)))`, which is
+  *not* a legitimate address here, but that turned out not to need any
+  new hook either: LRA's own generic `process_address_1`
+  (`lra-constraints.cc`) already knows how to legitimize exactly this
+  shape, by materializing the sum into a scratch pseudo via an `ADD`
+  before the load/store — it just needed an insn alternative exposing
+  a memory operand to run against, which is exactly what this fix
+  supplies. `symphony_print_operand` also needed a small fix alongside
+  this (`symphony.cc`): it previously had no `MEM_P` case at all
+  (memory operands were always printed via the separate `*load_si`/
+  `*store_si` patterns' own explicit `[%N]` template text, never via
+  `%0`/`%1` referring to a raw `(mem ...)` directly), so it now
+  dispatches a `MEM` operand to `symphony_print_operand_address` the
+  same way `output_operand`'s generic default would on a target that
+  didn't need a custom hook here. **Verified**: `move_pile` now
+  compiles cleanly at `-Os` and `-O2` (previously ICE'd at every level
+  above `-O0`) and produces byte-identical `output()` call sequences to
+  `dcc`'s own build of the same program, for the same `input()` values
+  (`[2, 0, 2, 1]`, from `tests/test_compiler.py`'s
+  `test_towers_of_hanoi_example`) — see the comparison table below for
+  the actual numbers. Regression test:
+  `test_gcc_backend.py`'s `TestBugRegressions::test_movsi_memory_alternative_under_register_pressure`.
+- **Side effect of Bug 4's fix, confirmed empirically (not assumed):**
+  the regression suite's `calloc()`-at-`-O2` and
+  `__dyn_printf_unsigned()`-at-`-O1`/`-O2` xfail tests both now XPASS
+  (i.e. those two ICEs are fixed too — same root cause), and every
+  `examples/*.c` file in the comparison table below — including
+  `dynamic_sensor_report.c`'s VLA-using `sort_samples`, previously
+  documented as an unconditional structural gap even at `-O0` — now
+  compiles cleanly at both `-Os` and `-O2` and produces byte-identical
+  output to `dcc`. This was NOT assumed from the `move_pile` fix
+  working; every one of these was independently re-run against the
+  fixed toolchain and checked. The VLA case in particular turning out
+  to share this root cause (rather than being the separately-diagnosed
+  "structurally different" gap this README previously described) was a
+  genuine surprise, confirmed rather than guessed — `sort_samples`'s
+  `int scratch[count]` local, once past the front-end's VLA lowering,
+  turns into exactly the kind of address-restricted memory access that
+  needed a real `movsi` memory alternative like everything else here.
+- **Still genuinely open after Bug 4** — real, unresolved, and not the
+  same defect as the above:
+  - **`calloc()` at `-O1` specifically** (not `-O2`) still hits the
+    same "maximum number of generated reload insns" signature. This is
+    a real, reproducible result (re-run directly with `xgcc -S -O1`,
+    not inferred) — plausible given GCC's own well-known behavior of
+    `-O1` sometimes carrying *higher* register pressure than `-O2` at
+    certain points (less aggressive rematerialization/copy-propagation
+    can leave more values simultaneously live), but not further
+    root-caused within this session. `test_calloc_compiles_at_o1_o2`
+    remains parametrized and split: `-O1` still xfails, `-O2` now
+    xpasses (adjusted to reflect this).
+  - **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) still hits the
+    same ICE signature *inside libgcc's own build* at `-O2` and is
+    still excluded from libgcc (`LIB2FUNCS_EXCLUDE` in
+    `libgcc-config/symphony/t-symphony`) — rebuilding libgcc with the
+    exclusion removed, against the Bug-4-fixed compiler, still ICEs.
+    Not re-investigated in depth this session (out of this task's
+    stated scope, which was the `move_pile`/reload-insns class, not
+    64-bit arithmetic specifically) — worth revisiting given how much
+    of the rest of this ICE class turned out to share one cause, but
+    libgcc's own multi-word arithmetic (`umul_ppmm`-style multi-limb
+    macros) may plausibly hit a structurally different pattern than
+    ordinary user code did. The failure mode for user code is
+    unchanged: a 64-bit multiply/divide in ordinary code compiles fine
+    (GCC emits a libcall), the gap only surfaces at **link time** as an
+    undefined-symbol error, since `__muldi3`/`__divdi3`/etc. are simply
+    absent from `libgcc.a`. Exercised by `test_gcc_backend.py`'s
+    `test_64bit_multiply_links` (still xfail, unchanged).
 - **No real varargs.** `printf`/`printf1`/`printf2`/`printf3` are fixed-
   arity as a deliberate scope decision, not real `stdarg.h` support.
 
@@ -736,41 +813,41 @@ permanent benchmarking framework.
   `bigprime.c` (identical 128-bit prime found, identical candidate
   count).
 
-**Results** (GCC size/steps columns are `-Os`; see per-example notes for
-`-O2` and the `-O0`-only fallback figures where `-Os`/`-O2` could not
-compile the example at all):
+**Results** (rebuilt in full after the `*movsi_reg` memory-alternative
+fix above — every example now compiles and runs cleanly at BOTH `-Os`
+and `-O2`, so there are no `N/A` rows left; the previous revision of
+this table had four `N/A` examples, all of which the fix above closed,
+confirmed empirically by re-running this exact script, not assumed):
 
 | Example | dcc size (B) | GCC `-Os` size (B) | GCC `-O2` size (B) | Size ratio (GCC `-Os` / dcc) | dcc steps | GCC `-Os` steps | GCC `-O2` steps | Steps ratio (GCC `-Os` / dcc) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `arena_allocator.c` | 1,252 | 10,744 | 10,500 | 8.58x | 553 | 274 | 116 | 0.50x |
-| `bigprime.c` | 11,452 | N/A¹ | N/A¹ | N/A | 967,077,337 | N/A¹ | N/A¹ | N/A |
+| `arena_allocator.c` | 1,252 | 10,756 | 10,500 | 8.59x | 553 | 277 | 116 | 0.50x |
+| `bigprime.c` | 11,452 | 14,411 | 15,671 | 1.26x | 967,077,337 | 259,594,889 | 186,078,003 | 0.27x |
 | `constant_folding.c` | 8 | 10,228 | 10,228 | 1278.50x | 1 | 116 | 116 | 116.00x |
 | `demo.c` | 2,816 | 10,523 | 10,511 | 3.74x | 20,940 | 2,998 | 2,772 | 0.14x |
-| `dynamic_sensor_report.c` | 12,708 | N/A² | N/A² | N/A | 39,618 | N/A² | N/A² | N/A |
+| `dynamic_sensor_report.c` | 12,708 | 13,524 | 13,784 | 1.06x | 39,618 | 13,199 | 12,367 | 0.33x |
 | `insertion_sort.c` | 864 | 10,492 | 10,528 | 12.14x | 7,959 | 1,896 | 1,858 | 0.24x |
 | `interprocedural_constant_folding.c` | 8 | 10,256 | 10,256 | 1282.00x | 1 | 116 | 116 | 116.00x |
-| `pi.c` | 5,240 | N/A¹ | N/A¹ | N/A | 5,225,253,518 | N/A¹ | N/A¹ | N/A |
-| `primes.c` | 3,176 | 10,508 | N/A¹ | 3.31x | 22,936,672 | 2,196,816 | N/A¹ | 0.10x |
-| `towers_of_hanoi.c` | 312 | N/A¹ | N/A¹ | N/A | 272 | N/A¹ | N/A¹ | N/A |
+| `pi.c` | 5,240 | 12,744 | 13,344 | 2.43x | 5,225,253,518 | 1,055,567,369 | 1,051,744,856 | 0.20x |
+| `primes.c` | 3,176 | 10,508 | 10,568 | 3.31x | 22,936,672 | 2,196,816 | 2,196,943 | 0.10x |
+| `towers_of_hanoi.c` | 312 | 10,796 | 14,264 | 34.60x | 272 | 1,197 | 888 | 4.40x |
 
-¹ **N/A: hits the "reload insns" ICE class documented above** at the
-noted optimization level(s), not a fundamental block — the program
-compiles fine at `-O0`. `-O0`-only figures (informational, not a
-substitute for the `-Os`/`-O2` columns since they're not
-optimization-level-comparable to dcc's own pipeline): `bigprime.c` —
-17,507 B / 989,717,761 steps; `pi.c` — 15,234 B / 5,326,000,237 steps;
-`primes.c` at `-O2` — no separate `-O0` figure needed since `-Os`
-already succeeds; `towers_of_hanoi.c` — 10,884 B / 1,358 steps.
-`insertion_sort.c` at `-O2` now compiles and runs correctly (see the
-r11/r13 fixes above) — its `-O2` column above (10,528 B / 1,858 steps)
-is a real, freshly-measured figure, not a placeholder; output was
-checked byte-for-byte against `dcc` and matches.
-
-² **N/A: genuine structural gap, not an optimization-level issue.**
-`dynamic_sensor_report.c`'s `sort_samples` uses a VLA
-(`int scratch[count]`), which ICEs this backend at every optimization
-level including `-O0` — see "VLAs... hit the same ICE unconditionally"
-above. No GCC-side figure exists for this example at any level.
+Every row above was independently re-verified byte-for-byte correct
+against `dcc`'s own output for the same program and the same
+`input()`/RNG-seed values noted earlier in this section — return value
+(`r1` at halt), the full `output()` call sequence, and printf
+screen-framebuffer text (where applicable) all matched exactly,
+including the multi-billion-step `pi.c` (5.2B dcc-side /
+~1.05B GCC-side steps, all 3838 printed digits identical) and
+`bigprime.c` (identical 128-bit prime found on both sides). This
+includes `dynamic_sensor_report.c` — previously the one example with
+no GCC-side figure at any optimization level at all, a VLA-using
+function (`sort_samples`'s `int scratch[count]`) that turned out to
+share Bug 4's root cause rather than being the separately-diagnosed
+"structurally different, unconditional" gap this README previously
+described (see Bug 4's writeup above for the honest correction) — and
+`towers_of_hanoi.c`, this task's original target, whose `-Os`/`-O2`
+columns are both real, freshly-measured figures for the first time.
 
 **Reading the results**: dcc's own fixed pipeline produces dramatically
 smaller and (for anything not dominated by a hot inner loop) faster
@@ -781,21 +858,23 @@ vs. ~10KB / 116 steps under GCC purely from linking in libgcc + the
 runtime's `atexit`/heap/printf machinery, none of which the program
 actually uses), and dcc's optimizer targets this exact ISA's addressing
 and calling-convention quirks directly rather than going through a
-general-purpose target's RTL pipeline. The one place GCC's `-O2` pulls
-ahead on **steps** despite this fixed overhead is `arena_allocator.c`
-(116 vs dcc's 553) and `demo.c`/`primes.c` (fewer steps once the fixed
-~10KB overhead's own startup cost is paid) — worth a closer look
-separately if GCC-backend codegen quality (not just "does it compile")
-becomes a project goal.
+general-purpose target's RTL pipeline. GCC's `-O2` pulls ahead of dcc on
+**steps** for several examples once the fixed ~10-15KB overhead's own
+startup cost is paid — most dramatically `arena_allocator.c` (116 vs
+dcc's 553, a 4.8x step reduction) and `towers_of_hanoi.c` (888 vs dcc's
+272 is still a step INCREASE here, unlike the others, since
+`towers_of_hanoi.c` is dominated by call overhead rather than a hot
+loop `-O2` can shrink) — worth a closer look separately if GCC-backend
+codegen quality (not just "does it compile") becomes a project goal.
 
-**Effort characterization**: producing this table did not require fixing
-anything new — the toolchain (build, assembler, linker, runtime) built
-in the earlier milestones worked as-is. The real time cost was the
-`-Os`/`-O2` reload ICE turning out to affect roughly half the example
-set (5 of 10) rather than the two runtime-library functions the README
-previously documented, which took some investigation via `-O0`
-fallback testing to characterize precisely (which examples/functions
-trip it, at which optimization levels, whether `-O0` avoids it) rather
-than being fixed — per this task's scope, that root-cause work is
-explicitly left for whoever picks up the "reload insns" ICE class next,
-not attempted here.
+**Effort characterization**: this revision of the table (unlike the
+previous one) DID require fixing something new — the `*movsi_reg`
+memory-alternative fix (Bug 4, above) is what closed the four
+previously-`N/A` rows. The table was rebuilt from scratch against the
+fixed toolchain using the same scratch driver script from the earlier
+session (`compare.py`, not committed — see the earlier revision of
+this note for why), with no changes to its methodology: same printf
+call-site rewrite, same `input()`/RNG-seed values, same byte-for-byte
+correctness checking. Every number in the table above comes from an
+actual emulator run against the fixed toolchain, not carried over or
+estimated from the previous revision.
