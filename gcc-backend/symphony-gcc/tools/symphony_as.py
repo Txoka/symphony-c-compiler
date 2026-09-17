@@ -80,6 +80,45 @@ def parse_mem_operand(tok):
     return parse_register(m.group(1))
 
 
+def _parse_asm_string(rest):
+    """Parse a GNU-as `.ascii "..."` operand (the only operand form GCC's
+    own string-literal output ever emits for this target -- no multi-
+    string comma lists) into raw bytes, honoring backslash escapes:
+    octal \\NNN (1-3 digits, GCC's own escaping for non-printable bytes)
+    and the common C ones (\\n \\t \\r \\\\ \\" \\0)."""
+    s = rest.strip()
+    if not (s.startswith('"') and s.endswith('"') and len(s) >= 2):
+        raise ValueError(f"expected a quoted string operand, got {rest!r}")
+    s = s[1:-1]
+    out = bytearray()
+    i = 0
+    simple = {"n": 10, "t": 9, "r": 13, "\\": 92, '"': 34, "a": 7, "b": 8,
+              "f": 12, "v": 11}
+    while i < len(s):
+        c = s[i]
+        if c != "\\":
+            out.append(ord(c))
+            i += 1
+            continue
+        i += 1
+        if i >= len(s):
+            break
+        esc = s[i]
+        if esc in simple:
+            out.append(simple[esc])
+            i += 1
+        elif esc.isdigit():
+            j = i
+            while j < len(s) and j < i + 3 and s[j].isdigit():
+                j += 1
+            out.append(int(s[i:j], 8) & 0xFF)
+            i = j
+        else:
+            out.append(ord(esc))
+            i += 1
+    return bytes(out)
+
+
 def parse_int_or_symbol(tok):
     tok = tok.strip()
     try:
@@ -149,8 +188,15 @@ class Assembler:
             parsed_lines.append(("insn", mnem, operands, size))
             offsets[self.cur_section] += size
 
-        # Pass 2: encode, emitting relocations for any symbol not defined
-        # in this translation unit (checked against self.labels).
+        # Pass 2: write section bytes (instructions AND queued directive
+        # data, in the same order pass 1 saw them) and emit relocations
+        # for any symbol not defined in this translation unit (checked
+        # against self.labels). `cursors` is the ONLY position tracker
+        # here, deliberately -- every write to self.sections happens in
+        # this loop so cursors always matches the true byte offset,
+        # unlike the old design where pass 1 wrote directive bytes
+        # directly into self.sections while pass 2 tracked a separate,
+        # independently-zeroed cursor (see _handle_directive's comment).
         self.cur_section = "text"
         cursors = {"text": 0, "data": 0}
         for entry in parsed_lines:
@@ -158,6 +204,11 @@ class Assembler:
                 continue
             if entry[0] == "section":
                 self.cur_section = entry[1]
+                continue
+            if entry[0] == "data":
+                _, section, data = entry
+                self.sections[section].extend(data)
+                cursors[section] += len(data)
                 continue
             _, mnem, operands, size = entry
             encoded = self._encode_insn(mnem, operands, cursors[self.cur_section])
@@ -173,9 +224,46 @@ class Assembler:
         return mnem, operands
 
     def _handle_directive(self, line, offsets, parsed_lines):
+        # IMPORTANT: this only computes LAYOUT (section, size, and -- for
+        # symbol-valued data directives -- a reloc whose *offset* is a
+        # pass-1 `offsets[section]` coordinate) and queues a ("data",
+        # section, bytes-or-None) entry for pass 2 to actually write.
+        # Earlier versions of this method wrote bytes straight into
+        # self.sections during pass 1 while pass 2 separately tracked its
+        # own `cursors` dict starting at 0 for instruction encoding --
+        # those two coordinate systems silently diverged the moment any
+        # data directive preceded an instruction in the same section
+        # (e.g. a GCC-emitted string literal ahead of the function that
+        # references it), corrupting every later relocation site offset
+        # in that section by the directive's byte length. Queuing data
+        # writes as parsed_lines entries and having ONLY pass 2 write to
+        # self.sections keeps both coordinate systems identical by
+        # construction. (Caught by direct emulator-level testing: a
+        # linked `link_call` to a real function jumped to the wrong
+        # address whenever a string literal preceded it in the same
+        # translation unit -- silent, not a build-time error.)
         parts = line.split(None, 1)
         name = parts[0]
         rest = parts[1] if len(parts) > 1 else ""
+
+        if name in (".ascii", ".asciz", ".string"):
+            # GNU-as string directives: a double-quoted string with
+            # backslash escapes (octal \NNN, and the usual \n/\t/\\/\"
+            # C-style ones), emitted byte-for-byte into the current
+            # section. .asciz/.string add an implicit trailing NUL;
+            # .ascii does not (GCC's own string-literal output always
+            # supplies its own explicit "\0" for .ascii, per the
+            # default_elf_asm_output_ascii-alike behavior symphony.h's
+            # STRING_LIMIT-less path falls back to). Parsed here (not
+            # via the generic comma-split below) because a string
+            # literal can legitimately contain a comma.
+            data = _parse_asm_string(rest)
+            if name != ".ascii":
+                data += b"\x00"
+            parsed_lines.append(("data", self.cur_section, bytes(data)))
+            offsets[self.cur_section] += len(data)
+            return
+
         args = [a.strip() for a in rest.split(",")] if rest else []
 
         if name == ".text":
@@ -222,7 +310,7 @@ class Assembler:
             cur = offsets[self.cur_section]
             pad = (-cur) % align
             if pad:
-                self.sections[self.cur_section].extend(bytes(pad))
+                parsed_lines.append(("data", self.cur_section, bytes(pad)))
                 offsets[self.cur_section] += pad
             return
         if name == ".zero" or name == ".skip":
@@ -235,7 +323,7 @@ class Assembler:
                 else:
                     self.sections["bss_size"] += size
                 return
-            self.sections[self.cur_section].extend(bytes(size))
+            parsed_lines.append(("data", self.cur_section, bytes(size)))
             offsets[self.cur_section] += size
             return
         if name in (".byte", ".2byte", ".short", ".hword", ".4byte", ".long", ".word"):
@@ -250,12 +338,12 @@ class Assembler:
                     # memory reads big-endian) -- data directives must
                     # match, or GCC-initialized globals silently read back
                     # byte-swapped.
-                    self.sections[self.cur_section].extend(
-                        (v & ((1 << (8 * width)) - 1)).to_bytes(width, "big"))
+                    parsed_lines.append(("data", self.cur_section,
+                        (v & ((1 << (8 * width)) - 1)).to_bytes(width, "big")))
                 else:
                     off = offsets[self.cur_section]
                     self.relocs.append((self.cur_section, off, v, 0, f"data{width}", 0))
-                    self.sections[self.cur_section].extend(bytes(width))
+                    parsed_lines.append(("data", self.cur_section, bytes(width)))
                 offsets[self.cur_section] += width
             return
         # Unrecognized directive (e.g. .file, .ident, .size, .type,
@@ -380,6 +468,56 @@ class Assembler:
 
         if mnem == "nop":
             return pad_fixed_width(isa.mov(Register.ZR, Register.ZR))
+
+        # Raw I/O opcodes (docs/isa.txt): no .md pattern exists for these
+        # (GCC has no generic notion of "read a keypress" or "write a
+        # framebuffer setting"), so the runtime/libc sources reach them via
+        # plain __asm__ text (GCC's generic inline-asm support works for
+        # any well-formed target .s output, no dedicated builtins needed)
+        # and this assembler recognizes the mnemonics directly.
+        if mnem == "input":
+            (d,) = operands
+            return pad_fixed_width(isa.input_(parse_register_operand(d)))
+
+        if mnem == "output":
+            (v,) = operands
+            try:
+                vr = parse_register_operand(v)
+                return pad_fixed_width(isa.output(vr, False))
+            except ValueError:
+                imm = parse_int_or_symbol(v)
+                if not isinstance(imm, int):
+                    raise ValueError(f"output immediate operand must be a literal: {v}")
+                if imm < 0:
+                    imm &= 0xFFFF
+                return pad_fixed_width(isa.output(imm, True))
+
+        if mnem == "keyboard":
+            (d,) = operands
+            return pad_fixed_width(isa.keyboard(parse_register_operand(d)))
+
+        if mnem in ("time_0", "time_1"):
+            (d,) = operands
+            part = 0 if mnem == "time_0" else 1
+            return pad_fixed_width(isa.time(part, parse_register_operand(d)))
+
+        if mnem == "screen":
+            setting, value = operands
+            sr = parse_register_operand(setting)
+            try:
+                vr = parse_register_operand(value)
+                return pad_fixed_width(isa.screen(sr, vr, False))
+            except ValueError:
+                imm = parse_int_or_symbol(value)
+                if not isinstance(imm, int):
+                    raise ValueError(f"screen immediate operand must be a literal: {value}")
+                if imm < 0:
+                    imm &= 0xFFFF
+                return pad_fixed_width(isa.screen(sr, imm, True))
+
+        if mnem == "counter":
+            (d,) = operands
+            return pad_fixed_width(isa.counter(parse_register_operand(d)))
 
         if mnem == "link_return":
             return pad_fixed_width(isa.link_return())
