@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 from .frontends.c import CFrontend
 from .frontends.protocol import SourceFrontend
-from .middle.passes import optimize
+from .middle.passes.pipeline import lower_intrinsics
+from .middle.ssa import construct, destruct, verify
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
 
@@ -31,9 +32,15 @@ class Compiler:
         return self.finish(self.frontend.lower_project(sources))
 
     def finish(self, frontend) -> Compilation:
-        ir = optimize(frontend.ir)
+        ir = frontend.ir
+        for function in ir.functions:
+            # Required legalization, not optimization: these intrinsics have
+            # no C body, only a target-instruction lowering.
+            lower_intrinsics(function)
+            construct(function)
+            verify(function)
+            destruct(function)
         legalize_runtime_arithmetic(ir)
-        ir = optimize(ir)
         return Compilation(
             frontend.parsed,
             frontend.typed,

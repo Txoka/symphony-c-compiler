@@ -448,7 +448,12 @@ class Backend:
     ):
         # The frame pointer follows its saved predecessor, any saved value
         # registers, and an optional saved r13. Argument eight is at the entry SP.
-        offset = 4 * (position - 7 + saved_register_count + int(link_saved))
+        # The caller always pushes a full word regardless of the parameter's
+        # width; on this big-endian target the value occupies that word's
+        # low-order bytes, so a narrower load must start further into it.
+        offset = 4 * (position - 7 + saved_register_count + int(link_saved)) + (
+            4 - type_.size
+        )
         if offset <= 0xFFFF:
             self.a.emit(isa.alu("add", 7, ABI.frame_pointer, offset, True))
         else:
@@ -514,6 +519,10 @@ class Backend:
             for instruction in f.instructions
             if instruction.op == "local_addr"
         }
+        # An unused parameter has no local_addr (the lowerer only emits one on
+        # actual use), but the prologue below still stores its incoming
+        # argument register somewhere before anything has proven it unused.
+        addressed |= {symbol.key for symbol in f.params}
         for symbol in f.params + f.locals:
             if symbol.key in promoted or symbol.key not in addressed:
                 continue
