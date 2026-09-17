@@ -212,6 +212,120 @@ Remaining work, in dependency and payoff order:
 - [ ] Remove redundant loop loads and stores.
 - [ ] Recognize count-down loops when they are cheaper for the target ISA.
 
+### GCC optimization techniques dyncc's own optimizer should adopt
+
+Verified by compiling `examples/primes.c` (sieve core, printf stripped),
+`examples/insertion_sort.c`, and `examples/pi.c`'s `div_small` (the
+bignum digit-extraction loop) with the real GCC backend
+(`gcc-backend/symphony-gcc/`) at `-O2` and reading the actual generated
+`.s`, then comparing against what `symphony/middle/passes/pipeline.py`
+currently does (read directly, not assumed). `pipeline.py` already has
+real optimization work -- SSA-based SCCP, cross-block copy/constant
+propagation, inlining, tail-call-to-loop conversion, dead-code/CFG
+cleanup, and (`strength_reduce`, below section 3) a LIMITED strength
+reduction that only replaces power-of-two multiply/divide/modulo by a
+*constant* operand with shifts/masks. It has **no loop pass of any
+kind** today (confirmed: no `loop`, `induction`, or `invariant` hits
+anywhere in `middle/passes/`) and **no pattern-matched runtime-call
+substitution** (no `memset` reference anywhere in the pipeline). The
+gap below is specifically what a real loop pass needs to close, not a
+restatement of "GCC is more mature":
+
+1. **Induction-variable address/pointer hoisting** (the single biggest,
+   most broadly-applicable gap). In every one of the three examples
+   inspected, GCC replaces `array[i]`-style address computation
+   (`base + i * element_size`, which on this ISA needs an
+   `add`+multiply-or-shift per access since there is no scaled-index
+   addressing mode) with a pointer variable that is **incremented by
+   the element size once per loop iteration** and carried as a live
+   value across the whole loop. `primes.c`'s inner marking loop walks
+   `composite[x]` via `add r12, r12, r10` (no re-derivation of
+   `base+x`); `insertion_sort.c`'s `sort16` walks `values[index]` via
+   `add r8, r8, 1`; `pi.c`'s `div_small` walks `a[i]` via
+   `add r13, r13, 4`, with the loop's own exit test also rewritten from
+   an index comparison (`i < N`) to a **pointer-limit comparison**
+   (`cmp r8, r13` against a precomputed `a + N*4` computed once, so
+   even the trip-count multiply happens only once, not per iteration).
+   dyncc's optimizer has no equivalent: `promote_scalar_locals`
+   promotes whole scalar locals to registers but has no notion of an
+   induction variable or of turning a repeated indexed access into a
+   loop-carried cursor. This is worth building before the others below
+   since it is the mechanism that actually explains most of GCC's step-
+   count win on loop-heavy code in the comparison table (see "dcc vs
+   GCC comparison" in `gcc-backend/symphony-gcc/README.md` --
+   `arena_allocator.c` at 0.50x GCC/dcc steps, `primes.c` at 0.10x,
+   `pi.c` at 0.20x, `bigprime.c` at 0.27x -- all loop-dominated
+   programs where GCC's `-Os` output takes a fraction of dcc's step
+   count despite dcc's much smaller binary).
+2. **Loop-invariant hoisting of repeated multiplies**, closely related
+   to (1) but distinct: `primes.c`'s outer sieve loop computes `p * p`
+   via a real `link_call __mulsi3` (this ISA has no hardware multiply)
+   exactly ONCE per outer-loop iteration, not once per inner-loop
+   iteration and not re-derived from scratch each time `p` changes --
+   the inner marking loop that walks `composite[p*p], composite[p*p+p],
+   ...` never calls `__mulsi3` again, it only uses the hoisted value
+   plus pointer increments from (1). A generic loop-invariant-code-
+   motion pass (recognize that `p * p`'s operands don't change within
+   the inner loop, so the multiply can't legally move there anyway --
+   the real win is recognizing it does not need RE-computing on every
+   OUTER iteration beyond the one dependency on `p`) would subsume
+   this, but note it specifically interacts with the existing
+   `strength_reduce` pass: on a target with no hardware multiply, every
+   softwareized `__dyn_mul`/`link_call __mulsi3` is call-costly (dyncc
+   already treats software multiply/divide/remainder as a call for
+   liveness purposes per section 6 above), so hoisting one out of an
+   inner loop is a strictly bigger win here than it would be on a
+   target with a hardware multiply instruction.
+3. **`memset` (and, by the same mechanism, `memcpy`) pattern
+   recognition** for whole-array constant-fill loops. `primes.c`'s
+   `for (i = 0; i < N; i++) composite[i] = false;` and `pi.c`'s
+   `zero()` (`while (i < N) { a[i] = 0; i = i + 1; }`, a differently-
+   shaped loop over the same pattern -- confirmed both compile to the
+   identical mechanism) both become a single `link_call memset` instead
+   of an N-iteration store loop. This is the dominant, sometimes only,
+   difference for any example with a bulk array-clear at the top of a
+   hot function -- `arena_allocator.c`'s 0.50x steps ratio is
+   consistent with this being a major contributor, since it's the
+   smallest and least loop-heavy of the examples that still shows a
+   large GCC win. A dedicated idiom-recognition pass (constant-value
+   store to every element of a provably-contiguous array/slice, no
+   aliasing escape, replace with a call to dyncc's own
+   `runtime/heap.c`-family `memset`) would need no new IR primitive,
+   just a new fixed-point pass alongside the existing dead-store/
+   dead-allocation work already planned in item 2 of "Remaining work"
+   above.
+4. **Whole-function register allocation keeping loop-critical values
+   resident across the entire loop nest**, not just within a call-free
+   span. All three examples keep 4-5 loop-critical values (array base/
+   cursor pointers, loop bounds, hoisted multiply results) resident in
+   `r8`-`r12` for the full duration of the function, including across
+   the `link_call __mulsi3`/`memset` calls inside the loop (since
+   r8-r12 are callee-saved, a call inside the loop doesn't evict them).
+   dyncc's own register allocation (section 6 above) already does real
+   work -- `r3`-`r6` for values not crossing calls, `r8`-`r11` for
+   values that persist across branches/calls, callee-saved
+   push/pop scoped to what's actually used -- but it funnels ordinary
+   arithmetic through `r1`/`r2` rather than running a real interference-
+   graph or linear-scan allocator over SSA values (section 6's own
+   still-open items), so it can't reliably keep AS MANY concurrently-
+   live loop values resident as GCC's allocator does once a loop has
+   4+ genuinely live cross-iteration values (exactly the shape all
+   three examples above have). This item is really section 6's
+   existing "Build live intervals or an interference graph" /
+   "Allocate SSA values with a real linear-scan or interference-based
+   allocator" work, called out here again because loop bodies are where
+   the register-pressure payoff is largest.
+
+None of this changes dyncc's zero-runtime-overhead story (see the
+"dcc vs GCC comparison" section 3-style writeup in
+`gcc-backend/symphony-gcc/README.md`'s "Reading the results" paragraph)
+-- these are all pure code-quality wins inside a function body, not
+anything that requires linking in a runtime/libgcc-style baseline. Item
+3 (`memset`) is the one exception worth flagging: it does mean calling
+into dyncc's own existing `runtime/heap.c`-family `memset`
+implementation (already present, used today for `memcpy`/`memmove`
+support), not adding a new runtime dependency.
+
 ## 9. Inlining
 
 - [x] Relocate arbitrary non-recursive single-call-site functions without duplicating their bodies.
