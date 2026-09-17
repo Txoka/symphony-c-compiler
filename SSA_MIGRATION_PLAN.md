@@ -52,33 +52,47 @@ identity**, so any pass that needs to reconstruct or repair SSA structurally
 (not just rewrite values in place, like SCCP/hoisting do) runs into this.
 
 Decision: stop and refactor now, before building more passes on top of the
-shaky foundation. `BasicBlock` gets a persistent identity that survives
-rewrites; phi operands key off block/edge identity instead of a freshly
-rebuilt CFG's positional index; `construct`, `destruct`, `verify`, `sccp`,
-`hoist_loop_invariants` get rewritten against it, and inlining gets rebuilt as
-a true SSA-preserving transform (clone-with-remapping directly on SSA, using
-real block identity to repair phis locally) instead of a destruct/construct
-round trip. This is a bigger, riskier change touching everything in
-`symphony/middle/ssa/` and `symphony/middle/analysis/`, done deliberately as
-its own step rather than folded into inlining.
+shaky foundation — and go further than the minimal fix. Rather than a
+surgical patch (e.g. keying phi operands off predecessor label instead of
+block index, which alone would have fixed the triggering bug), the decision
+made after several rounds of "how big should this be" was to make
+**block-based representation the compiler's primary IR everywhere**, not just
+a derived view used temporarily inside the SSA passes:
+
+- `BasicBlock` gets a persistent identity (every block, including the entry
+  block and anonymous fallthrough blocks, gets a real synthetic label backing
+  its identity — identity and the block's own jump-target name coincide, so
+  no separate remapping table is needed).
+- Phi operands key off predecessor identity instead of a freshly rebuilt CFG's
+  positional index.
+- `FunctionIR` stores a block list as its primary representation instead of a
+  flat `Instruction` list.
+- This threads through the **lowerer** (`middle/ir.py`'s `Lowerer`,
+  `frontends/c/frontend.py`), every SSA pass (`construct`, `destruct`,
+  `verify`, `sccp`, `hoist_loop_invariants`), and the **backend**
+  (`targets/symphony/backend.py`, `targets/symphony/legalize.py`) — all of
+  which currently assume a flat instruction list.
+- New CFG mutation helpers (redirect edge, split edge/insert trampoline,
+  remove block) centralize the exact bookkeeping that's caused every bug this
+  session, so future structural passes (`simplify_control_flow`,
+  `remove_dead_values`, inlining) use shared, correct primitives instead of
+  hand-rolling instruction-list surgery each time.
+
+This is a large, invasive rewrite touching parts of the compiler (the lowerer,
+the backend) that were not broken and had nothing to do with the triggering
+bug — a deliberate, explicit choice to fix the representation once rather than
+patch around it repeatedly. Delegated to a background agent working in its own
+worktree, staged with the test suite checked after each stage.
 
 The in-progress `symphony/middle/ssa/inline.py` (destruct/construct approach)
-is being discarded/rebuilt once the new representation lands.
+was discarded; inlining is rebuilt as a true SSA-preserving clone once this
+refactor lands (clone blocks with an identity map alongside the value map,
+clone phis directly, no destruct/reconstruct round trip).
 
-- [ ] Design + implement stable block identity for `BasicBlock`/`ControlFlowGraph`
-      and edge-keyed phi operands (`analysis/cfg.py`, `analysis/dominance.py`).
-- [ ] Rewrite `construct.py` to assign/consume identities instead of CFG-build
-      positional indices for phi predecessors.
-- [ ] Rewrite `destruct.py` and `verify.py` against the same identities.
-- [ ] Re-verify `sccp.py` and `hoist.py` still work (rewrite if the
-      representation change touches their logic — both currently read
-      `phi.extra` pairs and `block.index`/`predecessors` directly).
-- [ ] Rebuild `inline_single_call_functions` as a true SSA-preserving clone:
-      clone callee blocks with a block-identity map alongside the value map,
-      clone phis directly (remapping through both maps), turn each callee
-      `return` into a jump to the continuation, and synthesize one phi at the
-      continuation keyed by the real predecessor identities — no
-      destruct/construct round trip.
+- [ ] Full block-based IR rewrite (lowerer, SSA layer, backend) — in progress,
+      see status update below once the background agent reports back.
+- [ ] Rebuild `inline_single_call_functions` as a true SSA-preserving clone
+      on top of the new representation.
 
 ## Tier 1 — hardest, migrate first
 - [ ] `inline_single_call_functions` — blocked on the stable-block-identity
