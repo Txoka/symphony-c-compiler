@@ -27,7 +27,7 @@ by another pending copy first, and break any remaining cycle with one
 temporary.
 """
 
-from ..ir import Instruction
+from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import TERMINATORS, build_cfg
 
 
@@ -59,11 +59,11 @@ def _terminator_index(items):
 
 
 def destruct(function):
-    """Rewrite ``function.instructions`` in place, removing every phi."""
+    """Rewrite ``function.blocks`` in place, removing every phi."""
     cfg = build_cfg(function)
     phi_blocks = [
-        index
-        for index, block in enumerate(cfg.blocks)
+        block.label
+        for block in cfg.blocks
         if any(item.op == "phi" for item in block.instructions)
     ]
     if not phi_blocks:
@@ -82,7 +82,7 @@ def destruct(function):
 
     edge_copies = {}
     for successor in phi_blocks:
-        phis = [item for item in cfg.blocks[successor].instructions if item.op == "phi"]
+        phis = [item for item in cfg.by_label[successor].instructions if item.op == "phi"]
         by_predecessor = {}
         for phi in phis:
             for predecessor, value in phi.extra:
@@ -90,12 +90,11 @@ def destruct(function):
                     by_predecessor.setdefault(predecessor, []).append((phi.dst, value))
         for predecessor, pairs in by_predecessor.items():
             edge_copies[(predecessor, successor)] = _sequentialize(pairs, fresh_value)
-        if not cfg.blocks[successor].labels:
-            raise AssertionError(f"phi join block {successor} has no label to target")
 
-    for successor in phi_blocks:
-        block = cfg.blocks[successor]
-        block.instructions = [item for item in block.instructions if item.op != "phi"]
+    phi_block_set = set(phi_blocks)
+    for block in cfg.blocks:
+        if block.label in phi_block_set:
+            block.instructions = [item for item in block.instructions if item.op != "phi"]
 
     label_id = 0
 
@@ -123,19 +122,17 @@ def destruct(function):
         inline_copies = []
         fallthrough_trampoline = None
         for successor in successors:
-            copies = edge_copies.get((index, successor))
+            copies = edge_copies.get((block.label, successor))
             if not copies:
                 continue
-            critical = len(successors) > 1 and len(cfg.blocks[successor].predecessors) > 1
+            critical = len(successors) > 1 and len(cfg.by_label[successor].predecessors) > 1
             if not critical:
                 inline_copies.extend(copies)
                 continue
             label = new_label()
             body = [Instruction("label", None, (), extra=label)]
             body.extend(copy_instruction(dst, src) for dst, src in copies)
-            body.append(
-                Instruction("jump", None, (), extra=cfg.blocks[successor].labels[0])
-            )
+            body.append(Instruction("jump", None, (), extra=successor))
             if successor == explicit_successor:
                 items[last_index] = (
                     Instruction("jump", None, (), extra=label)
@@ -147,21 +144,21 @@ def destruct(function):
                         extra=(items[last_index].extra[0], label),
                     )
                 )
-                tail_trampolines.append(body)
+                tail_trampolines.append(BasicBlock(label, body[1:]))
             else:
                 # The fallthrough edge: the trampoline becomes the new
                 # fallthrough target, so it must sit immediately after this
                 # block and before whatever block used to follow it.
-                fallthrough_trampoline = body
+                fallthrough_trampoline = BasicBlock(label, body[1:])
 
         if inline_copies:
             insert_at = last_index if has_terminator else len(items)
             for offset, (dst, src) in enumerate(inline_copies):
                 items.insert(insert_at + offset, copy_instruction(dst, src))
 
-        output_blocks.append(items)
+        output_blocks.append(BasicBlock(block.label, items))
         if fallthrough_trampoline is not None:
             output_blocks.append(fallthrough_trampoline)
 
     output_blocks.extend(tail_trampolines)
-    function.instructions = [item for block in output_blocks for item in block]
+    function.blocks = output_blocks

@@ -19,17 +19,19 @@ Every other instruction in the lowered IR assigns a fresh value id exactly
 once (``Lowerer.emit`` never reuses a ``dst``), so the rest of the function
 is already in single-assignment form and needs no renaming.
 
-A phi's ``extra`` holds a tuple of ``(predecessor_block_index, value)``
-pairs, sorted by predecessor index, rather than relying on positional
-alignment with a block's unordered predecessor set. Block indices are only
-meaningful for the exact ``ControlFlowGraph`` build that produced them, so
-callers should treat the returned ``SSAFunction`` as the source of truth for
-block/phi structure instead of rebuilding the CFG.
+A phi's ``extra`` holds a tuple of ``(predecessor_label, value)`` pairs,
+sorted by predecessor label, keyed by the predecessor block's stable
+identity rather than a positional index into one particular
+``ControlFlowGraph`` build. This is what lets a phi survive being
+reconstructed from a differently-shaped CFG (e.g. after inlining splices
+blocks from another function): the label a phi's operand names is exactly
+the label the corresponding ``BasicBlock`` carries persistently, so it never
+needs remapping when the CFG is rebuilt.
 """
 
 from dataclasses import dataclass
 
-from ..ir import Instruction
+from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import build_cfg
 from ..analysis.dominance import build_dominator_tree
 
@@ -39,7 +41,7 @@ class SSAFunction:
     function: object
     cfg: object
     dominators: object
-    phis: dict  # block index -> {local key -> phi Instruction}
+    phis: dict  # block label -> {local key -> phi Instruction}
 
 
 def _promotable_locals(function):
@@ -110,20 +112,20 @@ def construct(function):
                 address_of[instruction.dst] = instruction.extra
 
     defining_blocks = {key: set() for key in promotable}
-    for index, block in enumerate(cfg.blocks):
+    for block in cfg.blocks:
         for instruction in block.instructions:
             if instruction.op == "store" and instruction.args[0] in address_of:
-                defining_blocks[address_of[instruction.args[0]]].add(index)
+                defining_blocks[address_of[instruction.args[0]]].add(block.label)
             elif instruction.op == "copy" and instruction.dst in join_vars:
-                defining_blocks[instruction.dst].add(index)
+                defining_blocks[instruction.dst].add(block.label)
 
-    phis = {index: {} for index in range(len(cfg.blocks))}
+    phis = {block.label: {} for block in cfg.blocks}
     for key in promotable:
         worklist = list(defining_blocks[key])
         has_phi = set()
         while worklist:
-            block = worklist.pop()
-            for frontier_block in dominators.frontier.get(block, ()):
+            block_label = worklist.pop()
+            for frontier_block in dominators.frontier.get(block_label, ()):
                 if frontier_block in has_phi:
                     continue
                 has_phi.add(frontier_block)
@@ -135,15 +137,15 @@ def construct(function):
                 if frontier_block not in defining_blocks[key]:
                     worklist.append(frontier_block)
 
-    rewritten_blocks = {index: [] for index in range(len(cfg.blocks))}
+    rewritten_blocks = {block.label: [] for block in cfg.blocks}
 
-    def rename(block_index, current):
+    def rename(block_label, current):
         current = dict(current)
-        for key, phi in phis[block_index].items():
+        for key, phi in phis[block_label].items():
             current[key] = phi.dst
 
         out = []
-        for instruction in cfg.blocks[block_index].instructions:
+        for instruction in cfg.by_label[block_label].instructions:
             if instruction.op == "local_addr" and instruction.dst in address_of:
                 continue
 
@@ -173,35 +175,36 @@ def construct(function):
                 current[instruction.dst] = source
                 continue
             out.append(instruction)
-        rewritten_blocks[block_index] = out
+        rewritten_blocks[block_label] = out
 
-        for successor in sorted(cfg.blocks[block_index].successors):
+        for successor in sorted(cfg.by_label[block_label].successors):
             for key, phi in phis[successor].items():
-                phi.extra.append((block_index, current.get(key)))
+                phi.extra.append((block_label, current.get(key)))
 
-        for child in dominators.children.get(block_index, ()):
+        for child in dominators.children.get(block_label, ()):
             rename(child, current)
 
     if cfg.blocks:
-        rename(0, {})
+        rename(cfg.blocks[0].label, {})
 
     # Blocks unreachable from entry have no dominator-tree path and are never
     # visited above; mem2reg is only meaningful for reachable code, so leave
     # such a block's instructions exactly as the lowerer emitted them.
     reachable = cfg.reachable()
-    for index in range(len(cfg.blocks)):
-        if index not in reachable:
-            rewritten_blocks[index] = list(cfg.blocks[index].instructions)
+    for block in cfg.blocks:
+        if block.label not in reachable:
+            rewritten_blocks[block.label] = list(block.instructions)
 
-    instructions = []
-    for index in range(len(cfg.blocks)):
-        body = rewritten_blocks[index]
+    new_blocks = []
+    for block in cfg.blocks:
+        body = rewritten_blocks[block.label]
         split = next((i for i, item in enumerate(body) if item.op != "label"), len(body))
-        instructions.extend(body[:split])
-        for key in sorted(phis[index], key=repr):
-            phi = phis[index][key]
+        items = list(body[:split])
+        for key in sorted(phis[block.label], key=repr):
+            phi = phis[block.label][key]
             phi.extra = tuple(sorted(phi.extra, key=lambda pair: pair[0]))
-            instructions.append(phi)
-        instructions.extend(body[split:])
-    function.instructions = instructions
+            items.append(phi)
+        items.extend(body[split:])
+        new_blocks.append(BasicBlock(block.label, items))
+    function.blocks = new_blocks
     return SSAFunction(function, cfg, dominators, phis)

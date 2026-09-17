@@ -23,7 +23,7 @@ unconditionally -- it merges exactly the operands of edges already proven
 reachable.
 """
 
-from ..ir import Instruction
+from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import build_cfg
 from ..passes.pipeline import _fold_binary, _fold_unary, _normalize
 
@@ -59,12 +59,13 @@ def sparse_conditional_constant_propagation(function):
                 else instruction.args
             )
             for operand in operands:
-                readers.setdefault(operand, set()).add(block.index)
+                readers.setdefault(operand, set()).add(block.label)
 
+    entry_label = cfg.blocks[0].label
     value_of = {}
     executable_edges = set()
-    reachable_blocks = {0}
-    block_worklist = [0]
+    reachable_blocks = {entry_label}
+    block_worklist = [entry_label]
 
     def value(v):
         return value_of.get(v, UNKNOWN)
@@ -77,10 +78,10 @@ def sparse_conditional_constant_propagation(function):
             if block_index in reachable_blocks and block_index not in block_worklist:
                 block_worklist.append(block_index)
 
-    def evaluate_phi(instruction, block_index):
+    def evaluate_phi(instruction, block_label):
         result = UNKNOWN
         for predecessor, operand in instruction.extra:
-            if (predecessor, block_index) not in executable_edges:
+            if (predecessor, block_label) not in executable_edges:
                 continue
             result = _meet(result, UNKNOWN if operand is None else value(operand))
             if result is VARYING:
@@ -112,7 +113,7 @@ def sparse_conditional_constant_propagation(function):
         newly_reachable = target not in reachable_blocks
         reachable_blocks.add(target)
         if newly_reachable or any(
-            item.op == "phi" for item in cfg.blocks[target].instructions
+            item.op == "phi" for item in cfg.by_label[target].instructions
         ):
             if target not in block_worklist:
                 block_worklist.append(target)
@@ -127,13 +128,13 @@ def sparse_conditional_constant_propagation(function):
         return VARYING if VARYING in values else UNKNOWN
 
     while block_worklist:
-        index = block_worklist.pop()
-        block = cfg.blocks[index]
+        label = block_worklist.pop()
+        block = cfg.by_label[label]
         for instruction in block.instructions:
             if instruction.dst is None:
                 continue
             new = (
-                evaluate_phi(instruction, index)
+                evaluate_phi(instruction, label)
                 if instruction.op == "phi"
                 else evaluate(instruction)
             )
@@ -142,7 +143,7 @@ def sparse_conditional_constant_propagation(function):
         last = next((i for i in reversed(block.instructions) if i.op != "label"), None)
         if last is None or last.op not in ("branch_if", "cbranch_if"):
             for successor in block.successors:
-                mark_edge(index, successor)
+                mark_edge(label, successor)
             continue
         outcome = branch_outcome(last)
         if outcome is UNKNOWN:
@@ -151,43 +152,47 @@ def sparse_conditional_constant_propagation(function):
         taken_is_target = last.extra[0] if last.op == "branch_if" else True
         if outcome is VARYING:
             for successor in block.successors:
-                mark_edge(index, successor)
+                mark_edge(label, successor)
         elif outcome == taken_is_target:
-            mark_edge(index, target)
+            mark_edge(label, target)
         else:
-            for successor in block.successors - {target}:
-                mark_edge(index, successor)
+            for successor in set(block.successors) - {target}:
+                mark_edge(label, successor)
 
-    original = tuple(function.instructions)
+    original_shape = tuple(
+        (instruction.op, instruction.dst, instruction.args, instruction.extra)
+        for block in function.blocks
+        for instruction in block.instructions
+    )
     live_successors = {}
     for source, target in executable_edges:
         live_successors.setdefault(source, set()).add(target)
 
-    rewritten = []
+    new_blocks = []
     for block in cfg.blocks:
-        if block.index not in reachable_blocks:
+        if block.label not in reachable_blocks:
             # Leave unreachable blocks untouched, exactly like construction:
-            # dropping their instructions here would shift every later
-            # block's index on the next build_cfg() call, corrupting phi
-            # predecessor references elsewhere in the function. Actually
-            # removing dead blocks is DCE's job, not SCCP's.
-            rewritten.extend(block.instructions)
+            # SCCP never restructures the CFG itself (dropping a whole block
+            # here would be DCE's job, not this pass's), so it always emits
+            # exactly one output block per input block, in the same order.
+            new_blocks.append(BasicBlock(block.label, list(block.instructions)))
             continue
+        body = []
         for instruction in block.instructions:
             if instruction.op == "phi":
                 result = value_of.get(instruction.dst, UNKNOWN)
                 if result not in (UNKNOWN, VARYING):
-                    rewritten.append(
+                    body.append(
                         Instruction("const", instruction.dst, (), instruction.type, result)
                     )
                     continue
                 surviving = tuple(
                     (predecessor, operand)
                     for predecessor, operand in instruction.extra
-                    if (predecessor, block.index) in executable_edges
+                    if (predecessor, block.label) in executable_edges
                 )
                 if len(surviving) == 1:
-                    rewritten.append(
+                    body.append(
                         Instruction(
                             "copy", instruction.dst, (surviving[0][1],), instruction.type
                         )
@@ -197,7 +202,7 @@ def sparse_conditional_constant_propagation(function):
                     instruction = Instruction(
                         "phi", instruction.dst, (), instruction.type, surviving
                     )
-                rewritten.append(instruction)
+                body.append(instruction)
                 continue
 
             result = (
@@ -216,12 +221,18 @@ def sparse_conditional_constant_propagation(function):
                 )
 
             if instruction.op in ("branch_if", "cbranch_if"):
-                live = live_successors.get(block.index, set())
+                live = live_successors.get(block.label, set())
                 target = cfg.label_blocks[instruction.extra[1]]
                 if target not in live:
                     continue
                 if len(live) == 1:
                     instruction = Instruction("jump", extra=instruction.extra[1])
-            rewritten.append(instruction)
-    function.instructions = rewritten
-    return tuple(function.instructions) != original
+            body.append(instruction)
+        new_blocks.append(BasicBlock(block.label, body))
+    function.blocks = new_blocks
+    new_shape = tuple(
+        (instruction.op, instruction.dst, instruction.args, instruction.extra)
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+    return new_shape != original_shape

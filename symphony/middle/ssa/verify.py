@@ -27,7 +27,7 @@ def verify(function):
 
     definitions = {}
     def_block = {}
-    for index, block in enumerate(cfg.blocks):
+    for block in cfg.blocks:
         for instruction in block.instructions:
             if instruction.dst is None:
                 continue
@@ -36,17 +36,17 @@ def verify(function):
                     f"{function.name}: value %{instruction.dst} defined more than once"
                 )
             definitions[instruction.dst] = instruction
-            def_block[instruction.dst] = index
+            def_block[instruction.dst] = block.label
 
-    for index, block in enumerate(cfg.blocks):
-        if index not in reachable:
+    for block in cfg.blocks:
+        if block.label not in reachable:
             continue
         for instruction in block.instructions:
             if instruction.op == "phi":
                 seen = {p for p, _ in instruction.extra}
-                if seen != block.predecessors:
+                if seen != set(block.predecessors):
                     raise SSAVerificationError(
-                        f"{function.name}: phi %{instruction.dst} in block {index} "
+                        f"{function.name}: phi %{instruction.dst} in block {block.label} "
                         f"covers predecessors {sorted(seen)}, block has {sorted(block.predecessors)}"
                     )
                 for predecessor, value in instruction.extra:
@@ -59,7 +59,7 @@ def verify(function):
                     if not _dominates_edge(dominators, def_block[value], predecessor):
                         raise SSAVerificationError(
                             f"{function.name}: %{value} does not dominate predecessor "
-                            f"edge {predecessor}->{index} of phi %{instruction.dst}"
+                            f"edge {predecessor}->{block.label} of phi %{instruction.dst}"
                         )
                 continue
             for value in instruction.args:
@@ -69,10 +69,10 @@ def verify(function):
                     raise SSAVerificationError(
                         f"{function.name}: use of undefined value %{value}"
                     )
-                if not dominators.dominates(def_block[value], index):
+                if not dominators.dominates(def_block[value], block.label):
                     raise SSAVerificationError(
                         f"{function.name}: %{value} defined in block {def_block[value]} "
-                        f"does not dominate its use in block {index}"
+                        f"does not dominate its use in block {block.label}"
                     )
 
 
