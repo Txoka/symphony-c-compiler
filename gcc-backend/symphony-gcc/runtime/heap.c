@@ -98,12 +98,32 @@ struct __dyn_heap_block {
 
 /* helpers.py declares `extern unsigned char __dyn_heap_anchor[7]` and
    relies on dyncc's own linker to place it as a marker just past the
-   program's other globals (see backend.py's memory layout). This
-   freestanding GCC port has no equivalent linker convention, so the
-   anchor is a genuine array defined here instead -- the heap simply
-   starts right after it, same effect, no special linker cooperation
-   needed. */
-unsigned char __dyn_heap_anchor[7];
+   program's other globals (see backend.py's memory layout).
+
+   This freestanding GCC port used to define __dyn_heap_anchor as a real
+   7-byte BSS array here, on the theory that the heap could simply start
+   right after it. That only worked when heap.o's BSS happened to be the
+   last BSS in the whole linked image -- as soon as any other object
+   file's global/static landed after it (a normal, unavoidable outcome of
+   multi-file linking, not something C source can control), "heap starts
+   right after __dyn_heap_anchor" silently overlapped that other global's
+   storage instead of real free memory. malloc() would then scribble over
+   it on the very first allocation, corrupting arbitrary program state
+   (this was chased down to a concrete case: a second sequential malloc()
+   call's struct-field stores corrupting a neighboring BSS global, whose
+   own corrupted value later got used as a jump target, landing execution
+   in garbage memory -- see printf.c's now-resolved note for the full
+   trace).
+
+   The real fix has to live in the linker, which alone knows the true end
+   of the linked image once ALL objects are laid out: symphony_ld.py's
+   Linker.link() now synthesizes __dyn_heap_anchor itself, as an address
+   equal to the byte immediately following every object's .bss (no
+   storage consumed, order-independent, always correct). So here it is
+   just an extern reference to that linker-provided symbol, not a
+   locally-defined array -- declaring it non-zero-size again would
+   reintroduce the exact bug this comment describes. */
+extern unsigned char __dyn_heap_anchor[];
 unsigned char *__dyn_heap_end;
 static struct __dyn_heap_block *__dyn_heap_free_list;
 
@@ -145,8 +165,12 @@ void *malloc(unsigned int size) {
     reused = __dyn_heap_take_free(size);
     if (reused) return reused;
     if (!__dyn_heap_end) {
+        /* __dyn_heap_anchor is now a zero-size, linker-synthesized marker
+           for "address right after everything statically allocated" (see
+           its declaration above) -- no "+ sizeof(...)" needed or possible
+           (it has incomplete type), just align its own address up. */
         __dyn_heap_end = (unsigned char *)(((unsigned int)
-            (__dyn_heap_anchor + sizeof(__dyn_heap_anchor)) + 3u) & ~3u);
+            __dyn_heap_anchor + 3u) & ~3u);
     }
     required = sizeof(struct __dyn_heap_block) + size;
     if (__dyn_heap_remaining(__dyn_heap_end) < required) return 0;

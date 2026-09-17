@@ -304,31 +304,62 @@ value in `result` when the halt address is reached via `link_return`.
   `counter`) were also added. Verified: a multiply/divide program and,
   separately, a program mixing string literals with code assemble+link
   and run correctly on the emulator.
-- **Milestone 6** (runtime/libc) — DONE, with one known open bug.
-  `runtime/intrinsics.c` (I/O opcodes via inline asm),
-  `runtime/heap.c` (memcpy/memmove/memset/memcmp,
-  malloc/free/calloc/realloc — first-fit + coalescing), `runtime/printf.c`
-  (fixed-arity `printf`/`printf1`/`printf2`/`printf3`, ported from
-  `symphony/runtime/intrinsics.py`'s `SCREEN_SOURCE`; real varargs are
-  NOT implemented — this GCC port has no `TARGET_SETUP_INCOMING_VARARGS`,
-  confirmed broken by direct testing). A second real backend bug was
-  found and fixed here: `symphony_expand_prologue`/`_epilogue` only ever
-  saved r13 and r11, never the other callee-saved registers
-  (`CALL_USED_REGISTERS` in `symphony.h` declares r8-r10/r12 callee-saved
-  too) — any non-leaf function holding a live value in one of those
-  across its own call had it silently clobbered. Fixed by pushing/
-  popping exactly the callee-saved registers a function's RTL actually
-  uses, placed *before* the hard frame pointer is materialized (an
-  earlier attempt placed them after, which aliased a spill slot with a
-  real local — also fixed). Verified: `malloc(16)`+`free()`+`printf1()`
-  in one function prints the correct value end to end.
-  **Known open bug:** `printf3()` (3 substitution arguments) hangs when
-  preceded by two or more `malloc()` calls in the same function — not
-  root-caused (see the comment above `__dyn_printf_emit_one` in
-  `runtime/printf.c` for what was ruled out). `printf`/`printf1`/
-  `printf2` are unaffected and fully verified with malloc/free of any
-  count preceding them.
+- **Milestone 6** (runtime/libc) — DONE. `runtime/intrinsics.c` (I/O
+  opcodes via inline asm), `runtime/heap.c` (memcpy/memmove/memset/
+  memcmp, malloc/free/calloc/realloc — first-fit + coalescing),
+  `runtime/printf.c` (fixed-arity `printf`/`printf1`/`printf2`/`printf3`,
+  ported from `symphony/runtime/intrinsics.py`'s `SCREEN_SOURCE`; real
+  varargs are NOT implemented — this GCC port has no
+  `TARGET_SETUP_INCOMING_VARARGS`, confirmed broken by direct testing).
+  A second real backend bug was found and fixed here:
+  `symphony_expand_prologue`/`_epilogue` only ever saved r13 and r11,
+  never the other callee-saved registers (`CALL_USED_REGISTERS` in
+  `symphony.h` declares r8-r10/r12 callee-saved too) — any non-leaf
+  function holding a live value in one of those across its own call had
+  it silently clobbered. Fixed by pushing/popping exactly the
+  callee-saved registers a function's RTL actually uses, placed
+  *before* the hard frame pointer is materialized (an earlier attempt
+  placed them after, which aliased a spill slot with a real local —
+  also fixed). Verified: `malloc(16)`+`free()`+`printf1()` in one
+  function prints the correct value end to end.
+  A third real bug (`printf3()` hanging when preceded by two or more
+  `malloc()` calls) was found and fixed since — see "Fixed bugs found
+  after milestone 6" below; it turned out to be a heap-layout/linker
+  bug, not a printf3 bug at all.
 - **Milestone 7** (this README) — DONE (this update).
+
+### Fixed bugs found after milestone 6
+
+- **`__dyn_heap_anchor` BSS-ordering bug (linker), previously manifesting
+  as "`printf3()` hangs after 2+ `malloc()` calls".** `runtime/heap.c`'s
+  `malloc()` used to compute "start of heap" as the address right after
+  its own `__dyn_heap_anchor[7]` BSS array, relying on that array being
+  the LAST symbol in the whole linked image — true only by accident of
+  link/object order, since `symphony_ld.py`'s `Linker.link()` lays out
+  each object's BSS in whatever order objects were added, with no
+  guarantee `heap.o`'s BSS comes last. As soon as another object's BSS
+  symbol landed after it (normal in any real multi-file link), the
+  first `malloc()`'s returned block silently overlapped that neighbor's
+  storage instead of free memory, and the block's own field-initializing
+  stores corrupted it — traced to `__dyn_heap_end` itself in the
+  reproducer, whose corrupted value was later read and used as a jump
+  target, landing execution in garbage memory several calls downstream
+  (hence looking printf3/5-argument-specific: reproducing needs 2+
+  `malloc()` calls to grow the pointer into a collision, and enough
+  call depth afterward for the corruption to surface as a visible
+  crash). Root-caused via emulator single-stepping down to the exact
+  corrupting store and its target address, not by inspection. Fixed by
+  having `Linker.link()` synthesize `__dyn_heap_anchor` itself, as a
+  zero-size marker equal to the address right after ALL objects'
+  sections are laid out (computed last, so it's correct regardless of
+  link order) — `heap.c` now just has `extern unsigned char
+  __dyn_heap_anchor[];`, no real BSS storage, and the linker raises a
+  clear error if any input object still defines it as a real symbol
+  (stale pre-fix `.o` files). Verified: the original repro (`malloc()`
+  x2 then `printf3(...)`) hangs before this fix and halts cleanly with
+  the correct return value after it, both via actual emulator execution.
+  See the comment above `__dyn_printf_emit_one` in `runtime/printf.c`
+  for the full before/after trace summary.
 
 ### Known gaps / real unresolved bugs (for whoever picks this up next)
 
@@ -338,14 +369,13 @@ value in `result` when the halt address is reached via `link_return`.
 - **A whole class of "reload insns" ICEs** beyond the 64-bit case above,
   confirmed to trigger in at least: a loop containing a call combined
   with `-fmove-loop-invariants` (mitigated by compiling the runtime
-  library at `-O0`, not fixed), and a libcall result (e.g. a software
+  library at `-O0`, not fixed), a libcall result (e.g. a software
   divide) feeding directly into a comparison's RTL expansion at `-O0`
   (worked around in `calloc`'s overflow check by materializing the
-  division into a temporary first — see `runtime/heap.c`).
+  division into a temporary first — see `runtime/heap.c`), and (newly
+  confirmed) `runtime/heap.c`'s `calloc()` and `runtime/printf.c`'s
+  `__dyn_printf_unsigned()` both ICE the same way at `-O1`/`-O2` on the
+  unmodified files from HEAD — compile the runtime at `-O0` to avoid
+  this (not fixed, worked around only).
 - **No real varargs.** `printf`/`printf1`/`printf2`/`printf3` are fixed-
   arity as a deliberate scope decision, not real `stdarg.h` support.
-- **`printf3()` + 2+ preceding `malloc()` calls hangs** — see Milestone 6
-  above. The most promising unfinished lead: the loop's read of
-  `format[i]` returns garbage partway through instead of hitting the
-  NUL terminator, but the exact faulting register/stack-slot was not
-  identified.

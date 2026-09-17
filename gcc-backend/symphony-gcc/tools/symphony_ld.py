@@ -134,6 +134,35 @@ class Linker:
                     # -- namespace by unit.
                     symtab[f"{obj.unit_name}::{sym.name}"] = addr
 
+        # Synthesize a genuine end-of-image marker: the address right after
+        # every object's .text/.data/.bss has been laid out, consuming no
+        # bytes of its own. runtime/heap.c's bump allocator needs a real
+        # "nothing statically allocated lives past this point" address to
+        # start growing the heap from -- it used to rely on its own
+        # __dyn_heap_anchor[7] BSS array being the last symbol in the whole
+        # linked image, which only held by accident of link order and broke
+        # (silently corrupting whatever global happened to land right after
+        # it in BSS) as soon as any other object's BSS was placed after
+        # heap.o. bss_cursor here is exactly the fully-general answer: it is
+        # computed after ALL objects' sections are accounted for, so it is
+        # correct regardless of link/object order.
+        #
+        # Only synthesize it if no object already defines it as a real
+        # symbol -- an object built against the OLD heap.c (which defined
+        # __dyn_heap_anchor as actual 7-byte BSS storage) must fail loudly
+        # here rather than silently linking against a stale .o whose BSS
+        # layout assumption this fix specifically removes. Rebuild that
+        # object from the current runtime/heap.c instead of trying to link
+        # it as-is.
+        if "__dyn_heap_anchor" in symtab:
+            raise ValueError(
+                "__dyn_heap_anchor is defined as a real symbol by an input "
+                "object (stale build against the old heap.c, which reserved "
+                "BSS storage for it) -- the linker now synthesizes this "
+                "symbol itself as a zero-size end-of-image marker; rebuild "
+                "that object from the current runtime/heap.c")
+        symtab["__dyn_heap_anchor"] = self.load_address + bss_cursor
+
         image = bytearray(bss_cursor)
         for obj in self.objects:
             image[text_base[id(obj)]:text_base[id(obj)] + len(obj.text)] = obj.text

@@ -131,25 +131,38 @@ void screen_cursor(unsigned int x, unsigned int y) {
    libgcc-config/symphony/t-symphony -- flagged here as a real, still-
    open backend limitation for whoever picks this up next, worked
    around rather than blocking this milestone. */
-/* KNOWN BUG, unresolved, real: printf3() (a 4-argument call passing
-   through to __dyn_printf_n's 5-argument r1-r5 call) hangs -- format[i]
-   is read incorrectly partway through the loop once i advances past
-   the first few characters -- specifically and ONLY when preceded by
-   two or more malloc() calls earlier in the SAME function (a single
-   malloc() before printf3 is fine; any number of malloc()/free() calls
-   before printf1() or printf2() is fine, verified). Narrowed via
-   emulator instrumentation to: the loop's read of format[i] eventually
-   returns garbage instead of terminating at the NUL, but the exact
-   faulting register/stack-slot was not pinned down before time ran out
-   on this investigation -- confirmed NOT a printf3-alone issue (works
-   with zero or one preceding malloc calls) and NOT a free()/coalescing
-   issue (reproduces with malloc() alone, no free() at all). Suspect
-   area: something specific to a 5-live-argument-register call chain
-   (r1-r5) combined with malloc's own call tree, but this was not
-   proven. printf(), printf1() and printf2() (0-2 conversions) are
-   fully verified correct in combination with malloc/free of any count;
-   printf3() should be treated as unverified/possibly broken until this
-   is root-caused. Flagged here rather than silently shipped. */
+/* RESOLVED (was: "KNOWN BUG, unresolved, real: printf3() ... hangs ...
+   preceded by two or more malloc() calls"). Root-caused via emulator
+   single-stepping, not a printf3/register-allocation bug at all: it was
+   a heap layout bug in runtime/heap.c's malloc(). malloc() used to
+   compute "start of heap" as the address right after its own
+   __dyn_heap_anchor[7] BSS array, relying on __dyn_heap_anchor being the
+   last symbol in the whole linked image -- true only by accident of
+   link/object order. As soon as any other object's BSS symbol happened
+   to be placed after heap.o's (completely ordinary, unavoidable in a
+   multi-file link), the first malloc() call's returned block silently
+   overlapped that neighboring global's storage instead of real free
+   memory: the second sequential struct-field store inside malloc()
+   (`block->size = size; block->next = 0;`) corrupted it. In the
+   traced case that neighbor was __dyn_heap_end itself; a few calls
+   later a corrupted __dyn_heap_end value (which happened to look like
+   a code address) got treated as a jump target somewhere downstream,
+   landing execution in garbage memory well after the point of actual
+   corruption -- which is why it looked like a printf3-specific,
+   argument-count-specific hang (needs 2+ preceding malloc() calls to
+   accumulate enough heap growth to actually collide with something,
+   and needs enough call depth afterward for the corruption to surface
+   as a visible crash). printf3()/__dyn_printf_n's own r1-r5 argument
+   handling was never at fault and needed no changes.
+
+   Fixed at the root: symphony_ld.py's Linker.link() now synthesizes
+   __dyn_heap_anchor itself, as a zero-size marker for the address right
+   after ALL objects' sections are laid out (computed last, so it is
+   correct regardless of link order) -- heap.c no longer defines it as
+   real BSS storage, just `extern unsigned char __dyn_heap_anchor[];`.
+   Verified via the emulator: the original repro (two malloc() calls
+   then printf3()) now halts cleanly instead of hanging (see the linker
+   change's commit for the exact before/after emulator trace). */
 unsigned int __dyn_printf_emit_one(const char *format, unsigned int i,
                               unsigned int *consumed_conversion,
                               int has_arg, unsigned int arg) {
