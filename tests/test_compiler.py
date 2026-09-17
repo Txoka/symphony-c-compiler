@@ -14,7 +14,7 @@ from symphony import (
     compile_source as _compile_source,
     compile_sources as _compile_sources,
 )
-from symphony.emulator import Machine as _Machine, signed
+from symphony.emulator import Machine as _Machine, native_available, native_run, signed
 from symphony.frontend import parse, typecheck
 from symphony.ir import lower
 from symphony import isa
@@ -35,9 +35,24 @@ def Target(*args, **kwargs):
     return _Target(*args, **kwargs)
 
 
+NATIVE_AVAILABLE = native_available(TEST_ISA == "symphony")
+
+
+class _NativePreferringMachine(_Machine):
+    """Run on the native emulator when it's built; fall back to the Python
+    reference engine otherwise. Every test in this file calls ``run()``
+    through a ``Machine`` built here, so this is the one place that needs to
+    prefer native."""
+
+    def run(self, halt_address=None, max_steps=5_000_000, progress=None, progress_interval=250_000):
+        if NATIVE_AVAILABLE and progress is None:
+            return native_run(self, halt_address, max_steps)
+        return super().run(halt_address, max_steps, progress, progress_interval)
+
+
 def Machine(*args, **kwargs):
     kwargs.setdefault("symphony", TEST_ISA == "symphony")
-    return _Machine(*args, **kwargs)
+    return _NativePreferringMachine(*args, **kwargs)
 
 
 def compile_source(source, filename="<input>", target=None):
