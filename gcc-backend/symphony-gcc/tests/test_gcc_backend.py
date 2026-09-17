@@ -477,3 +477,114 @@ compute:
         obj = toolchain.compile_and_assemble(old_heap_c, tmp_path, name="stale_heap")
         with pytest.raises(ValueError, match="__dyn_heap_anchor"):
             toolchain.link([obj], entry_symbol=None)
+
+    def test_frame_pointer_not_reused_as_general_register(self, toolchain, tmp_path):
+        """Regression test for the r11-not-FIXED_REGISTERS bug fixed
+        alongside this test (see symphony.h's long comment above
+        FIXED_REGISTERS).
+
+        r11 (HARD_FRAME_POINTER_REGNUM) was not marked FIXED_REGISTERS,
+        so IRA/LRA could treat it as an ordinary GENERAL_REGS value
+        eligible for copy-propagation into pseudos -- e.g. ivopts
+        hoisting a loop-invariant copy of r11 into a pseudo compared
+        every loop iteration. Since r11 is permanently pinned to the
+        frame-pointer role (symphony_frame_pointer_required() always
+        returns true) and this target's flat register-class structure
+        gave LRA no fallback, the resulting equivalence-substitution
+        loop for that pseudo could never converge, hitting reload's
+        "maximum number of generated reload insns per insn achieved
+        (90)" internal compiler error.
+
+        This is the minimal reproducer that was gdb-traced to root-cause
+        the bug: a fill loop + an insertion-sort-shaped loop + a sum
+        loop over a small char array, at -O2 -- structurally identical
+        to examples/insertion_sort.c's main, which this fix closes at
+        -O2 (previously ICE'd there per this README's Known gaps
+        section; -Os and -O0 were unaffected). Asserts BOTH that it
+        compiles (the ICE this test targets) and that -O2 and -O0
+        produce the byte-identical correct result (the values are
+        sorted in place, so their sum is order-independent and easy to
+        check), since a compile-only assertion wouldn't catch a
+        register-allocation fix that silently produces wrong code.
+        """
+        src = """
+        int foo(void) {
+            char values[16];
+            int i;
+            for (i = 0; i < 16; i++) values[i] = (char)(i * 3);
+
+            int index;
+            for (index = 1; index < 16; index++) {
+                char value = values[index];
+                int position = index;
+                while (position > 0 && values[position - 1] > value) {
+                    values[position] = values[position - 1];
+                    position -= 1;
+                }
+                values[position] = value;
+            }
+            int sum = 0;
+            for (index = 0; index < 16; index++) sum += values[index];
+            return sum;
+        }
+        int main(void) { return foo(); }
+        """
+        result_o2, _, _ = toolchain.build_and_run(src, tmp_path, name="frameptr_o2", optimize="-O2")
+        result_o0, _, _ = toolchain.build_and_run(src, tmp_path, name="frameptr_o0", optimize="-O0")
+        assert result_o0 == result_o2
+        assert result_o2 == 360  # sum of (i*3)&0xff, signed char, for i in 0..15
+
+    def test_link_register_preserved_in_leaf_function(self, toolchain, tmp_path):
+        """Regression test for the r13-save/restore-only-for-non-leaf bug
+        fixed alongside this test (see symphony_expand_prologue/epilogue's
+        long comment in symphony.cc).
+
+        symphony_expand_prologue/epilogue only saved/restored r13 (the
+        ABI link register) when the function itself made calls
+        (!symphony_call_is_leaf()), on the assumption a leaf function
+        "never touches r13". That's false: CALL_USED_REGISTERS marks
+        r13 an ordinary allocatable register, so GCC's register
+        allocator can (and, under enough register pressure, does) pick
+        it to hold an arbitrary local in a LEAF function, silently
+        destroying the caller's return address -- the leaf function's
+        own `link_return` (`jmp r13`) then jumps into garbage instead of
+        back to the caller.
+
+        This is the minimal reproducer that was gdb/emulator-traced to
+        root-cause the bug: a leaf function (no calls of its own) whose
+        body is register-pressure-heavy enough at -O2 that the allocator
+        picks r13 for the insertion-sort loop's `index` counter,
+        structurally identical to examples/insertion_sort.c's main
+        called from a real main() (needed here because the bug is about
+        RETURNING from the leaf function correctly, which only shows up
+        when something calls it and needs control back). Before the fix,
+        this hung (execution-limit exceeded) at -O2; -O0 was unaffected
+        since -O0 never puts enough pressure on r13 to get it allocated
+        this way.
+        """
+        src = """
+        int foo(void) {
+            char values[16];
+            int i;
+            for (i = 0; i < 16; i++) values[i] = (char)(i * 3);
+
+            int index;
+            for (index = 1; index < 16; index++) {
+                char value = values[index];
+                int position = index;
+                while (position > 0 && values[position - 1] > value) {
+                    values[position] = values[position - 1];
+                    position -= 1;
+                }
+                values[position] = value;
+            }
+            int sum = 0;
+            for (index = 0; index < 16; index++) sum += values[index];
+            return sum;
+        }
+        int main(void) { return foo(); }
+        """
+        result, _, _ = toolchain.build_and_run(
+            src, tmp_path, name="linkreg", optimize="-O2", entry_symbol="main",
+        )
+        assert result == 360
