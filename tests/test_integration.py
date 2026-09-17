@@ -258,3 +258,34 @@ class CompilerIntegrationTests(unittest.TestCase):
                     self.assertLess(framebuffer, len(result.image.binary))
                 else:
                     self.assertGreaterEqual(framebuffer, len(result.image.binary))
+
+    def test_division_and_multiply_helper_edge_cases(self):
+        """Regression coverage for __dyn_udivmod's algorithm swap (fixed
+        32-iteration loop -> libgcc's own shift-align-then-subtract
+        __udivmodsi4 shape) and __dyn_mul: exercises small divisors (the
+        common case the new algorithm is faster for), divisors >= 2**31
+        (the specific edge case the old algorithm's docstring called out
+        by name), signed division/modulo sign handling, and division by
+        zero's defined-zero-result behavior -- all run through the real
+        compiler and emulator, not just the algorithm in isolation."""
+        cases = [
+            ("unsigned int a=100,b=7; return a/b;", 100 // 7),
+            ("unsigned int a=100,b=7; return a%7;", 100 % 7),
+            ("unsigned int a=0xFFFFFFFFu,b=0x80000001u; return a/b;", 1),
+            ("unsigned int a=0xFFFFFFFFu,b=0x80000001u; return a%b;",
+             0xFFFFFFFF % 0x80000001),
+            ("unsigned int a=5,b=0x90000000u; return a/b;", 0),
+            ("unsigned int a=5,b=0x90000000u; return a%b;", 5),
+            ("int a=-17,b=5; return a/b;", -3),
+            ("int a=-17,b=5; return a%b;", -2),
+            ("int a=17,b=-5; return a/b;", -3),
+            ("unsigned int a=7,b=0; return a/b;", 0),
+            ("unsigned int a=7,b=0; return a%b;", 0),
+            ("unsigned int a=0x12345,b=0x6789; return a*b;",
+             (0x12345 * 0x6789) & 0xFFFFFFFF),
+        ]
+        for body, expected in cases:
+            with self.subTest(body=body):
+                compile_and_run(
+                    f"int main(void) {{ {body} }}", expected & 0xFFFFFFFF
+                )
