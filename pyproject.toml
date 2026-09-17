@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cymphony"
 version = "0.14.3"
-description = "A small typed C compiler targeting the Symphony and Dynphony ISAs"
+description = "A small C compiler targeting the Symphony and Dynphony ISAs"
 requires-python = ">=3.10"
 dependencies = ["pycparser>=2.21,<3"]
 

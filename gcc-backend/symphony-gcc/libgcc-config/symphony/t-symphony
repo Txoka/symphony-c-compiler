@@ -1,0 +1,99 @@
+# libgcc-side Makefile fragment for Symphony/Dynphony
+# (libgcc/config/symphony/t-symphony -- a different namespace from
+# gcc/config/symphony/t-symphony, which is the GCC-proper target
+# fragment; libgcc has its own config/<cpu>/ tree).
+#
+# No LIB1ASMSRC (no hand-written assembly soft-arithmetic -- see the
+# LIB2ADD note below for how __mulsi3/__udivsi3/__divsi3/__umodsi3/
+# __modsi3 are actually provided) and no extra_parts/crt*.o (no ELF
+# sections or OS startup convention for this target -- the runtime/
+# libc's own startup code owns that, not libgcc).
+#
+# Routines this target's runtime genuinely has no use for, excluded
+# rather than fought into working (this IS the right t-symphony for
+# LIB2FUNCS_EXCLUDE -- it must live in libgcc/config/symphony/, not
+# gcc/config/symphony/, since it is libgcc's own build, not GCC
+# proper's, that reads this variable):
+#   _mulsc3 / _divsc3 -- soft-float COMPLEX multiply/divide. This ABI
+#     has no float/double usage planned anywhere in the runtime, so
+#     there is no reason to carry (or debug) complex soft-float
+#     support.
+#   _mulvsi3 / _mulvdi3 -- __builtin_{mul,add,sub}_overflow-style
+#     trapping/overflow-checked arithmetic (only emitted for
+#     __builtin_mul_overflow or -ftrapv, neither of which this project
+#     uses). These hit GCC's generic multi-word/DImode widening-multiply
+#     expansion, which this target's .md has no dedicated patterns for
+#     (deliberately -- no hardware multiply/divide at all, 32-bit
+#     __mulsi3 already covers every real multiply this runtime
+#     performs) and which is not worth adding dedicated DImode patterns
+#     for just to support an intrinsic nothing here calls.
+#
+# KNOWN GAP, not a scope decision like the two above -- flagged here for
+# whoever picks this up next:
+#   _muldi3 -- genuine 64-bit (long long) multiply. Unlike _mulvsi3/
+#     _mulsc3, this is a real, plausibly-needed routine (any C code doing
+#     `long long a * long long b` needs it), and its absence is a real
+#     limitation, not a "we don't use this" decision. It hits an
+#     unresolved "maximum number of generated reload insns" ICE at -O2
+#     (libgcc's own required optimization level) building
+#     __muldi3 -> __umulsidi3 -> two/three __mulsi3 calls plus a 64-bit
+#     accumulate -- root cause NOT fully diagnosed (the RTL shape looks
+#     architecturally sound: DWtype args/return correctly split across
+#     stack-passed SImode words via virtual-incoming-args, matching how
+#     _negdi2/_lshrdi3/_ashldi3/_ashrdi3/_cmpdi2/_ucmpdi2 -- all DImode,
+#     all build fine -- are handled; something about the specific
+#     multi-call, high-register-pressure sequence __muldi3 produces
+#     deadlocks reload's constraint search). Excluded here rather than
+#     block milestone 4 (whose real bar is 32-bit int multiply/divide,
+#     verified working) on a 64-bit multiply edge case; revisit if/when
+#     `long long` multiplication is needed by the runtime or a user
+#     program.
+#   _divdi3 / _moddi3 / _divmoddi4 / _udivdi3 / _umoddi3 / _udivmoddi4 --
+#     the 64-bit (long long) division family; same class of issue as
+#     _muldi3 above (multi-word DImode arithmetic with heavy internal
+#     register pressure hits the same unresolved reload ICE). Same
+#     verdict: real gap, not a scope decision, revisit alongside
+#     _muldi3 if/when 64-bit division is needed.
+#   _fixunssfdi -- float-to-unsigned-DImode conversion: no float ABI
+#     usage is planned anywhere in this runtime (see the no-hardware-FP
+#     note above), so this is a genuine "we don't use this" exclusion.
+#   _powisf2 / _powidf2 / _powixf2 / _powitf2 -- float/double/long-double
+#     pow(x, int) helpers. Same "we don't use this" reasoning as
+#     _fixunssfdi (no float ABI usage planned anywhere in this runtime).
+#     Also hits the same class of reload ICE as the 64-bit mul/div family
+#     once the frame pointer became unconditionally live (see
+#     symphony_frame_pointer_required in symphony.cc) -- excluded rather
+#     than debugged for the same reason: no real use for it here.
+LIB2FUNCS_EXCLUDE = _mulsc3 _divsc3 _mulvsi3 _mulvdi3 _muldi3 \
+		     _divdi3 _moddi3 _divmoddi4 _udivdi3 _umoddi3 \
+		     _udivmoddi4 _fixunssfdi _powisf2 _powidf2 _powixf2 \
+		     _powitf2
+
+# __divsi3/__udivsi3/__modsi3/__umodsi3 (32-bit signed/unsigned divide and
+# modulo -- the actual routines a target with no hardware divide needs) are
+# NOT part of libgcc2.c's -DL_xxx per-routine mechanism, and are not
+# referenced anywhere in the generic libgcc/Makefile.in. They live in their
+# own always-available top-level sources (divmod.c/udivmod.c/udivmodsi4.c)
+# that must be explicitly pulled in via LIB2ADD, exactly as iq2000, pdp11,
+# nios2 and gcn/amdgcn (other no-hardware-divide targets) do.
+#
+# __mulsi3 (32-bit multiply) has NO portable libgcc2.c equivalent at all --
+# every target either has a hardware multiply instruction and a "mulsi3"
+# .md expander, or supplies its own soft-multiply source pulled in via
+# LIB2ADD. This target has neither hardware multiply nor a "mulsi3" .md
+# pattern, so config/symphony/lib2funcs.c (a shift-and-add software
+# multiply, ported from libgcc/config/iq2000/lib2funcs.c -- iq2000 is
+# another no-hardware-multiply target using this exact same combination)
+# provides it.
+LIB2ADD = $(srcdir)/udivmod.c \
+	  $(srcdir)/divmod.c \
+	  $(srcdir)/udivmodsi4.c \
+	  $(srcdir)/config/symphony/lib2funcs.c
+
+# No exception handling / stack unwinding support for this target (no
+# DWARF, no .eh_frame, no ELF -- see gcc-backend/symphony-gcc/README.md).
+# unwind-dw2.c/-fde.c/-sjlj.c/-c.c are all EH-unwinder infrastructure
+# this target has no use for and which won't build without real DWARF
+# CFI support (PREFERRED_DEBUGGING_TYPE is NO_DEBUG); bpf (another
+# no-real-ELF-linking target) does the same via an empty LIB2ADDEH.
+LIB2ADDEH =

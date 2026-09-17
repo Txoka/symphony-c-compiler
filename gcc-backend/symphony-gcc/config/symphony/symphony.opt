@@ -1,0 +1,15 @@
+; Options for the Symphony/Dynphony GCC target.
+
+; Symphony (the default) is the fixed 4-byte instruction encoding of this
+; ISA. Dynphony is the variable-length encoding of the identical
+; instruction set/semantics/ABI. GCC's instruction selection, RTL
+; patterns, and calling convention are IDENTICAL for both -- only the
+; final byte encoding differs, and that is handled entirely by the
+; assembler+linker tool outside GCC (gcc_assembler.py), not by GCC
+; itself. -mdynphony only changes the assembler-comment target marker
+; GCC writes into the .s file header so the downstream assembler knows
+; which encoding to use; it changes no codegen decision.
+
+mdynphony
+Target Var(symphony_dynphony) Init(0)
+Generate assembly annotated for the Dynphony (variable-length) encoding instead of Symphony (fixed 4-byte) encoding.  Both share identical instruction selection; this only marks which downstream assembler encoding is intended.

@@ -1,0 +1,21 @@
+# Target Makefile fragment for Symphony/Dynphony.
+#
+# No hardware multiply/divide (docs/isa.txt) and no mulsi3/divsi3/etc.
+# patterns are defined in symphony.md, so GCC automatically synthesizes
+# calls to libgcc2.c's portable __mulsi3/__udivsi3/__divsi3/__umodsi3/
+# __modsi3 (and the 64-bit __muldi3 etc., built from the 32-bit ones).
+# Nothing extra needs to be listed here for that -- it is libgcc's
+# default behavior whenever a target's .md leaves those RTL patterns
+# undefined.
+#
+# No hardware floating point either, but this ABI does not use float/
+# double in the freestanding runtime, so no soft-float libgcc pieces
+# are pulled in beyond what libgcc2.c already provides unconditionally.
+
+# One ABI, one instruction-selection strategy for both encodings
+# (Symphony vs Dynphony differs only in final byte width, handled
+# entirely by the downstream assembler -- see symphony.opt). No
+# multilib variants needed.
+MULTILIB_OPTIONS =
+MULTILIB_DIRNAMES =
+
