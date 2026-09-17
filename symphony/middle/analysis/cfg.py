@@ -17,44 +17,7 @@ branch direction from the instructions themselves.
 
 from dataclasses import dataclass, field
 
-from ..ir import Instruction
-
-
-TERMINATORS = {
-    "jump",
-    "branch_if",
-    "cbranch_if",
-    "return",
-    "tailcall",
-    "direct_tailcall",
-    "halt",
-}
-
-
-@dataclass
-class BasicBlock:
-    """A maximal straight-line instruction sequence, identified by ``label``."""
-
-    label: str
-    instructions: list[Instruction] = field(default_factory=list)
-    successors: list[str] = field(default_factory=list)
-    predecessors: list[str] = field(default_factory=list)
-
-    def terminator(self):
-        """The block's trailing control-flow instruction, if it has one."""
-        return self.instructions[-1] if self.instructions and self.instructions[-1].op in TERMINATORS else None
-
-    def add_successor(self, label, fallthrough=False):
-        if label in self.successors:
-            return
-        if fallthrough:
-            self.successors.insert(0, label)
-        else:
-            self.successors.append(label)
-
-    def remove_successor(self, label):
-        if label in self.successors:
-            self.successors.remove(label)
+from ..ir import BasicBlock, Instruction, TERMINATORS
 
 
 @dataclass
