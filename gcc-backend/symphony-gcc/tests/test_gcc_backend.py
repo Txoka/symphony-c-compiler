@@ -203,30 +203,40 @@ class TestRuntimeLibc:
 # ---------------------------------------------------------------------
 
 class TestKnownIceGaps:
-    @pytest.mark.parametrize("optimize", ["-O1", "-O2"])
     @pytest.mark.xfail(
-        reason="runtime/heap.c's calloc() hits GCC's 'maximum number of "
-        "generated reload insns' ICE at -O1/-O2 (works at -O0); real, "
-        "unresolved backend limitation, not a scope decision -- see "
-        "README.md's Known gaps section.",
+        reason="runtime/heap.c's calloc() still hits GCC's 'maximum number "
+        "of generated reload insns' ICE at -O1 specifically (works at -O0 "
+        "and, since the *movsi_reg memory-alternative fix -- see README.md's "
+        "Known gaps 'Bug 4' -- at -O2 too); real, unresolved backend "
+        "limitation, plausibly explained by -O1 sometimes carrying higher "
+        "register pressure than -O2 at certain points (less aggressive "
+        "rematerialization/copy-propagation), but not further root-caused "
+        "-- see README.md's Known gaps section.",
         strict=True,
     )
-    def test_calloc_compiles_at_o1_o2(self, toolchain, tmp_path, optimize):
+    def test_calloc_compiles_at_o1(self, toolchain, tmp_path):
         toolchain.compile_to_asm(
             Path(__file__).resolve().parents[1] / "runtime" / "heap.c",
-            tmp_path / f"heap_{optimize.strip('-')}.s",
-            optimize=optimize,
+            tmp_path / "heap_o1.s",
+            optimize="-O1",
+        )
+
+    def test_calloc_compiles_at_o2(self, toolchain, tmp_path):
+        """Was xfail (strict) before the *movsi_reg memory-alternative fix
+        (README.md's Known gaps 'Bug 4') -- calloc() now compiles cleanly
+        at -O2, confirmed as a direct side effect of that fix, not assumed."""
+        toolchain.compile_to_asm(
+            Path(__file__).resolve().parents[1] / "runtime" / "heap.c",
+            tmp_path / "heap_o2.s",
+            optimize="-O2",
         )
 
     @pytest.mark.parametrize("optimize", ["-O1", "-O2"])
-    @pytest.mark.xfail(
-        reason="runtime/printf.c's __dyn_printf_unsigned() (reached via "
-        "printf.c as a whole) hits the same 'maximum number of generated "
-        "reload insns' ICE at -O1/-O2 (works at -O0); real, unresolved "
-        "backend limitation -- see README.md's Known gaps section.",
-        strict=True,
-    )
     def test_printf_unsigned_compiles_at_o1_o2(self, toolchain, tmp_path, optimize):
+        """Was xfail (strict) at both -O1 and -O2 before the *movsi_reg
+        memory-alternative fix (README.md's Known gaps 'Bug 4') --
+        __dyn_printf_unsigned() now compiles cleanly at both levels,
+        confirmed as a direct side effect of that fix, not assumed."""
         toolchain.compile_to_asm(
             Path(__file__).resolve().parents[1] / "runtime" / "printf.c",
             tmp_path / f"printf_{optimize.strip('-')}.s",
@@ -588,3 +598,74 @@ compute:
             src, tmp_path, name="linkreg", optimize="-O2", entry_symbol="main",
         )
         assert result == 360
+
+    def test_movsi_memory_alternative_under_register_pressure(self, toolchain, tmp_path):
+        """Regression test for the *movsi_reg-had-no-memory-alternative
+        bug (see the long comment above *movsi_reg in symphony.md and
+        this project's README's "Bug 4" writeup in Known gaps).
+
+        The very first port of this target split SImode moves into an
+        always-register-to-register *movsi_reg plus entirely separate
+        *load_si/*store_si patterns for memory access, with no overlap.
+        Under real register pressure (a recursive function with more
+        live cross-call values than callee-saved hard registers, forcing
+        IRA to spill a pseudo to a stack slot), LRA had no insn
+        alternative that could accept the spilled pseudo's memory
+        location directly -- *movsi_reg's only alternatives were
+        register-to-register. Instead of reloading the operand in place,
+        LRA fell back to its generic equivalence/inheritance
+        substitution path, repeatedly minting fresh temporary pseudos
+        that could ALSO fail to get a hard register under the same
+        pressure, never converging -- hitting reload's "maximum number
+        of generated reload insns per insn achieved (90)" internal
+        compiler error.
+
+        This reproduces that exact shape: a recursive function with 4
+        parameters that must all survive its own recursive call (only 4
+        callee-saved hard registers are available), structurally
+        identical to examples/towers_of_hanoi.c's move_pile, which this
+        fix closes at -O2 (previously ICE'd there at every optimization
+        level above -O0). Asserts both that it compiles at -O2 (the ICE
+        this test targets) and that -O0 and -O2 produce the
+        byte-identical correct result via their side-effecting output()
+        call sequence, since a compile-only assertion wouldn't catch a
+        reload fix that silently produced wrong code.
+        """
+        src = """
+        void output(unsigned int x);
+        void move_one(unsigned int source, unsigned int destination) {
+            output(source);
+            output(5);
+            output(destination);
+            output(5);
+        }
+        void move_pile(
+            unsigned int highest_disk,
+            unsigned int source,
+            unsigned int destination,
+            unsigned int spare
+        ) {
+            if (highest_disk != 0) {
+                move_pile(highest_disk - 1, source, spare, destination);
+            }
+            move_one(source, destination);
+            if (highest_disk != 0) {
+                move_pile(highest_disk - 1, spare, destination, source);
+            }
+        }
+        int main(void) {
+            move_pile(2, 0, 2, 1);
+            return 0;
+        }
+        """
+        result_o0, machine_o0, _ = toolchain.build_and_run(
+            src, tmp_path, name="movsi_mem_o0", optimize="-O0"
+        )
+        result_o2, machine_o2, _ = toolchain.build_and_run(
+            src, tmp_path, name="movsi_mem_o2", optimize="-O2"
+        )
+        assert result_o0 == 0
+        assert result_o2 == 0
+        assert list(machine_o0.outputs) == list(machine_o2.outputs)
+        # 3-disk Towers of Hanoi: 2*2^3-1 = 7 moves, 4 output() calls each.
+        assert len(machine_o2.outputs) == 28

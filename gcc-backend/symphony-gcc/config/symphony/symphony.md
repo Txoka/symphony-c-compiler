@@ -61,6 +61,21 @@
        (and (match_code "const_int")
             (match_test "IN_RANGE (INTVAL (op), 0, 65535)"))))
 
+;; movsi's source operand: a register, a U16 immediate, or memory --
+;; deliberately NOT plain "general_operand", which also accepts
+;; symbol_ref/label_ref/out-of-range CONST_INT (anything CONSTANT_P).
+;; Those must keep going through *movsi_full's 3-instruction
+;; materialization sequence instead; letting general_operand widen
+;; *movsi_reg's own predicate let recog match *movsi_reg for e.g. a
+;; symbol_ref source with no alternative that could actually satisfy
+;; it (neither "r" nor "I" accepts a symbol_ref), which is itself a
+;; second, narrower way to hit the reload-insn-cap ICE (an insn recog
+;; matches structurally but can never be constrained) -- caught by the
+;; regression test added alongside this fix.
+(define_predicate "movsi_src_operand"
+  (ior (match_operand 0 "arith_operand")
+       (match_operand 0 "memory_operand")))
+
 ;; -------------------------------------------------------------------
 ;; Moves
 ;; -------------------------------------------------------------------
@@ -86,11 +101,62 @@
     operands[1] = force_reg (SImode, operands[1]);
 })
 
+;; *movsi_reg carries real "m" (memory) alternatives alongside the
+;; register/register and register/immediate ones, deliberately -- NOT
+;; split into a separate always-register-only pattern plus standalone
+;; *load_si/*store_si patterns the way the very first port of this
+;; target had it.  That split was a real, previously-undiagnosed
+;; source of the "maximum number of generated reload insns per insn
+;; achieved" ICE class (see the reload-ICE investigation notes in
+;; README.md's "Known gaps" section): when *movsi_reg's only
+;; alternatives are register-to-register, LRA can NEVER present a
+;; spilled pseudo's memory location directly to this insn's own
+;; constraint matching -- there is no alternative that would accept
+;; it.  Instead of reloading the operand in place (an ordinary,
+;; convergent operation LRA's constraint machinery is built for), LRA
+;; falls back to its generic equivalence/inheritance substitution path
+;; -- repeatedly minting a fresh temporary pseudo to stand in for the
+;; spilled one -- and under high register pressure (recursive
+;; functions, the worst case: every live parameter must additionally
+;; survive the function's own call) those fresh pseudos can ALSO fail
+;; to get a hard register, so the substitution never terminates and
+;; hits the reload-insn retry cap.  Confirmed via gdb: examples/
+;; towers_of_hanoi.c's move_pile (plain recursion, 4 live parameters,
+;; only 4 callee-saved hard registers) looped forever emitting exactly
+;; this shape, `(set (reg N) (reg M))` with M a fresh pseudo each
+;; retry, before this fix.
+;;
+;; The memory operand's address is constrained to a bare register
+;; ("r" inside the mem, matching symphony_legitimate_address_p exactly
+;; -- this ISA has no base+offset addressing mode at all).  A spill
+;; slot's natural address as GCC/LRA constructs it is frame-relative,
+;; `(mem (plus (reg r11) (const_int N)))`, which is NOT a legitimate
+;; address here -- but that is fine and expected: LRA's own generic
+;; process_address_1 (lra-constraints.cc) already knows how to
+;; legitimize exactly this shape by materializing the sum into a fresh
+;; scratch pseudo via an ADD before the load/store, whenever the insn
+;; it's reloading actually HAS a memory alternative for
+;; process_address_1 to run against. That's the missing piece this
+;; fix supplies -- not a new hook, just letting the existing generic
+;; mechanism see the memory operand it was always able to legitimize.
 (define_insn "*movsi_reg"
-  [(set (match_operand:SI 0 "register_operand" "=r,r")
-        (match_operand:SI 1 "arith_operand"    "r,I"))]
-  ""
-  "mov\t%0, %1"
+  [(set (match_operand:SI 0 "nonimmediate_operand"  "=r,r,r,m")
+        (match_operand:SI 1 "movsi_src_operand"     "r,I,m,r"))]
+  "!MEM_P (operands[0]) || REG_P (operands[1])"
+{
+  switch (which_alternative)
+    {
+    case 0:
+    case 1:
+      return "mov\t%0, %1";
+    case 2:
+      return "load_32\t%0, %1";
+    case 3:
+      return "store_32\t%0, %1";
+    default:
+      gcc_unreachable ();
+    }
+}
   [(set_attr "length" "3")])
 
 (define_split

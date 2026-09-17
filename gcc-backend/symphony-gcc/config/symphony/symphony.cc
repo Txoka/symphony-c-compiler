@@ -374,7 +374,17 @@ symphony_print_operand (FILE *file, rtx x, int code)
 {
   if (code == 0)
     {
-      if (REG_P (x))
+      if (MEM_P (x))
+        /* *movsi_reg's "m" alternatives (added for the reload-ICE fix,
+           see the comment above that pattern in symphony.md) pass a
+           real (mem ...) rtx straight through as %0/%1 -- unlike
+           output_operand, this hook is never called automatically for
+           a MEM's address, so dispatch to the address printer
+           ourselves instead of falling into the "else" branch below,
+           which would wrongly treat the MEM as some kind of constant
+           via output_addr_const. */
+        symphony_print_operand_address (file, GET_MODE (x), XEXP (x, 0));
+      else if (REG_P (x))
         fputs (reg_names[REGNO (x)], file);
       else if (CONST_INT_P (x))
         fprintf (file, HOST_WIDE_INT_PRINT_DEC, INTVAL (x));
