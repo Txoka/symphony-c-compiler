@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from .frontends.c import CFrontend
 from .frontends.protocol import SourceFrontend
 from .middle.passes.pipeline import lower_intrinsics
-from .middle.ssa import construct, destruct, verify
+from .middle.ssa import (
+    construct,
+    destruct,
+    verify,
+    sparse_conditional_constant_propagation,
+)
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
 
@@ -38,6 +43,8 @@ class Compiler:
             # no C body, only a target-instruction lowering.
             lower_intrinsics(function)
             construct(function)
+            verify(function)
+            sparse_conditional_constant_propagation(function)
             verify(function)
             destruct(function)
         legalize_runtime_arithmetic(ir)
