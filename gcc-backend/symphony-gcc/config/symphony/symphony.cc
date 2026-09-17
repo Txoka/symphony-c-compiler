@@ -156,6 +156,32 @@ symphony_call_is_leaf (void)
   return crtl->is_leaf;
 }
 
+/* The other callee-saved general registers besides the hard frame
+   pointer (r11, handled separately below: it is ALWAYS pushed/popped
+   regardless of use, because it also serves as this function's own
+   frame-pointer materialization, not just a value the function
+   happens to clobber). r8, r9, r10 and r12 are declared callee-saved
+   in CALL_USED_REGISTERS (symphony.h) -- the ABI promises callers that
+   these survive an ordinary call -- but symphony_expand_prologue/
+   epilogue are fully custom and bypass GCC's generic callee-saved
+   spill loop entirely, so nothing else in the port saves them. A
+   function that is itself non-leaf and happens to hold a live value
+   in r8-r10/r12 across one of its OWN calls was silently corrupting
+   that value: the callee (itself following the same custom prologue)
+   never saved/restored those registers either, so whatever the callee
+   used them for clobbered the caller's live value with no save-point
+   anywhere in the chain. Caught by milestone 6's runtime verification
+   (a value held in r8 across `link_call malloc` was overwritten by
+   malloc's own use of r8 internally, corrupting the caller's pointer
+   to 0 with no build-time diagnostic -- only a wrong-output symptom
+   at emulator run time). Fixed generically here: walk the other
+   callee-saved registers and push/pop exactly the ones this function's
+   RTL actually references (df_regs_ever_live_p), mirroring what GCC's
+   default callee-saved loop would have done had this port not
+   replaced it. */
+static const int symphony_other_callee_saved_regs[] =
+  { 8, 9, 10, R12_REGNUM };
+
 void
 symphony_expand_prologue (void)
 {
@@ -186,6 +212,30 @@ symphony_expand_prologue (void)
      own frame pointer), not a build-time error. */
   rtx hfp = gen_rtx_REG (SImode, HARD_FRAME_POINTER_REGNUM);
   emit_insn (gen_movsi_push (hfp));
+  /* Save the other callee-saved registers this function actually
+     clobbers (see symphony_other_callee_saved_regs's comment above)
+     BEFORE materializing r11 below, exactly like r13/r11 themselves --
+     NOT after, and NOT interleaved with the `sub sp,sp,size` frame
+     allocation. GCC's STARTING_FRAME_OFFSET is left at its default of
+     0, so it assumes locals begin at offset 0 from the hard frame
+     pointer with NO knowledge of any extra register saves this custom
+     prologue performs; pushing these registers between `mov r11,sp`
+     and the frame allocation would silently steal the low bytes of
+     what GCC believes is exclusively local-variable space (r11-4,
+     r11-8, ...), aliasing a callee-saved register's spill slot with a
+     real local and corrupting whichever one is written last. Pushing
+     them here, before r11 is set, keeps them entirely above r11 (like
+     the r13/hfp saves), invisible to GCC's frame layout math. Caught
+     by milestone 6's runtime verification: a local at offset r11-4
+     aliased with r8's spill slot, so malloc's own epilogue `pop r8`
+     read back a local variable's value (clobbered to 0 by an
+     unrelated store) instead of the register it had actually saved. */
+  for (unsigned i = 0; i < ARRAY_SIZE (symphony_other_callee_saved_regs); i++)
+    {
+      int regno = symphony_other_callee_saved_regs[i];
+      if (df_regs_ever_live_p (regno) && !call_used_or_fixed_reg_p (regno))
+        emit_insn (gen_movsi_push (gen_rtx_REG (SImode, regno)));
+    }
   /* Materialize the hard frame pointer (r11) as sp *before* the frame is
      allocated, i.e. r11 points at the TOP of this function's frame (just
      below the saved r13/r11 slots), not the bottom. STARTING_FRAME_OFFSET
@@ -245,6 +295,14 @@ symphony_expand_epilogue (void)
           rtx tmp = force_reg (SImode, GEN_INT (size));
           emit_insn (gen_addsi3 (stack_pointer_rtx, stack_pointer_rtx, tmp));
         }
+    }
+  /* Pop the other callee-saved registers in reverse push order (see
+     the matching loop in symphony_expand_prologue). */
+  for (unsigned i = ARRAY_SIZE (symphony_other_callee_saved_regs); i-- > 0; )
+    {
+      int regno = symphony_other_callee_saved_regs[i];
+      if (df_regs_ever_live_p (regno) && !call_used_or_fixed_reg_p (regno))
+        emit_insn (gen_movsi_pop (gen_rtx_REG (SImode, regno)));
     }
   emit_insn (gen_movsi_pop (hfp));
   if (!symphony_call_is_leaf ())
