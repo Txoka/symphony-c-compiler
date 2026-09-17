@@ -53,7 +53,8 @@ class Backend:
             "return",
         }
         machine_binary = {"+", "-", "&", "|", "^", "<<", ">>"}
-        for instruction in f.instructions:
+        instructions = f.instructions
+        for instruction in instructions:
             if instruction.op not in allowed:
                 return False
             if instruction.op == "binary" and instruction.extra not in machine_binary:
@@ -66,9 +67,10 @@ class Backend:
             return False
 
         a = self.a
+        instructions = f.instructions
         remaining_uses = {}
         definitions = {}
-        for instruction in f.instructions:
+        for instruction in instructions:
             if instruction.dst is not None:
                 definitions[instruction.dst] = instruction
             for value in instruction.args:
@@ -76,7 +78,7 @@ class Backend:
 
         locations = {}
         register_values = {}
-        for instruction in f.instructions:
+        for instruction in instructions:
             if instruction.op == "param":
                 register = instruction.extra[0]
                 locations[instruction.dst] = register
@@ -111,7 +113,7 @@ class Backend:
                     return register
             return free_register()
 
-        for instruction in f.instructions:
+        for instruction in instructions:
             op = instruction.op
             if op in ("param", "const"):
                 continue
@@ -509,14 +511,15 @@ class Backend:
         """Lay out addressable objects and spill slots for live values."""
         offset = 0
         self.locals = {}
+        instructions = f.instructions
         promoted = {
             instruction.extra[1]
-            for instruction in f.instructions
+            for instruction in instructions
             if instruction.op == "param"
         }
         addressed = {
             instruction.extra
-            for instruction in f.instructions
+            for instruction in instructions
             if instruction.op == "local_addr"
         }
         # An unused parameter has no local_addr (the lowerer only emits one on
@@ -533,7 +536,7 @@ class Backend:
         definitions = {}
         writes = {}
         uses = {}
-        for index, instruction in enumerate(f.instructions):
+        for index, instruction in enumerate(instructions):
             if instruction.dst is not None:
                 definitions.setdefault(instruction.dst, []).append(instruction)
                 writes.setdefault(instruction.dst, []).append(index)
@@ -565,14 +568,14 @@ class Backend:
             value: sum(len(item.args) for item in definitions.get(value, ()))
             + sum(
                 instruction.args.count(value)
-                for instruction in f.instructions
+                for instruction in instructions
             )
             for value in live_values
         }
         definition_indexes = {}
         use_indexes = {}
         call_indexes = []
-        for index, instruction in enumerate(f.instructions):
+        for index, instruction in enumerate(instructions):
             if instruction.dst is not None:
                 definition_indexes.setdefault(instruction.dst, []).append(index)
             for value in instruction.args:
@@ -589,14 +592,14 @@ class Backend:
                 call_indexes.append(index)
 
         pinned = {}
-        for index, instruction in enumerate(f.instructions):
+        for index, instruction in enumerate(instructions):
             if instruction.op != "halt" or not instruction.args:
                 continue
             value = instruction.args[0]
             if (
                 index > 0
-                and f.instructions[index - 1].op in ("call", "direct_call")
-                and f.instructions[index - 1].dst == value
+                and instructions[index - 1].op in ("call", "direct_call")
+                and instructions[index - 1].dst == value
             ):
                 # The ABI already leaves this immediately consumed result in r1.
                 pinned[value] = 1
@@ -641,7 +644,8 @@ class Backend:
     def function(self, f):
         a = self.a
         a.label(f.name)
-        for instruction in f.instructions:
+        instructions = f.instructions
+        for instruction in instructions:
             if instruction.op == "init_pic" and self.target.pic:
                 a.emit(isa.counter(ABI.pic_base_register))
             elif instruction.op == "init_stack":
@@ -661,7 +665,7 @@ class Backend:
         uses_frame = frame > 0 or len(f.params) > len(ABI.argument_registers)
         returns_to_caller = any(
             instruction.op in ("return", "tailcall", "direct_tailcall")
-            for instruction in f.instructions
+            for instruction in instructions
         )
         saves_link = returns_to_caller and any(
             instruction.op in ("call", "direct_call")
@@ -669,7 +673,7 @@ class Backend:
                 instruction.op == "binary"
                 and instruction.extra in ("*", "/", "%")
             )
-            for instruction in f.instructions
+            for instruction in instructions
         )
         saved_registers = sorted(
             register for register in self.register_values.values() if register >= 8
@@ -696,7 +700,7 @@ class Backend:
                 a.emit(isa.alu("sub", 14, 14, 7))
         promoted = {
             instruction.extra[1]: instruction
-            for instruction in f.instructions
+            for instruction in instructions
             if instruction.op == "param"
         }
         if staged_seventh:
@@ -764,7 +768,7 @@ class Backend:
                 a.emit(isa.store(sym.type.size, 7, 1))
         epilogue = self.unique()
         terminated = False
-        for instruction_index, i in enumerate(f.instructions):
+        for instruction_index, i in enumerate(instructions):
             op = i.op
             if op in ("param", "init_pic", "init_stack", "relocate_globals"):
                 continue
@@ -1031,7 +1035,7 @@ class Backend:
             elif op == "return":
                 if i.args:
                     self.get(i.args[0], 1)
-                if instruction_index + 1 != len(f.instructions):
+                if instruction_index + 1 != len(instructions):
                     a.branch("jmp", epilogue)
                 continue
             elif op == "halt":
