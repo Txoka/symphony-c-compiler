@@ -16,7 +16,6 @@ carries no alias information to prove a load and a store elsewhere never
 conflict -- unchanged from the old pass's conservative rule.
 """
 
-from ..ir import Instruction
 from ..analysis.cfg import build_cfg, TERMINATORS
 from ..analysis.dominance import build_dominator_tree, find_natural_loops
 
@@ -46,11 +45,11 @@ def hoist_loop_invariants(function):
     """Move loop-invariant pure computations to a preheader before the header."""
     changed = False
     # Loop headers already tried and found unhoistable this call, identified by
-    # the header block's first instruction (stable across index-shifting
+    # the header block's first instruction (stable across block-shape-shifting
     # rewrites elsewhere in the function).
     skip_headers = set()
     # Process one loop per CFG snapshot: rewriting instructions can shift block
-    # indices, so the CFG, dominators and loop set are rebuilt after each move.
+    # shape, so the CFG, dominators and loop set are rebuilt after each move.
     # Innermost-first (smallest block set) lets a nested loop's invariants
     # become hoistable to its parent once freed of the inner loop's values.
     while True:
@@ -61,7 +60,7 @@ def hoist_loop_invariants(function):
         loops = [
             loop
             for loop in find_natural_loops(dominators)
-            if id(cfg.blocks[loop.header].instructions[0]) not in skip_headers
+            if id(cfg.by_label[loop.header].instructions[0]) not in skip_headers
         ]
         if not loops:
             break
@@ -72,17 +71,17 @@ def hoist_loop_invariants(function):
             for instruction in block.instructions:
                 if instruction.dst is not None:
                     definitions[instruction.dst] = instruction
-                block_of[id(instruction)] = block.index
+                block_of[id(instruction)] = block.label
 
         loop = min(loops, key=lambda l: len(l.blocks))
-        header_key = id(cfg.blocks[loop.header].instructions[0])
+        header_key = id(cfg.by_label[loop.header].instructions[0])
         has_memory_effects = any(
             instruction.op in MEMORY_EFFECTS
-            for index in loop.blocks
-            for instruction in cfg.blocks[index].instructions
+            for label in loop.blocks
+            for instruction in cfg.by_label[label].instructions
         )
         preheader_predecessors = [
-            p for p in cfg.blocks[loop.header].predecessors if p not in loop.blocks
+            p for p in cfg.by_label[loop.header].predecessors if p not in loop.blocks
         ]
         if len(preheader_predecessors) != 1:
             skip_headers.add(header_key)
@@ -107,8 +106,8 @@ def hoist_loop_invariants(function):
             return True
 
         hoisted_ids = []
-        for index in sorted(loop.blocks):
-            for instruction in cfg.blocks[index].instructions:
+        for label in sorted(loop.blocks):
+            for instruction in cfg.by_label[label].instructions:
                 if instruction.dst is not None and is_invariant(instruction.dst):
                     hoisted_ids.append(id(instruction))
 
@@ -125,7 +124,7 @@ def hoist_loop_invariants(function):
         ]
         # Insert before the preheader's terminator (if any) so the preamble
         # stays reachable, rather than after it where it would be dead code.
-        last = cfg.blocks[preheader].instructions[-1]
+        last = cfg.by_label[preheader].instructions[-1]
         last_id = id(last)
         insert_before_last = last.op in TERMINATORS
         rewritten = []
