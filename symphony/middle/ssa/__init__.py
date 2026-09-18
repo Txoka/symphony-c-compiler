@@ -5,6 +5,7 @@ from .destruct import destruct
 from .verify import verify, SSAVerificationError
 from .sccp import sparse_conditional_constant_propagation
 from .hoist import hoist_loop_invariants
+from .dce import remove_dead_values
 
 __all__ = [
     "construct",
@@ -13,4 +14,5 @@ __all__ = [
     "SSAVerificationError",
     "sparse_conditional_constant_propagation",
     "hoist_loop_invariants",
+    "remove_dead_values",
 ]

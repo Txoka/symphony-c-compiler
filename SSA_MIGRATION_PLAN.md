@@ -138,18 +138,32 @@ destruct→construct round trip today — only inlining will. Fixing this is
 `remove_dead_values`'s job, moved up to unblock inlining; see that item below.
 
 ## Tier 1 — hardest, migrate first
-- [~] `remove_dead_values` — moved up ahead of inlining: needed first to fix
-      the destruct→construct round-trip bug above (a dead phi's leftover
-      copies must not survive to confuse the next `construct()`). Needs
-      phi-awareness: phi operands are uses, and a wholly-dead phi (including
-      dead phi cycles) should be prunable. Add a direct test exercising
-      `destruct()` → `construct()` twice on one function so this round-trip
-      case is covered by the suite going forward, not just inlining's future
-      use of it.
-- [ ] `inline_single_call_functions` — the stable-block-identity refactor
-      above is done, so this is now unblocked once `remove_dead_values`
-      lands: build it as a true SSA-preserving clone (see the checklist item
-      under "Architecture change: stable block identity"), not the
+- [x] `remove_dead_values` (`symphony/middle/ssa/dce.py`, wired into
+      `compiler.py` after `hoist_loop_invariants`) — moved up ahead of
+      inlining to fix the destruct→construct round-trip bug above. Phi-aware:
+      a phi's operands only count as uses when its own `dst` is required, so
+      a dead phi (or a whole dead phi cycle) is prunable exactly like any
+      other pure, unused instruction. Gated by an *allowlist* of provably
+      pure ops (ported from the old pass's `PURE` set, plus `phi`), not a
+      blocklist of known side-effecting ones — first attempt used a blocklist
+      and silently deleted `init_text_screen` (a real side-effecting,
+      `dst=None` backend-only op not in the enumerated list), regressing
+      `test_printf_and_framebuffer_modes`; switching to the allowlist (an
+      instruction whose op isn't recognized as pure is always kept,
+      regardless of `dst`) fixed it and is categorically safer, since it can
+      only ever be too conservative, never wrong. Added `tests/test_ssa.py`
+      with direct destruct→construct round-trip regression coverage
+      (including a repeated-round-trip test) so this bug class is caught by
+      the suite going forward, not just by inlining's future use of it.
+      Verified: full suite green on both ISAs, byte-identical failure set to
+      the pre-existing baseline (diffed test-by-test, not just counted),
+      zero regressions; all example programs compile and run identically on
+      the native emulator (insertion_sort's instruction count even dropped
+      slightly, confirming real dead code is being removed).
+- [ ] `inline_single_call_functions` — the stable-block-identity refactor and
+      `remove_dead_values` above are both done, so this is now fully
+      unblocked: build it as a true SSA-preserving clone (see the checklist
+      item under "Architecture change: stable block identity"), not the
       destruct/construct approach.
 - [ ] `simplify_control_flow` + `thread_jumps` (same family) — deletes/merges/
       redirects blocks and edges. Every deletion must rewrite `phi.extra`'s

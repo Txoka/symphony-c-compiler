@@ -10,6 +10,7 @@ from .middle.ssa import (
     verify,
     sparse_conditional_constant_propagation,
     hoist_loop_invariants,
+    remove_dead_values,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -48,6 +49,8 @@ class Compiler:
             sparse_conditional_constant_propagation(function)
             verify(function)
             hoist_loop_invariants(function)
+            verify(function)
+            remove_dead_values(function)
             verify(function)
             destruct(function)
         legalize_runtime_arithmetic(ir)
