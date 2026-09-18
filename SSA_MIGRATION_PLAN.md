@@ -160,11 +160,66 @@ destruct→construct round trip today — only inlining will. Fixing this is
       zero regressions; all example programs compile and run identically on
       the native emulator (insertion_sort's instruction count even dropped
       slightly, confirming real dead code is being removed).
-- [ ] `inline_single_call_functions` — the stable-block-identity refactor and
-      `remove_dead_values` above are both done, so this is now fully
-      unblocked: build it as a true SSA-preserving clone (see the checklist
-      item under "Architecture change: stable block identity"), not the
-      destruct/construct approach.
+- [x] `inline_single_call_functions` (`symphony/middle/ssa/inline.py`, run
+      once module-wide in `compiler.py` between the per-function
+      construct/SCCP/hoist/DCE loop and the per-function verify/DCE/destruct
+      loop) — a true SSA-preserving clone, no destruct/construct round trip.
+      Candidate selection (non-recursive, exactly one direct call site,
+      address never observable, not `_start`/a `startup`/`halt`-containing
+      function) is ported from the old pipeline's heuristic unchanged. Each
+      callee clone gets fresh value ids and block labels through two maps;
+      phis are cloned directly (their `extra` re-keyed through the label
+      map, same as any `jump`/`branch_if`/`label` target); a callee
+      parameter still binds via a fresh caller-side `local_addr`+`store`
+      into a memory-form local (matching `construct.py`'s own choice to
+      leave parameters unpromoted, so nothing needs re-promoting after the
+      splice); every cloned `return` becomes a `jump` to a fresh
+      continuation block, merged by one phi keyed on each cloned return
+      block's own (already-stable) label. Three real bugs found and fixed
+      while building this, all now covered by `tests/test_ssa.py`'s
+      `InlineTests`:
+      1. Dead code after a callee's real `return` (the lowerer's own
+         trailing `const 0; return 0;` idiom) still counted as a phantom
+         predecessor of the continuation phi despite never running — fixed
+         by pruning the callee to its reachable blocks (`prune_unreachable_blocks`)
+         before cloning it.
+      2. Cloning a function that had *itself* already had a callee inlined
+         into it (e.g. `add` inlined into `main`, then `main` inlined into
+         `_start`) produced an unresolvable jump target, because the
+         cloned copies of the `label` instructions synthesized by the
+         *first* inlining were never re-keyed through the second clone's
+         label map — `remap_extra` only handled `phi`/`jump`/`branch_if`,
+         not `label`. This is also why candidates are settled bottom-up
+         (innermost candidate inlined first, so a function is only ever
+         cloned once it contains no further pending candidate calls) rather
+         than in whatever order `module.functions` happens to list them.
+      3. Splitting the call site's own block into a `before`/`continuation`
+         pair changes which block is the real CFG predecessor for anything
+         *downstream* of the original call site (e.g. an existing phi
+         elsewhere in the same function that already listed the original,
+         now-split block as one of its predecessors) — the terminator (and
+         therefore predecessor identity) moved onto the new continuation
+         block. Fixed by rewriting every such phi's predecessor label from
+         the original block to the continuation after every splice.
+      Verified: full suite failure count went from the 31-failure baseline
+      to 32 (one new failure, a heap-allocation RAM-fit test whose binary
+      grew past its fixed test RAM size) — traced directly to inlining
+      duplicating callee bodies (e.g. `malloc`/`__dyn_heap_take_free`) with
+      no dead-code/unreachable-function cleanup pass to claw the size back
+      down yet; this is expected and exactly why `remove_unreachable_functions`
+      and friends are scheduled after inlining in the old pipeline's own
+      fixed-point loop (see Tier 3). Confirmed via a stash-based before/after
+      comparison that this size growth is caused by inlining specifically
+      (e.g. `examples/bigprime.c` grew from 35088 to 63304 bytes with
+      inlining wired in, unchanged otherwise), not a pre-existing issue.
+      No other diffs against the baseline failure set. Added 4 new tests to
+      `tests/test_ssa.py::InlineTests`, each compiling through the real
+      pipeline (construct → per-function opts → inline → destruct →
+      backend) and running on the native-preferring emulator: a basic
+      single-call-site inline, a chain of two candidates (regression
+      coverage for bug 2/bottom-up ordering), a recursive function
+      (confirms it's correctly never selected), and a multi-call-site
+      function (confirms it's correctly never selected either).
 - [ ] `simplify_control_flow` + `thread_jumps` (same family) — deletes/merges/
       redirects blocks and edges. Every deletion must rewrite `phi.extra`'s
       `(predecessor_label, value)` pairs (`redirect_edge`/`remove_block` in

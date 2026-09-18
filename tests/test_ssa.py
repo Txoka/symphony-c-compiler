@@ -10,7 +10,16 @@ import unittest
 from symphony.frontends.c import CFrontend
 from symphony.middle.passes.pipeline import lower_intrinsics
 from symphony.middle.analysis.cfg import prune_unreachable_blocks
-from symphony.middle.ssa import construct, verify, destruct, remove_dead_values
+from symphony.middle.ssa import (
+    construct,
+    verify,
+    destruct,
+    remove_dead_values,
+    inline_single_call_functions,
+)
+from symphony.emulator import Machine, native_available, native_run
+from symphony.targets.symphony import generate, Target
+from symphony.targets.symphony.legalize import legalize_runtime_arithmetic
 
 
 def _build(source):
@@ -79,6 +88,87 @@ class RoundTripTests(unittest.TestCase):
             remove_dead_values(f)
             construct(f)
             verify(f)  # must not raise on either pass
+
+
+def _run(source, ram=1 << 16):
+    """Compile via the real pipeline (construct/opts/inline/destruct) and run
+    on the native-preferring emulator, returning the halt return value."""
+    frontend = CFrontend()
+    lowered = frontend.lower(source, "<input>")
+    ir = lowered.ir
+    for function in ir.functions:
+        lower_intrinsics(function)
+        construct(function)
+        verify(function)
+    inline_single_call_functions(ir)
+    for function in ir.functions:
+        verify(function)
+        remove_dead_values(function)
+        verify(function)
+        destruct(function)
+    legalize_runtime_arithmetic(ir)
+    image = generate(ir, Target())
+    machine = Machine(image.binary, ram)
+    halt = image.symbols["_halt"]
+    if native_available():
+        return native_run(machine, halt)
+    return machine.run(halt)
+
+
+class InlineTests(unittest.TestCase):
+    def test_single_call_site_function_is_inlined_and_runs_correctly(self):
+        self.assertEqual(
+            _run(
+                """
+                int add(int a, int b) { return a + b; }
+                int main(void) { return add(3, 4); }
+                """
+            ),
+            7,
+        )
+
+    def test_chain_of_single_call_site_functions_inlines_bottom_up(self):
+        """`inner` is only called by `middle`, which is only called by
+        `main` -- both are candidates, and `inner` must be fully settled
+        inside `middle`'s clone before `middle` itself gets cloned into
+        `main`, or the continuation phi built for the outer splice ends up
+        citing a predecessor label that no longer reaches it (the bug this
+        pass's bottom-up ordering exists to avoid; see inline.py)."""
+        self.assertEqual(
+            _run(
+                """
+                int inner(int x) { if (x > 0) return x; return -x; }
+                int middle(int x) { return inner(x) + 1; }
+                int main(void) { return middle(-6); }
+                """
+            ),
+            7,
+        )
+
+    def test_recursive_function_is_not_inlined(self):
+        """A function that (transitively) calls back into itself must never
+        be selected as a candidate, even with exactly one direct call site
+        -- inlining it would recurse forever while cloning."""
+        self.assertEqual(
+            _run(
+                """
+                int fact(int n) { if (n <= 1) return 1; return n * fact(n - 1); }
+                int main(void) { return fact(5); }
+                """
+            ),
+            120,
+        )
+
+    def test_multiple_call_sites_are_not_inlined(self):
+        self.assertEqual(
+            _run(
+                """
+                int square(int x) { return x * x; }
+                int main(void) { return square(3) + square(4); }
+                """
+            ),
+            25,
+        )
 
 
 if __name__ == "__main__":
