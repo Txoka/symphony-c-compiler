@@ -8,6 +8,7 @@ steps, not host wall-clock time.
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -70,10 +71,17 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "docs" / "example-benchmarks.md")
     parser.add_argument("--max-steps", type=int, default=2_000_000_000)
     parser.add_argument("--prefix", default=os.environ.get("SYMPHONY_GCC_PREFIX"))
+    parser.add_argument("--build-gcc", action="store_true", help="build the local GCC toolchain when missing")
     args = parser.parse_args()
-    if not args.prefix:
-        parser.error("set SYMPHONY_GCC_PREFIX or pass --prefix (real GCC toolchain required)")
-    toolchain = Toolchain(args.prefix)
+    default_prefix = ROOT / ".cache" / "symphony-gcc" / "build-stage1"
+    args.prefix = args.prefix or default_prefix
+    try:
+        toolchain = Toolchain(args.prefix)
+    except ToolchainNotBuilt:
+        if not args.build_gcc:
+            parser.error("GCC toolchain missing; rerun with --build-gcc or run tools/build_symphony_gcc.sh")
+        subprocess.run([str(ROOT / "tools" / "build_symphony_gcc.sh")], check=True)
+        toolchain = Toolchain(args.prefix)
     rows, notes = [], []
     with tempfile.TemporaryDirectory(prefix="symphony-example-bench-") as raw_tmp:
         tmp = Path(raw_tmp)
