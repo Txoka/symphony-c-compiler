@@ -253,9 +253,15 @@ destruct→construct round trip today — only inlining will. Fixing this is
       chains are resolved while matching, since those remain until the later
       global-copy pass. Regressions cover the exact derived-phi shape, a real
       C loop running end to end, and the easily-miscompiled `i + (-1)` case.
-- [ ] `eliminate_redundant_loop_memory` — loop-invariant load/store elimination;
-      depends on the same natural-loop/dominance infrastructure as hoisting,
-      do it right after `hoist_loop_invariants` while that machinery is fresh.
+- [x] `eliminate_redundant_loop_memory` (`symphony/middle/ssa/loop_memory.py`)
+      — forwards repeated loads and deletes overwritten stores for exact,
+      proven `local_addr`/`global_addr` identities within one straight-line
+      block of a natural loop. Copies preserve address identity; every unknown
+      store or call is a complete memory barrier. This is intentionally more
+      conservative than the mutable-IR pass: without MemorySSA or alias
+      analysis, facts do not cross a CFG edge and no structural pointer
+      arithmetic is treated as equal. Regression coverage verifies both load
+      forwarding and removal of a store made unobservable by a later overwrite.
 
 ## Tier 2 — moderate, mostly free/simpler on SSA
 

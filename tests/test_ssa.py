@@ -22,6 +22,7 @@ from symphony.middle.ssa import (
     reduce_induction_strength,
     sparse_conditional_constant_propagation,
     hoist_loop_invariants,
+    eliminate_redundant_loop_memory,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -42,6 +43,52 @@ def _build(source):
 
 
 class RoundTripTests(unittest.TestCase):
+    def test_loop_memory_forwards_exact_loads_and_removes_overwritten_store(self):
+        function = FunctionIR(
+            "memory",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "entry",
+                    [
+                        Instruction("const", 0, (), INT, 1),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock(
+                    "header",
+                    [
+                        Instruction("branch_if", None, (0,), INT, (False, "exit")),
+                    ],
+                ),
+                BasicBlock(
+                    "body",
+                    [
+                        Instruction("local_addr", 1, (), INT, "slot"),
+                        Instruction("const", 2, (), INT, 7),
+                        Instruction("store", None, (1, 2), INT),
+                        Instruction("load", 3, (1,), INT),
+                        Instruction("load", 4, (1,), INT),
+                        Instruction("const", 5, (), INT, 9),
+                        Instruction("store", None, (1, 5), INT),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock("exit", [Instruction("return", None, (0,), INT)]),
+            ],
+            6,
+        )
+        verify(function)
+        self.assertTrue(eliminate_redundant_loop_memory(function))
+        verify(function)
+        body = function.blocks[2].instructions
+        self.assertEqual(sum(item.op == "store" for item in body), 1)
+        self.assertEqual(
+            [(item.op, item.args) for item in body if item.dst in (3, 4)],
+            [("copy", (2,)), ("copy", (2,))],
+        )
+
     def test_induction_strength_reduction_builds_derived_phi(self):
         function = FunctionIR(
             "induction",

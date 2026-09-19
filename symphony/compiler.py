@@ -14,6 +14,7 @@ from .middle.ssa import (
     inline_single_call_functions,
     simplify_control_flow,
     reduce_induction_strength,
+    eliminate_redundant_loop_memory,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -54,6 +55,8 @@ class Compiler:
             hoist_loop_invariants(function)
             verify(function)
             reduce_induction_strength(function)
+            verify(function)
+            eliminate_redundant_loop_memory(function)
             verify(function)
             remove_dead_values(function)
             verify(function)
