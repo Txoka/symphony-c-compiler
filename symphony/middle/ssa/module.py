@@ -46,6 +46,23 @@ def remove_unreachable_symbols(module):
 remove_unreachable_functions = remove_unreachable_symbols
 
 
+def remove_unused_stack_initialization(module):
+    """Drop startup stack setup when the final entry IR is stack-free."""
+    entry = next((function for function in module.functions if function.name == "_start"), None)
+    if entry is None:
+        return False
+    instructions = [item for block in entry.blocks for item in block.instructions]
+    if not any(item.op == "init_stack" for item in instructions):
+        return False
+    stack_free = {"init_pic", "init_stack", "relocate_globals", "const", "global_addr", "copy", "cast", "unary", "binary", "intrinsic", "halt", "label"}
+    if any(item.op not in stack_free for item in instructions):
+        return False
+    if any(item.op == "binary" and item.extra in ("*", "/", "%") for item in instructions):
+        return False
+    entry.blocks = [BasicBlock(block.label, [item for item in block.instructions if item.op != "init_stack"]) for block in entry.blocks]
+    return True
+
+
 def fold_immutable_global_loads(module):
     """Fold integer loads from closed-world, provably unmodified globals."""
     globals_ = {global_.symbol.key: global_ for global_ in module.globals}
