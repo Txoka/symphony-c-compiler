@@ -5,7 +5,7 @@ from .abi import ABI
 from .assembler import Assembler
 from .config import Image, Target
 from ...middle.model import CompileError, align_up
-from ...middle.ssa.allocate import interference_graph
+from ...middle.ssa.allocate import copy_coalescing_groups, interference_graph
 
 
 class Backend:
@@ -606,19 +606,58 @@ class Backend:
                 pinned[value] = 1
 
         graph, across_calls = interference_graph(f)
-        ordered = sorted(live_values, key=lambda value: (-len(graph.get(value, ())), -scores[value], value))
+        groups = copy_coalescing_groups(f, live_values, graph, pinned)
+        group_for = {
+            value: index for index, group in enumerate(groups) for value in group
+        }
+        group_graph = {index: set() for index in range(len(groups))}
+        for value, neighbours in graph.items():
+            if value not in group_for:
+                continue
+            group = group_for[value]
+            group_graph[group].update(
+                group_for[other]
+                for other in neighbours
+                if other in group_for and group_for[other] != group
+            )
+        group_scores = {
+            index: sum(scores[value] for value in group)
+            for index, group in enumerate(groups)
+        }
+        ordered = sorted(
+            range(len(groups)),
+            key=lambda group: (
+                -len(group_graph[group]), -group_scores[group], min(groups[group])
+            ),
+        )
         self.register_values = dict(pinned)
         callee_registers = [8, 9, 10]
         if not self.target.pic:
             callee_registers.append(12)
-        for value in ordered:
-            if value in self.register_values:
+        for group in ordered:
+            values = groups[group]
+            assigned = {
+                self.register_values[value]
+                for value in values
+                if value in self.register_values
+            }
+            if assigned:
+                register = next(iter(assigned))
+                self.register_values.update((value, register) for value in values)
                 continue
-            forbidden = {self.register_values.get(other) for other in graph.get(value, ())}
-            choices = callee_registers if value in across_calls else [3, 4, 5, 6, *callee_registers]
+            forbidden = {
+                self.register_values.get(other)
+                for neighbour in group_graph[group]
+                for other in groups[neighbour]
+            }
+            choices = (
+                callee_registers
+                if any(value in across_calls for value in values)
+                else [3, 4, 5, 6, *callee_registers]
+            )
             register = next((item for item in choices if item not in forbidden), None)
             if register is not None:
-                self.register_values[value] = register
+                self.register_values.update((value, register) for value in values)
         live_values = [
             value for value in live_values if value not in self.register_values
         ]
@@ -662,9 +701,9 @@ class Backend:
             )
             for instruction in instructions
         )
-        saved_registers = sorted(
+        saved_registers = sorted({
             register for register in self.register_values.values() if register >= 8
-        )
+        })
         staged_seventh = len(f.params) >= len(ABI.argument_registers)
         self.frames[f.name] = (
             frame + 4 * len(saved_registers)

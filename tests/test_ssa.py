@@ -32,7 +32,7 @@ from symphony.middle.ssa import (
     lower_self_tail_calls_to_loops,
 )
 from symphony.middle.ssa.destruct import _sequentialize
-from symphony.middle.ssa.allocate import interference_graph
+from symphony.middle.ssa.allocate import copy_coalescing_groups, interference_graph
 from symphony.middle.ssa.verify import SSAVerificationError
 from symphony.emulator import Machine, native_available, native_run
 from symphony.targets.symphony import generate, Target
@@ -472,6 +472,26 @@ class OptimizationTests(unittest.TestCase):
         self.assertIn(0, across)
         self.assertIn(1, across)
         self.assertIn(1, graph[0])
+
+    def test_allocator_coalesces_only_noninterfering_copies(self):
+        function = FunctionIR("copies", [], [], [BasicBlock("entry", [
+            Instruction("copy", 1, (0,), INT),
+            Instruction("copy", 2, (1,), INT),
+            Instruction("copy", 3, (0,), INT),
+        ])], 4)
+        graph = {0: {3}, 3: {0}}
+        groups = copy_coalescing_groups(function, range(4), graph)
+        self.assertIn({0, 1, 2}, groups)
+        self.assertIn({3}, groups)
+
+    def test_allocator_does_not_coalesce_distinct_pinned_homes(self):
+        function = FunctionIR("pins", [], [], [BasicBlock("entry", [
+            Instruction("copy", 1, (0,), INT),
+        ])], 2)
+        groups = copy_coalescing_groups(
+            function, range(2), {}, pinned={0: 1, 1: 2}
+        )
+        self.assertEqual([{0}, {1}], groups)
 
     def test_self_tail_recursion_becomes_ssa_loop(self):
         source = """
