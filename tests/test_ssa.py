@@ -23,6 +23,7 @@ from symphony.middle.ssa import (
     sparse_conditional_constant_propagation,
     hoist_loop_invariants,
     eliminate_redundant_loop_memory,
+    propagate_global_copies,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -43,6 +44,48 @@ def _build(source):
 
 
 class RoundTripTests(unittest.TestCase):
+    def test_global_copy_propagation_resolves_cross_block_phi_operand(self):
+        function = FunctionIR(
+            "copies",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "entry",
+                    [
+                        Instruction("const", 0, (), INT, 0),
+                        Instruction("copy", 1, (0,), INT),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock(
+                    "header",
+                    [
+                        Instruction("phi", 2, (), INT, (("entry", 1), ("latch", 4))),
+                        Instruction("copy", 3, (2,), INT),
+                        Instruction("branch_if", None, (2,), INT, (False, "exit")),
+                    ],
+                ),
+                BasicBlock(
+                    "latch",
+                    [
+                        Instruction("const", 5, (), INT, 1),
+                        Instruction("binary", 4, (3, 5), INT, "+"),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock("exit", [Instruction("return", None, (2,), INT)]),
+            ],
+            6,
+        )
+        verify(function)
+        self.assertTrue(propagate_global_copies(function))
+        verify(function)
+        phi = function.blocks[1].instructions[0]
+        self.assertEqual(dict(phi.extra)["entry"], 0)
+        update = function.blocks[2].instructions[1]
+        self.assertEqual(update.args[0], 2)
+
     def test_loop_memory_forwards_exact_loads_and_removes_overwritten_store(self):
         function = FunctionIR(
             "memory",

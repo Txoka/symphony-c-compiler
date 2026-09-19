@@ -265,8 +265,14 @@ destruct→construct round trip today — only inlining will. Fixing this is
 
 ## Tier 2 — moderate, mostly free/simpler on SSA
 
-- [ ] `propagate_global_copies` — nearly degenerates into "resolve copy/cast
-      chains once" on SSA (every value has one definition already).
+- [x] `propagate_global_copies` (`symphony/middle/ssa/copies.py`) — resolves
+      `copy` chains globally, including phi-edge operands, because SSA
+      dominance makes the source valid wherever its copy was valid. It also
+      removes only representation-preserving casts whose source and result
+      types match exactly; narrowing and signedness-changing casts remain real
+      operations. DCE cleans up the now-unused copies. Regression coverage
+      includes a copy crossing a block boundary into a header phi and back out
+      through a loop latch.
 - [ ] `propagate_and_fold` — most of its barrier/alias-invalidation machinery
       exists only to cope with non-SSA mutable locals; should shrink a lot.
 - [ ] `fuse_comparison_branches` — local peephole, doesn't touch CFG shape,

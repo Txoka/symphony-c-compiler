@@ -10,6 +10,7 @@ from .inline import inline_single_call_functions
 from .simplify_cfg import simplify_control_flow
 from .induction import reduce_induction_strength
 from .loop_memory import eliminate_redundant_loop_memory
+from .copies import propagate_global_copies
 
 __all__ = [
     "construct",
@@ -23,4 +24,5 @@ __all__ = [
     "simplify_control_flow",
     "reduce_induction_strength",
     "eliminate_redundant_loop_memory",
+    "propagate_global_copies",
 ]

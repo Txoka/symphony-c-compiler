@@ -15,6 +15,7 @@ from .middle.ssa import (
     simplify_control_flow,
     reduce_induction_strength,
     eliminate_redundant_loop_memory,
+    propagate_global_copies,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -51,6 +52,8 @@ class Compiler:
             construct(function)
             verify(function)
             sparse_conditional_constant_propagation(function)
+            verify(function)
+            propagate_global_copies(function)
             verify(function)
             hoist_loop_invariants(function)
             verify(function)
