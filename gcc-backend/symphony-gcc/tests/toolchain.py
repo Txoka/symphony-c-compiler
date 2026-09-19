@@ -152,7 +152,13 @@ class Toolchain:
         stem = c_path.stem
         asm_path = tmp_path / f"runtime_{stem}.s"
         obj_path = tmp_path / f"runtime_{stem}.o"
-        self.compile_to_asm(c_path, asm_path, optimize=optimize)
+        # These sources provide libc-like primitives themselves.  At -O2 GCC
+        # otherwise recognizes (for example) our memset implementation as a
+        # builtin and rewrites its loop into a call to memset, producing an
+        # immediate self-recursive runtime function.
+        self.compile_to_asm(
+            c_path, asm_path, optimize=optimize, extra_flags=("-fno-builtin",)
+        )
         self.assemble(asm_path, obj_path)
         obj = ObjectFile.load(obj_path)
         self._runtime_object_cache[key] = obj
