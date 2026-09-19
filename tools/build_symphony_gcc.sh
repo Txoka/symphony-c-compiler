@@ -53,6 +53,11 @@ make -C "$build_dir" -j"$jobs" all-gcc
 # libgcc configure needs a real target assembler; GCC's generated stub is not one.
 printf '%s\n' '#!/bin/sh' "exec python3 '$backend/tools/symphony_as.py' \"\$@\"" > "$build_dir/gcc/as"
 chmod +x "$build_dir/gcc/as"
+# The target has no binutils port.  libgcc archives opaque custom object
+# payloads, so standard host ar/ranlib are the correct archive tools.
+mkdir -p "$install_dir/symphony-elf/bin"
+ln -sfn "$(command -v ar)" "$install_dir/symphony-elf/bin/symphony-elf-ar"
+ln -sfn "$(command -v ranlib)" "$install_dir/symphony-elf/bin/symphony-elf-ranlib"
 PATH="$install_dir/symphony-elf/bin:$PATH" make -C "$build_dir" -j"$jobs" all-target-libgcc
 
 printf 'SYMPHONY_GCC_PREFIX=%s\n' "$build_dir"
