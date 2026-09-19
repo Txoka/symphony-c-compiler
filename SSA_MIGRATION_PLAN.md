@@ -241,10 +241,18 @@ destruct→construct round trip today — only inlining will. Fixing this is
       green on both ISAs; the ordinary Dynphony suite retains the same 32 known
       missing-optimization failures as the pre-stabilization baseline, with no
       new failing test names.
-- [ ] `reduce_induction_strength` — induction-variable recognition is a phi
-      pattern (self-referential phi with a constant per-iteration step); real
-      SSA should make identifying induction variables far more direct than
-      re-deriving them from a mutable loop counter each iteration.
+- [x] `reduce_induction_strength` (`symphony/middle/ssa/induction.py`) —
+      recognizes a basic induction variable directly from a loop-header phi,
+      its one preheader seed, and constant-step values on every back edge.
+      A loop expression `base + i` becomes its own derived phi: compute
+      `base + i.entry` once in the preheader and update the derived value on
+      each back edge using that edge's proven `+`/`-` constant operation.
+      This is more general than the mutable-IR version: it needs neither one
+      update site nor an update that dominates every use, and naturally
+      supports multiple back edges. Copy and representation-preserving cast
+      chains are resolved while matching, since those remain until the later
+      global-copy pass. Regressions cover the exact derived-phi shape, a real
+      C loop running end to end, and the easily-miscompiled `i + (-1)` case.
 - [ ] `eliminate_redundant_loop_memory` — loop-invariant load/store elimination;
       depends on the same natural-loop/dominance infrastructure as hoisting,
       do it right after `hoist_loop_invariants` while that machinery is fresh.

@@ -19,6 +19,9 @@ from symphony.middle.ssa import (
     remove_dead_values,
     inline_single_call_functions,
     simplify_control_flow,
+    reduce_induction_strength,
+    sparse_conditional_constant_propagation,
+    hoist_loop_invariants,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -39,6 +42,95 @@ def _build(source):
 
 
 class RoundTripTests(unittest.TestCase):
+    def test_induction_strength_reduction_builds_derived_phi(self):
+        function = FunctionIR(
+            "induction",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "entry",
+                    [
+                        Instruction("const", 0, (), INT, 0),
+                        Instruction("const", 1, (), INT, 1),
+                        Instruction("const", 2, (), INT, 100),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock(
+                    "header",
+                    [
+                        Instruction("phi", 3, (), INT, (("entry", 0), ("latch", 5))),
+                        Instruction("binary", 4, (2, 3), INT, "+"),
+                        Instruction("branch_if", None, (3,), INT, (False, "exit")),
+                    ],
+                ),
+                BasicBlock(
+                    "latch",
+                    [
+                        Instruction("binary", 5, (3, 1), INT, "+"),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock("exit", [Instruction("return", None, (4,), INT)]),
+            ],
+            6,
+        )
+        verify(function)
+        self.assertTrue(reduce_induction_strength(function))
+        verify(function)
+        header = function.blocks[1]
+        phis = [item for item in header.instructions if item.op == "phi"]
+        self.assertEqual(len(phis), 2)
+        self.assertEqual(next(item for item in header.instructions if item.dst == 4).op, "copy")
+        derived_phi = next(item for item in phis if item.dst != 3)
+        self.assertEqual({label for label, _ in derived_phi.extra}, {"entry", "latch"})
+
+    def test_induction_recurrence_preserves_addition_of_negative_step(self):
+        function = FunctionIR(
+            "descending",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "entry",
+                    [
+                        Instruction("const", 0, (), INT, 4),
+                        Instruction("const", 1, (), INT, -1),
+                        Instruction("const", 2, (), INT, 100),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock(
+                    "header",
+                    [
+                        Instruction("phi", 3, (), INT, (("entry", 0), ("latch", 5))),
+                        Instruction("binary", 4, (2, 3), INT, "+"),
+                        Instruction("branch_if", None, (3,), INT, (False, "exit")),
+                    ],
+                ),
+                BasicBlock(
+                    "latch",
+                    [
+                        Instruction("binary", 5, (3, 1), INT, "+"),
+                        Instruction("jump", extra="header"),
+                    ],
+                ),
+                BasicBlock("exit", [Instruction("return", None, (4,), INT)]),
+            ],
+            6,
+        )
+        self.assertTrue(reduce_induction_strength(function))
+        verify(function)
+        latch_updates = [
+            item
+            for item in function.blocks[2].instructions
+            if item.op == "binary" and item.dst != 5
+        ]
+        self.assertEqual(len(latch_updates), 1)
+        self.assertEqual(latch_updates[0].extra, "+")
+        self.assertEqual(latch_updates[0].args[1], 1)
+
     def test_backend_emits_reachable_edge_block_after_halt_layout(self):
         start = FunctionIR(
             "_start",
@@ -220,6 +312,12 @@ def _run(source, ram=1 << 16):
         lower_intrinsics(function)
         construct(function)
         verify(function)
+        sparse_conditional_constant_propagation(function)
+        verify(function)
+        hoist_loop_invariants(function)
+        verify(function)
+        reduce_induction_strength(function)
+        verify(function)
     inline_single_call_functions(ir)
     for function in ir.functions:
         verify(function)
@@ -246,6 +344,39 @@ class InlineTests(unittest.TestCase):
             ),
             7,
         )
+
+
+class OptimizationTests(unittest.TestCase):
+    def test_source_loop_uses_derived_induction_recurrence_and_runs(self):
+        source = """
+            int sum_offsets(int count) {
+                int total = 0;
+                for (int i = 0; i < count; i++) total += 100 + i;
+                return total;
+            }
+            int main(void) { return sum_offsets(4); }
+        """
+        ir = _build(source)
+        function = next(item for item in ir.functions if item.name == "sum_offsets")
+        sparse_conditional_constant_propagation(function)
+        hoist_loop_invariants(function)
+        before = sum(
+            instruction.op == "phi"
+            for block in function.blocks
+            for instruction in block.instructions
+        )
+        self.assertTrue(reduce_induction_strength(function))
+        verify(function)
+        after = sum(
+            instruction.op == "phi"
+            for block in function.blocks
+            for instruction in block.instructions
+        )
+        self.assertEqual(after, before + 1)
+        self.assertEqual(_run(source), 406)
+
+
+class InlineTestsContinued(unittest.TestCase):
 
     def test_chain_of_single_call_site_functions_inlines_bottom_up(self):
         """`inner` is only called by `middle`, which is only called by
