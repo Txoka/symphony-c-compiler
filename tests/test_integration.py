@@ -7,6 +7,7 @@ in test_compiler.py; these tests protect the boundaries between compiler stages.
 
 import os
 import unittest
+from hashlib import sha256
 from pathlib import Path
 
 from symphony import Target as _Target, compile_source as _compile_source, compile_sources as _compile_sources
@@ -240,6 +241,42 @@ class CompilerIntegrationTests(unittest.TestCase):
             ],
         )
         self.assertIn("__dyn_heap_anchor", result.image.symbols)
+
+    @unittest.skipUnless(NATIVE_AVAILABLE, "expensive example correctness checks require native emulator")
+    def test_expensive_example_outputs(self):
+        """Protect examples not covered by the smaller focused integration tests.
+
+        These are semantic checks, deliberately separate from benchmark sizes
+        and instruction counts: an optimization must not trade output
+        correctness for a smaller/faster image.
+        """
+        cases = {
+            "bigprime.c": (0, {0: b"prime:", 96: b"991d39b4 2c3c6fd7 ac5a967d 3bbf007b", 192: b"tested: 61"}),
+            "demo.c": (146, {0: b"Result: 146"}),
+            "pi.c": (0, {0: b"3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706"}),
+        }
+        for name, (expected, fragments) in cases.items():
+            with self.subTest(example=name):
+                result = compile_source((ROOT / "examples" / name).read_text())
+                machine = Machine(result.image.binary, 1 << 20)
+                self.assertEqual(
+                    machine.run(result.image.symbols["_halt"], max_steps=2_000_000_000),
+                    expected,
+                )
+                framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+                for offset, text in fragments.items():
+                    self.assertEqual(
+                        bytes(machine.memory[framebuffer + offset : framebuffer + offset + len(text)]),
+                        text,
+                    )
+                if name == "pi.c":
+                    # Full 96x40 display, not merely the readable prefix
+                    # above.  This catches a wrong digit anywhere in the
+                    # 3,838-digit result and any row-layout corruption.
+                    self.assertEqual(
+                        sha256(bytes(machine.memory[framebuffer : framebuffer + 3840])).hexdigest(),
+                        "a73dcf78a3973a5785cedfcd5ca8694aa74794c668ab2679ad2fcf2ae13123e6",
+                    )
 
     def test_mixed_language_features_at_fixed_and_pic_addresses(self):
         # values sum to 23; all are odd, so collect gives 28; finish adds 7 + 1.

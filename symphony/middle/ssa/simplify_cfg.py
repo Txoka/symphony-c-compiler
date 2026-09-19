@@ -113,10 +113,10 @@ def simplify_control_flow(function):
         if _thread_jumps(function):
             step = True
         cfg = build_cfg(function)
-        # A conditional whose arms only traverse empty/jump-only blocks before
-        # rejoining has no control effect.  Keeping it needlessly preserves a
-        # branch on values whose computation (such as ``input()``) must stay,
-        # even when both outcomes are identical.
+        # A conditional can be erased only when both paths reach the same
+        # control destination *and* that destination has no phi values.  A
+        # common destination alone is insufficient: its phi operands may
+        # still encode distinct values for the two incoming edges.
         def trivial_destination(label):
             seen = set()
             while label not in seen:
@@ -130,17 +130,58 @@ def simplify_control_flow(function):
                 label = candidate.successors[0]
             return label
 
+        def incoming_label(source, label, destination):
+            """Return the predecessor label by which ``label`` reaches the
+            shared destination, or ``None`` when the route is not a pure
+            trampoline chain."""
+            predecessor = source
+            seen = set()
+            while label != destination and label not in seen:
+                seen.add(label)
+                candidate = cfg.by_label[label]
+                body = [item for item in candidate.instructions if item.op != "label"]
+                predecessor = candidate.label
+                if not body and len(candidate.successors) == 1:
+                    label = candidate.successors[0]
+                elif len(body) == 1 and body[0].op == "jump":
+                    label = cfg.label_blocks.get(body[0].extra, body[0].extra)
+                else:
+                    return None
+            return predecessor if label == destination else None
+
+        def equal_phi_inputs(source, left, right, destination):
+            """Whether eliminating ``source``'s branch preserves every phi
+            value at the shared merge destination."""
+            left = incoming_label(source, left, destination)
+            right = incoming_label(source, right, destination)
+            if left is None or right is None:
+                return False
+            for instruction in cfg.by_label[destination].instructions:
+                if instruction.op != "phi":
+                    continue
+                values = dict(instruction.extra)
+                if left not in values or right not in values:
+                    return False
+                if values[left] != values[right]:
+                    return False
+            return True
+
         for index, block in enumerate(cfg.blocks[:-1]):
             last = block.terminator()
             if last is None or last.op not in ("branch_if", "cbranch_if"):
                 continue
-            if (
-                len(block.successors) == 2
-                and len({trivial_destination(successor) for successor in block.successors}) == 1
-                and cfg.blocks[index + 1].label in block.successors
+            destinations = {
+                trivial_destination(successor) for successor in block.successors
+            }
+            if len(destinations) != 1 or cfg.blocks[index + 1].label not in block.successors:
+                continue
+            destination = destinations.pop()
+            if not equal_phi_inputs(
+                block.label, *block.successors, destination
             ):
-                block.instructions.pop()
-                step = True
+                continue
+            block.instructions.pop()
+            step = True
         for index, block in enumerate(cfg.blocks[:-1]):
             last = block.terminator()
             if last is None or last.op != "jump":

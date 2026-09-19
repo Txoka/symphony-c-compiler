@@ -390,8 +390,12 @@ class Backend:
             self.a.emit(isa.push(1))
 
         homes = [self.register_values.get(value) for value in register_arguments]
+        # SSA entry parameters may still live in *any* argument register.
+        # Treat them all as simultaneous sources: otherwise materializing an
+        # early argument can overwrite a later one (for example, a tail call
+        # passing ``(b, a)`` when ``a`` and ``b`` reside in r1 and r2).
         caller_homes = any(
-            home is not None and 3 <= home <= 6 for home in homes
+            home is not None and home in ABI.argument_registers for home in homes
         )
         if not caller_homes:
             for register, value in enumerate(register_arguments, 1):

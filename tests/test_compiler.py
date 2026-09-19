@@ -925,6 +925,35 @@ class EncodingTests(unittest.TestCase):
         machine = Machine(result.image.binary, 1024)
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 42)
 
+    def test_promoted_parameters_are_permuted_safely_for_tailcalls(self):
+        result = compile_source(
+            "int pair(int a,int b){return a*100+b;} "
+            "int flip(int a,int b){return pair(b,a);} "
+            "int other(void){return pair(8,9);}"
+            "int (*keep)(int,int)=flip; "
+            "int main(void){return input()?keep(1,2):other();}"
+        )
+        self.assertIn("direct_tailcall", result.ir.dump())
+        for value, expected in ((0, 809), (1, 201)):
+            with self.subTest(input=value):
+                machine = Machine(result.image.binary, 4096, inputs=[value])
+                self.assertEqual(machine.run(result.image.symbols["_halt"]), expected)
+
+    def test_promoted_loop_parameter_survives_the_backedge(self):
+        result = compile_source(
+            "unsigned at(unsigned *p,unsigned item,unsigned pos){"
+            "while(pos && item != 0xffffffffu){item=p[item];pos--;}"
+            "if(item==0xffffffffu)return 99;return p[item];}"
+            "int other(unsigned *p){return at(p,0,0);}"
+            "unsigned (*keep)(unsigned*,unsigned,unsigned)=at;"
+            "int main(void){unsigned x[4]={1,2,3,42};"
+            "return input()?keep(x,0,3):other(x);}"
+        )
+        for value, expected in ((0, 1), (1, 42)):
+            with self.subTest(input=value):
+                machine = Machine(result.image.binary, 4096, inputs=[value])
+                self.assertEqual(machine.run(result.image.symbols["_halt"]), expected)
+
     def test_address_taken_parameter_uses_safe_stack_path(self):
         result = compile_source(
             "int f(int a){int *p=&a; *p+=1; return a;} "

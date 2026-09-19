@@ -11,6 +11,15 @@ def interference_graph(function):
     arithmetic operations lowered as calls require a callee-saved home.
     """
     cfg = build_cfg(function)
+    # Entry parameters are initialized by the prologue.  Their textual block
+    # may also be a loop header, but revisiting that label does not redefine
+    # them, so they must not kill their own live range on a back-edge.
+    parameters = {
+        item.dst
+        for block in cfg.blocks
+        for item in block.instructions
+        if item.op == "param" and item.dst is not None
+    }
     use, define = {}, {}
     for block in cfg.blocks:
         seen = set()
@@ -19,7 +28,7 @@ def interference_graph(function):
             for value in item.args:
                 if isinstance(value, int) and value not in seen:
                     use[block.label].add(value)
-            if item.dst is not None:
+            if item.dst is not None and item.dst not in parameters:
                 seen.add(item.dst); define[block.label].add(item.dst)
     live_in = {block.label: set() for block in cfg.blocks}
     live_out = {block.label: set() for block in cfg.blocks}
@@ -40,7 +49,8 @@ def interference_graph(function):
             if item.dst is not None:
                 graph.setdefault(item.dst, set()).update(live - {item.dst})
                 for value in live - {item.dst}: graph.setdefault(value, set()).add(item.dst)
-                live.discard(item.dst)
+                if item.dst not in parameters:
+                    live.discard(item.dst)
             live.update(value for value in item.args if isinstance(value, int))
     return graph, across
 
