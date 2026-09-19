@@ -19,6 +19,7 @@ from .middle.ssa import (
     simplify_algebra,
     fuse_comparison_branches,
     reduce_strength,
+    promote_readonly_parameters,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -76,6 +77,8 @@ class Compiler:
             verify(function)
         inline_single_call_functions(ir)
         for function in ir.functions:
+            verify(function)
+            promote_readonly_parameters(function)
             verify(function)
             remove_dead_values(function)
             verify(function)

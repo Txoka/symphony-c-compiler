@@ -291,8 +291,9 @@ destruct→construct round trip today — only inlining will. Fixing this is
       follow-up copy propagation and DCE remove the now-dead definitions.
 - [ ] `eliminate_tail_calls`, `lower_self_tail_calls_to_loops` — self-contained,
       single-function.
-- [ ] `promote_readonly_parameters` — check whether `construct.py`'s mem2reg
-      already subsumes this before porting.
+- [x] `promote_readonly_parameters` (`symphony/middle/ssa/parameters.py`) —
+      construction deliberately leaves parameter slots memory-backed; this
+      promotes slots proven load-only into dominating entry SSA values.
 - [ ] Module-level cleanup: `remove_unreachable_symbols`,
       `remove_unreachable_functions`, `fold_immutable_global_loads`,
       `remove_unused_stack_initialization` — orthogonal to SSA form, port last.

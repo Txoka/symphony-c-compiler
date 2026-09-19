@@ -27,6 +27,7 @@ from symphony.middle.ssa import (
     simplify_algebra,
     fuse_comparison_branches,
     reduce_strength,
+    promote_readonly_parameters,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -424,6 +425,8 @@ def _run(source, ram=1 << 16):
     inline_single_call_functions(ir)
     for function in ir.functions:
         verify(function)
+        promote_readonly_parameters(function)
+        verify(function)
         remove_dead_values(function)
         verify(function)
         destruct(function)
@@ -450,6 +453,15 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_readonly_parameter_is_promoted_to_dominating_ssa_value(self):
+        ir = _build("int f(int x) { return x + 1; } int main(void) { return f(4); }")
+        function = next(item for item in ir.functions if item.name == "f")
+        self.assertTrue(promote_readonly_parameters(function))
+        verify(function)
+        instructions = [item for block in function.blocks for item in block.instructions]
+        self.assertTrue(any(item.op == "param" for item in instructions))
+        self.assertFalse(any(item.op == "load" for item in instructions))
+
     def test_strength_reduction_rewrites_multiply_and_unsigned_divide(self):
         from symphony.middle.model import UINT
         function = FunctionIR(
