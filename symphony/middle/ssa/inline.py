@@ -113,12 +113,29 @@ def _select_candidates(module):
             and all(item.op in ("param", "const", "copy", "cast", "direct_call", "direct_tailcall", "return") for item in body)
         )
         caller = call_list[0][0] if call_list else None
+        promoted = {
+            item.extra[1]
+            for block in function.blocks
+            for item in block.instructions
+            if item.op == "param"
+        }
+        returns = sum(
+            item.op == "return"
+            for block in function.blocks
+            for item in block.instructions
+        )
+        # A direct call saves one call sequence and one standalone return.
+        # Reject clones whose parameter binding and continuation machinery
+        # exceed that conservative budget.
+        clone_overhead = 2 * sum(p.key not in promoted for p in function.params)
+        clone_overhead += returns + (returns > 1)
         if (
             function.name != "_start"
             and function.name not in observable
             and caller is not None
             and (len(call_list) == 1 or trivial_runtime_wrapper)
             and incoming_edges[function.name] == 1
+            and clone_overhead <= 3
             and caller is not function
             and not _reaches(edges, function.name, caller.name)
             and not any(
