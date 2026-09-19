@@ -32,6 +32,7 @@ from symphony.middle.ssa import (
     lower_self_tail_calls_to_loops,
 )
 from symphony.middle.ssa.destruct import _sequentialize
+from symphony.middle.ssa.allocate import interference_graph
 from symphony.middle.ssa.verify import SSAVerificationError
 from symphony.emulator import Machine, native_available, native_run
 from symphony.targets.symphony import generate, Target
@@ -459,6 +460,19 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_allocator_marks_call_crossing_values_and_interference(self):
+        function = FunctionIR("alloc", [], [], [BasicBlock("entry", [
+            Instruction("const", 0, (), INT, 1),
+            Instruction("const", 1, (), INT, 2),
+            Instruction("direct_call", 2, (), INT, "callee"),
+            Instruction("binary", 3, (0, 1), INT, "+"),
+            Instruction("return", None, (3,), INT),
+        ])], 4)
+        graph, across = interference_graph(function)
+        self.assertIn(0, across)
+        self.assertIn(1, across)
+        self.assertIn(1, graph[0])
+
     def test_self_tail_recursion_becomes_ssa_loop(self):
         source = """
             int sum(int n, int total) {

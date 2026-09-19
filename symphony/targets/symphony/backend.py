@@ -5,6 +5,7 @@ from .abi import ABI
 from .assembler import Assembler
 from .config import Image, Target
 from ...middle.model import CompileError, align_up
+from ...middle.ssa.allocate import interference_graph
 
 
 class Backend:
@@ -604,34 +605,20 @@ class Backend:
                 # The ABI already leaves this immediately consumed result in r1.
                 pinned[value] = 1
 
-        ordered = sorted(live_values, key=lambda value: (-scores[value], value))
-        caller_candidates = [
-            value
-            for value in ordered
-            if value not in pinned
-            if value in definition_indexes
-            and value in use_indexes
-            and not any(
-                min(definition_indexes[value]) < call < max(use_indexes[value])
-                for call in call_indexes
-            )
-        ][:4]
+        graph, across_calls = interference_graph(f)
+        ordered = sorted(live_values, key=lambda value: (-len(graph.get(value, ())), -scores[value], value))
         self.register_values = dict(pinned)
-        self.register_values.update({
-            value: register
-            for value, register in zip(caller_candidates, range(3, 7))
-        })
-        remaining = [value for value in ordered if value not in self.register_values]
         callee_registers = [8, 9, 10]
         if not self.target.pic:
             callee_registers.append(12)
-        callee_candidates = remaining[:len(callee_registers)]
-        self.register_values.update(
-            {
-                value: register
-                for value, register in zip(callee_candidates, callee_registers)
-            }
-        )
+        for value in ordered:
+            if value in self.register_values:
+                continue
+            forbidden = {self.register_values.get(other) for other in graph.get(value, ())}
+            choices = callee_registers if value in across_calls else [3, 4, 5, 6, *callee_registers]
+            register = next((item for item in choices if item not in forbidden), None)
+            if register is not None:
+                self.register_values[value] = register
         live_values = [
             value for value in live_values if value not in self.register_values
         ]
