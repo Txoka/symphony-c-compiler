@@ -29,6 +29,7 @@ from symphony.middle.ssa import (
     reduce_strength,
     promote_readonly_parameters,
     eliminate_tail_calls,
+    lower_self_tail_calls_to_loops,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -430,6 +431,8 @@ def _run(source, ram=1 << 16):
         verify(function)
         eliminate_tail_calls(function)
         verify(function)
+        lower_self_tail_calls_to_loops(function)
+        verify(function)
         remove_dead_values(function)
         verify(function)
         destruct(function)
@@ -456,6 +459,27 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_self_tail_recursion_becomes_ssa_loop(self):
+        source = """
+            int sum(int n, int total) {
+                if (n == 0) return total;
+                return sum(n - 1, total + n);
+            }
+            int main(void) { return sum(4, 0); }
+        """
+        self.assertEqual(_run(source), 10)
+        ir = _build(source)
+        function = next(item for item in ir.functions if item.name == "sum")
+        promote_readonly_parameters(function)
+        eliminate_tail_calls(function)
+        self.assertTrue(lower_self_tail_calls_to_loops(function))
+        verify(function)
+        self.assertFalse(any(
+            item.op == "direct_tailcall"
+            for block in function.blocks for item in block.instructions
+        ))
+        self.assertTrue(any(item.op == "phi" for item in function.blocks[1].instructions))
+
     def test_adjacent_direct_call_and_return_becomes_tailcall(self):
         function = FunctionIR("tail", [], [], [BasicBlock("entry", [
             Instruction("const", 0, (), INT, 4),
