@@ -289,30 +289,35 @@ def _retarget_predecessor(function, old_label, new_label, phi_users=None):
 
 
 def _inline_one_call(
-    caller, call_block_label, call_instruction, callee, inline_id, phi_users=None
+    caller, call_block_label, call_instruction, callee, inline_id, phi_users=None,
 ):
     cloned_blocks, continuation = _clone_callee(callee, caller, call_instruction, inline_id)
     continuation_block = cloned_blocks[-1]
     assert continuation_block.label == continuation
 
-    new_blocks = []
-    for block in caller.blocks:
-        if block.label != call_block_label:
-            new_blocks.append(block)
+    call_index = next(
+        index
+        for index, block in enumerate(caller.blocks)
+        if block.label == call_block_label
+    )
+    call_block = caller.blocks[call_index]
+    before = []
+    after = []
+    seen_call = False
+    for instruction in call_block.instructions:
+        if instruction is call_instruction:
+            seen_call = True
             continue
-        before = []
-        after = []
-        seen_call = False
-        for instruction in block.instructions:
-            if instruction is call_instruction:
-                seen_call = True
-                continue
-            (after if seen_call else before).append(instruction)
-        before.append(Instruction("jump", extra=cloned_blocks[0].label))
-        new_blocks.append(BasicBlock(block.label, before))
-        new_blocks.extend(cloned_blocks[:-1])
-        new_blocks.append(BasicBlock(continuation, continuation_block.instructions + after))
-    caller.blocks = new_blocks
+        (after if seen_call else before).append(instruction)
+    before.append(Instruction("jump", extra=cloned_blocks[0].label))
+    # Replace only the call-site block.  Rebuilding the full caller here made
+    # a long selfhost compile quadratic in its growing block count.
+    replacement = [
+        BasicBlock(call_block.label, before),
+        *cloned_blocks[:-1],
+        BasicBlock(continuation, continuation_block.instructions + after),
+    ]
+    caller.blocks[call_index : call_index + 1] = replacement
     if phi_users is not None:
         for block in cloned_blocks:
             for instruction in block.instructions:
@@ -320,6 +325,7 @@ def _inline_one_call(
                     for label, _ in instruction.extra:
                         phi_users[label].append(instruction)
     _retarget_predecessor(caller, call_block_label, continuation, phi_users)
+    return cloned_blocks
 
 
 def _settle(function, candidates, edges, inline_id):

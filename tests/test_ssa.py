@@ -51,6 +51,25 @@ def _build(source):
 
 
 class RoundTripTests(unittest.TestCase):
+    def test_hoisting_preserves_existing_block_objects(self):
+        ir = _build(
+            """
+            int loop(int count) {
+                int total = 0;
+                while (count) { total += 4 + 5; count--; }
+                return total;
+            }
+            int main(void) { return loop(3); }
+            """
+        )
+        function = next(item for item in ir.functions if item.name == "loop")
+        blocks = {block.label: block for block in function.blocks}
+        self.assertTrue(hoist_loop_invariants(function))
+        verify(function)
+        self.assertEqual(
+            {block.label: block for block in function.blocks}, blocks
+        )
+
     def test_global_copy_propagation_resolves_cross_block_phi_operand(self):
         function = FunctionIR(
             "copies",

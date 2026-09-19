@@ -117,26 +117,30 @@ def hoist_loop_invariants(function):
 
         hoisted_ids = set(hoisted_ids)
         preheader = preheader_predecessors[0]
+        # Keep the block graph intact.  Flattening through
+        # FunctionIR.instructions re-splits every block and turns a local
+        # LICM rewrite into an unnecessary representation round trip.
         preamble = [
             instruction
-            for instruction in function.instructions
+            for block in function.blocks
+            for instruction in block.instructions
             if id(instruction) in hoisted_ids
         ]
+        for label in loop.blocks:
+            block = cfg.by_label[label]
+            block.instructions = [
+                instruction
+                for instruction in block.instructions
+                if id(instruction) not in hoisted_ids
+            ]
         # Insert before the preheader's terminator (if any) so the preamble
         # stays reachable, rather than after it where it would be dead code.
-        last = cfg.by_label[preheader].instructions[-1]
-        last_id = id(last)
-        insert_before_last = last.op in TERMINATORS
-        rewritten = []
-        for instruction in function.instructions:
-            if id(instruction) in hoisted_ids:
-                continue
-            if insert_before_last and id(instruction) == last_id:
-                rewritten.extend(preamble)
-            rewritten.append(instruction)
-            if not insert_before_last and id(instruction) == last_id:
-                rewritten.extend(preamble)
-        function.instructions = rewritten
+        preheader_block = cfg.by_label[preheader]
+        last = preheader_block.terminator()
+        insert_at = len(preheader_block.instructions)
+        if last is not None and last.op in TERMINATORS:
+            insert_at -= 1
+        preheader_block.instructions[insert_at:insert_at] = preamble
         changed = True
         # Loop back to the top of the while: cfg/dominators/loops are rebuilt
         # fresh against the rewritten instructions before the next pick.
