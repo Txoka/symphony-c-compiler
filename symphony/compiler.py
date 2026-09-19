@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from .frontends.c import CFrontend
 from .frontends.protocol import SourceFrontend
-from .middle.passes.pipeline import lower_intrinsics
+from .middle.lowering import lower_intrinsics
 from .middle.ssa import (
     construct,
     destruct,

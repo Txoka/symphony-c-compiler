@@ -116,26 +116,17 @@ clone phis directly, no destruct/reconstruct round trip).
 - [x] Re-verify `sccp.py` and `hoist.py` still work (rewritten against
       `block.label`/`cfg.by_label` in place of `block.index`/positional
       `cfg.blocks[i]`).
-- [ ] Rebuild `inline_single_call_functions` as a true SSA-preserving clone:
+- [x] Rebuild `inline_single_call_functions` as a true SSA-preserving clone:
       clone callee blocks with a block-identity map alongside the value map,
       clone phis directly (remapping through both maps), turn each callee
       `return` into a jump to the continuation, and synthesize one phi at the
       continuation keyed by the real predecessor identities — no
       destruct/construct round trip.
 
-**Important caveat found after this refactor landed**: stable identity fixed
-the *symptom* the triggering bug was diagnosed by (a phi reading a stale
-predecessor after a CFG rebuild), but re-testing the original repro (nested
-`while` with a dead `&&` join-value phi, one operand `None`) against a direct
-`destruct()` → `construct()` round trip on the same function still fails
-`verify()` — now with a clear label-based error instead of an index one, but
-the same underlying cause. This was always two separate bugs layered
-together: block-identity instability (now fixed) and `construct()`
-re-promoting `destruct()`'s leftover copies for a *dead* value where one
-predecessor path has no defining copy at all (not yet fixed). The suite is
-still fully green because nothing in the real pipeline performs a repeated
-destruct→construct round trip today — only inlining will. Fixing this is
-`remove_dead_values`'s job, moved up to unblock inlining; see that item below.
+`remove_dead_values` now removes dead join-value phis before any
+destruct/construct round trip, including a phi with a missing predecessor
+operand. The inliner therefore clones persistent SSA directly without
+reintroducing the old stale-predecessor failure.
 
 ## Tier 1 — hardest, migrate first
 - [x] `remove_dead_values` (`symphony/middle/ssa/dce.py`, wired into
@@ -296,14 +287,16 @@ destruct→construct round trip today — only inlining will. Fixing this is
 - [x] `promote_readonly_parameters` (`symphony/middle/ssa/parameters.py`) —
       construction deliberately leaves parameter slots memory-backed; this
       promotes slots proven load-only into dominating entry SSA values.
-- [ ] Module-level cleanup: `remove_unreachable_symbols`,
-      `remove_unreachable_functions`, `fold_immutable_global_loads`,
-      `remove_unused_stack_initialization` — orthogonal to SSA form, port last.
+- [x] Module-level cleanup (`symphony/middle/ssa/module.py`):
+      `remove_unreachable_symbols`, `remove_unreachable_functions`,
+      `fold_immutable_global_loads`, and
+      `remove_unused_stack_initialization`. The old mutable-IR optimizer
+      and its compatibility entry points have been removed; mandatory
+      intrinsic lowering now lives in `symphony/middle/lowering.py`.
 
 ## Notes
 
-- `reduce_induction_strength` and `eliminate_redundant_loop_memory` currently
-  live only on the loop-passes work (see `project_dyncc_optimizer_roadmap`
-  memory), not on `ssa-no-opt`. Porting them here means re-implementing
-  against real SSA, not copying the existing mutable-IR versions verbatim.
+- `reduce_induction_strength` and `eliminate_redundant_loop_memory` are
+  implemented against persistent SSA in `symphony/middle/ssa/induction.py`
+  and `symphony/middle/ssa/loop_memory.py`.
 - Delete this file once every item above is checked off and merged.

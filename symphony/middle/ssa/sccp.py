@@ -25,10 +25,78 @@ reachable.
 
 from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import build_cfg
-from ..passes.pipeline import _fold_binary, _fold_unary, _normalize
 
 UNKNOWN = object()
 VARYING = object()
+
+
+def _normalize(value, type_):
+    if type_.kind not in ("int", "bool", "pointer"):
+        return value
+    if type_.kind == "bool":
+        return int(bool(value))
+    bits = type_.size * 8
+    mask = (1 << bits) - 1
+    value &= mask
+    if type_.kind == "int" and type_.signed and value & (1 << (bits - 1)):
+        value -= 1 << bits
+    return value
+
+
+def _fold_unary(operator, value, type_):
+    if operator == "!":
+        return int(not value)
+    if operator == "-":
+        return _normalize(-value, type_)
+    if operator == "~":
+        return _normalize(~value, type_)
+    return None
+
+
+def _fold_binary(operator, left, right, type_):
+    bits = type_.size * 8
+    mask = (1 << bits) - 1
+    unsigned_left, unsigned_right = left & mask, right & mask
+    if operator == "+":
+        value = left + right
+    elif operator == "-":
+        value = left - right
+    elif operator == "*":
+        value = left * right
+    elif operator in ("/", "%"):
+        if right == 0:
+            return None
+        if type_.signed:
+            quotient = abs(left) // abs(right)
+            if (left < 0) != (right < 0):
+                quotient = -quotient
+            value = quotient if operator == "/" else left - quotient * right
+        else:
+            value = unsigned_left // unsigned_right if operator == "/" else unsigned_left % unsigned_right
+    elif operator == "&":
+        value = unsigned_left & unsigned_right
+    elif operator == "|":
+        value = unsigned_left | unsigned_right
+    elif operator == "^":
+        value = unsigned_left ^ unsigned_right
+    elif operator in ("<<", ">>"):
+        if not 0 <= right < bits:
+            return None
+        if operator == "<<":
+            value = unsigned_left << right
+        elif type_.signed:
+            value = left >> right
+        else:
+            value = unsigned_left >> right
+    elif operator in ("==", "!=", "<", "<=", ">", ">="):
+        a, b = (left, right) if type_.signed else (unsigned_left, unsigned_right)
+        value = {
+            "==": a == b, "!=": a != b, "<": a < b,
+            "<=": a <= b, ">": a > b, ">=": a >= b,
+        }[operator]
+    else:
+        return None
+    return _normalize(int(value), type_)
 
 
 def _meet(a, b):

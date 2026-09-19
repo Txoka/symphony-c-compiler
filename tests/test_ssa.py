@@ -8,7 +8,7 @@ body into a caller and rebuild SSA once).
 import unittest
 
 from symphony.frontends.c import CFrontend
-from symphony.middle.passes.pipeline import lower_intrinsics
+from symphony.middle.lowering import lower_intrinsics
 from symphony.middle.analysis.cfg import prune_unreachable_blocks
 from symphony.middle.ir import BasicBlock, FunctionIR, Instruction, ModuleIR
 from symphony.middle.model import INT
