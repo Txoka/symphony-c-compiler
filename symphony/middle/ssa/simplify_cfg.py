@@ -112,6 +112,34 @@ def simplify_control_flow(function):
             step = True
         if _thread_jumps(function):
             step = True
+        cfg = build_cfg(function)
+        for index, block in enumerate(cfg.blocks[:-1]):
+            last = block.terminator()
+            if last is None or last.op != "jump":
+                continue
+            target = cfg.label_blocks.get(last.extra, last.extra)
+            if target != cfg.blocks[index + 1].label:
+                continue
+            block.instructions.pop()
+            step = True
+        referenced = {
+            target
+            for block in function.blocks
+            for instruction in block.instructions
+            for target in (
+                (instruction.extra,) if instruction.op == "jump" else
+                (instruction.extra[1],) if instruction.op in ("branch_if", "cbranch_if") else
+                ()
+            )
+        }
+        for block in function.blocks:
+            kept = [
+                item for item in block.instructions
+                if item.op != "label" or item.extra in referenced
+            ]
+            if len(kept) != len(block.instructions):
+                block.instructions = kept
+                step = True
         if not step:
             break
         changed = True

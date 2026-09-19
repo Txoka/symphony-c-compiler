@@ -23,6 +23,7 @@ from .middle.ssa import (
     eliminate_tail_calls,
     lower_self_tail_calls_to_loops,
     remove_unreachable_symbols,
+    fold_immutable_global_loads,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -78,6 +79,8 @@ class Compiler:
             verify(function)
             remove_dead_values(function)
             verify(function)
+            simplify_control_flow(function)
+            verify(function)
         inline_single_call_functions(ir)
         for function in ir.functions:
             verify(function)
@@ -87,6 +90,14 @@ class Compiler:
             verify(function)
             lower_self_tail_calls_to_loops(function)
             verify(function)
+        while fold_immutable_global_loads(ir):
+            for function in ir.functions:
+                sparse_conditional_constant_propagation(function)
+                verify(function)
+                remove_dead_values(function)
+                verify(function)
+                simplify_control_flow(function)
+                verify(function)
         remove_unreachable_symbols(ir)
         for function in ir.functions:
             remove_dead_values(function)

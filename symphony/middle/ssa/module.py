@@ -44,3 +44,72 @@ def remove_unreachable_symbols(module):
 
 
 remove_unreachable_functions = remove_unreachable_symbols
+
+
+def fold_immutable_global_loads(module):
+    """Fold integer loads from closed-world, provably unmodified globals."""
+    globals_ = {global_.symbol.key: global_ for global_ in module.globals}
+    unsafe = set()
+    facts = []
+    for function in module.functions:
+        constants, addresses, origins = {}, {}, {}
+        for block in function.blocks:
+            for instruction in block.instructions:
+                if instruction.op == "const":
+                    constants[instruction.dst] = instruction.extra
+                elif instruction.op == "global_addr" and instruction.extra in globals_:
+                    addresses[instruction.dst] = (instruction.extra, 0)
+                    origins[instruction.dst] = {instruction.extra}
+                elif instruction.op in ("copy", "cast") and instruction.args:
+                    source = instruction.args[0]
+                    if source in constants:
+                        constants[instruction.dst] = constants[source]
+                    if source in addresses:
+                        addresses[instruction.dst] = addresses[source]
+                    if source in origins:
+                        origins[instruction.dst] = origins[source]
+                elif instruction.op == "binary":
+                    left, right = instruction.args
+                    inherited = origins.get(left, set()) | origins.get(right, set())
+                    if inherited:
+                        origins[instruction.dst] = inherited
+                    if instruction.extra in ("+", "-") and left in addresses and right in constants:
+                        symbol, offset = addresses[left]
+                        addresses[instruction.dst] = (symbol, offset + (constants[right] if instruction.extra == "+" else -constants[right]))
+                    elif instruction.extra == "+" and right in addresses and left in constants:
+                        symbol, offset = addresses[right]
+                        addresses[instruction.dst] = (symbol, offset + constants[left])
+                argument_origins = set().union(*(origins.get(value, set()) for value in instruction.args))
+                if argument_origins and instruction.op not in ("load", "copy", "cast", "binary"):
+                    unsafe.update(argument_origins)
+                if instruction.op == "store":
+                    unsafe.update(argument_origins)
+        facts.append((function, addresses))
+
+    changed = False
+    for function, addresses in facts:
+        blocks = []
+        for block in function.blocks:
+            items = []
+            for instruction in block.instructions:
+                replacement = None
+                if instruction.op == "load" and instruction.type.integer and instruction.args[0] in addresses:
+                    symbol, offset = addresses[instruction.args[0]]
+                    global_ = globals_[symbol]
+                    if symbol not in unsafe and 0 <= offset and offset + instruction.type.size <= len(global_.data):
+                        raw = int.from_bytes(global_.data[offset:offset + instruction.type.size], "big", signed=False)
+                        if instruction.type.signed:
+                            sign = 1 << (instruction.type.size * 8 - 1)
+                            raw = (raw ^ sign) - sign
+                        replacement = type(instruction)("const", instruction.dst, (), instruction.type, raw)
+                elif instruction.op == "load" and instruction.type.kind == "pointer" and instruction.args[0] in addresses:
+                    symbol, offset = addresses[instruction.args[0]]
+                    global_ = globals_[symbol]
+                    relocation = next(((target, addend) for at, target, addend in global_.relocations if at == offset), None)
+                    if symbol not in unsafe and relocation is not None and relocation[1] == 0:
+                        replacement = type(instruction)("global_addr", instruction.dst, (), instruction.type, relocation[0])
+                items.append(replacement or instruction)
+                changed |= replacement is not None
+            blocks.append(BasicBlock(block.label, items))
+        function.blocks = blocks
+    return changed
