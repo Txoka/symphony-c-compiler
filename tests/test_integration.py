@@ -27,9 +27,25 @@ def Target(*args, **kwargs):
     return _Target(*args, **kwargs)
 
 
+NATIVE_AVAILABLE = native_available(TEST_ISA == "symphony")
+
+
+class _NativePreferringMachine(_Machine):
+    """Run on the native emulator when it's built; fall back to the Python
+    reference engine otherwise. test_native_emulator_matches_python_reference
+    below builds its own plain Machine() instances instead of using this
+    wrapper, since it deliberately compares the two engines against each
+    other and must not have both sides silently become native."""
+
+    def run(self, halt_address=None, max_steps=5_000_000, progress=None, progress_interval=250_000):
+        if NATIVE_AVAILABLE and progress is None:
+            return native_run(self, halt_address, max_steps)
+        return super().run(halt_address, max_steps, progress, progress_interval)
+
+
 def Machine(*args, **kwargs):
     kwargs.setdefault("symphony", TEST_ISA == "symphony")
-    return _Machine(*args, **kwargs)
+    return _NativePreferringMachine(*args, **kwargs)
 
 
 def compile_source(source, filename="<input>", target=None):
@@ -145,10 +161,14 @@ class CompilerIntegrationTests(unittest.TestCase):
                     "persistent_size": 256,
                     "symphony": target_isa == "symphony",
                 }
-                reference = Machine(
+                # Plain _Machine here, not the native-preferring Machine()
+                # wrapper: this test's whole point is comparing the Python
+                # reference engine against native, so "reference" must stay
+                # on the Python engine regardless of what's installed.
+                reference = _Machine(
                     result.image.binary, target.ram_size, address, **options
                 )
-                native = Machine(
+                native = _Machine(
                     result.image.binary, target.ram_size, address, **options
                 )
                 expected = reference.run(halt)

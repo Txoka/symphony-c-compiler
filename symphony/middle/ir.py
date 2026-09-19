@@ -17,13 +17,128 @@ class Instruction:
     extra: object = None
 
 
+TERMINATORS = {
+    "jump",
+    "branch_if",
+    "cbranch_if",
+    "return",
+    "tailcall",
+    "direct_tailcall",
+    "halt",
+}
+
+
+@dataclass
+class BasicBlock:
+    """A maximal straight-line instruction sequence, identified by a
+    persistent ``label`` assigned once at creation. ``instructions`` never
+    includes the block's own canonical leading label -- that is the block's
+    identity, not its content -- though it may still contain extra ``label``
+    instructions for additional names that resolve to this same block (the
+    lowerer sometimes marks two names with nothing lowered in between, e.g.
+    an empty ``if`` arm)."""
+
+    label: str
+    instructions: list = field(default_factory=list)
+    successors: list = field(default_factory=list)
+    predecessors: list = field(default_factory=list)
+
+    def terminator(self):
+        return self.instructions[-1] if self.instructions and self.instructions[-1].op in TERMINATORS else None
+
+    def add_successor(self, label, fallthrough=False):
+        if label in self.successors:
+            return
+        if fallthrough:
+            self.successors.insert(0, label)
+        else:
+            self.successors.append(label)
+
+
+def _split_into_blocks(name, instructions):
+    """Split a flat, label-delimited instruction list into ``BasicBlock``s
+    with stable synthetic identity, and a map from every label spelled in
+    the stream (including extra aliases beyond a block's first) to its
+    block's canonical label."""
+    if not instructions:
+        return [], {}
+    leaders = {0}
+    for index, instruction in enumerate(instructions):
+        if instruction.op == "label":
+            leaders.add(index)
+        if instruction.op in TERMINATORS and index + 1 < len(instructions):
+            leaders.add(index + 1)
+    starts = sorted(leaders)
+    blocks = []
+    label_to_block = {}
+    anon_id = 0
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(instructions)
+        items = instructions[start:end]
+        names = [item.extra for item in items if item.op == "label"]
+        if names:
+            canonical = names[0]
+        else:
+            anon_id += 1
+            canonical = f"{name}.entry" if position == 0 else f"{name}.B{anon_id}"
+        for label_name in names:
+            label_to_block[label_name] = canonical
+        blocks.append(BasicBlock(canonical, list(items)))
+    return blocks, label_to_block
+
+
+def _referenced_labels(blocks):
+    """Every label name any block's terminator explicitly jumps/branches to."""
+    referenced = set()
+    for block in blocks:
+        last = block.terminator()
+        if last is None:
+            continue
+        if last.op == "jump":
+            referenced.add(last.extra)
+        elif last.op in ("branch_if", "cbranch_if"):
+            referenced.add(last.extra[1])
+    return referenced
+
+
+def _flatten_blocks(blocks):
+    """The inverse of ``_split_into_blocks``: linearize blocks back into a
+    flat instruction stream in their current list order, synthesizing a
+    leading ``label`` instruction for any block that (a) isn't already
+    spelled out by one of its own ``label`` instructions and (b) is actually
+    the target of some explicit jump/branch elsewhere in the function.
+
+    A block with neither is pure internal bookkeeping -- nothing in the
+    function can ever reach it except by fallthrough from its immediate
+    predecessor in this same list -- so it never needs a label spelled into
+    the instruction stream the backend sees."""
+    out = []
+    referenced = _referenced_labels(blocks)
+    for block in blocks:
+        has_own_label = any(
+            item.op == "label" and item.extra == block.label for item in block.instructions
+        )
+        if not has_own_label and block.label in referenced:
+            out.append(Instruction("label", extra=block.label))
+        out.extend(block.instructions)
+    return out
+
+
 @dataclass
 class FunctionIR:
     name: str
     params: list
     locals: list
-    instructions: list[Instruction] = field(default_factory=list)
+    blocks: list = field(default_factory=list)
     values: int = 0
+
+    @property
+    def instructions(self):
+        return _flatten_blocks(self.blocks)
+
+    @instructions.setter
+    def instructions(self, value):
+        self.blocks, _ = _split_into_blocks(self.name, list(value))
 
 
 @dataclass
@@ -44,12 +159,27 @@ class ModuleIR:
 
 
 class Lowerer:
+    """Builds one function's IR as a flat, label-delimited instruction
+    stream (the same shape C control flow naturally produces one
+    ``label``/``jump``/``branch_if`` at a time), then splits it into
+    ``FunctionIR.blocks`` once lowering finishes. Instructions accumulate in
+    ``self.raw`` rather than ``self.f.instructions`` directly: the latter is
+    a property backed by ``self.f.blocks``, so repeated ``.append()`` calls
+    during lowering would silently be lost against a freshly flattened list
+    each time.
+    """
+
     def __init__(self, function):
         self.f = FunctionIR(function.symbol.key, function.params, function.locals)
+        self.raw = []
         self.label_id = 0
         self.loops = []
         self.scopes = []
         self.dynamic_locals = {}
+
+    def finish(self):
+        """Split the accumulated flat stream into ``self.f.blocks``."""
+        self.f.instructions = self.raw
 
     def value(self):
         v = self.f.values
@@ -58,7 +188,7 @@ class Lowerer:
 
     def emit(self, op, args=(), type_=VOID, extra=None, result=True):
         dst = self.value() if result else None
-        self.f.instructions.append(Instruction(op, dst, tuple(args), type_, extra))
+        self.raw.append(Instruction(op, dst, tuple(args), type_, extra))
         return dst
 
     def label(self):
@@ -157,12 +287,12 @@ class Lowerer:
                 self.branch(a, rhs, n.value == "&&")
                 self.mark(short)
                 v = self.const(int(n.value == "||"))
-                self.f.instructions.append(Instruction("copy", result, (v,), INT))
+                self.raw.append(Instruction("copy", result, (v,), INT))
                 self.jump(end)
                 self.mark(rhs)
                 b = self.expr(n.children[1])
                 v = self.binary("!=", b, self.const(0), UINT)
-                self.f.instructions.append(Instruction("copy", result, (v,), INT))
+                self.raw.append(Instruction("copy", result, (v,), INT))
                 self.mark(end)
                 return result
             return self.binary(
@@ -281,11 +411,11 @@ class Lowerer:
             self.branch(self.expr(n.children[0]), no, False)
             self.mark(yes)
             a = self.expr(n.children[1])
-            self.f.instructions.append(Instruction("copy", result, (a,), n.type))
+            self.raw.append(Instruction("copy", result, (a,), n.type))
             self.jump(end)
             self.mark(no)
             b = self.expr(n.children[2])
-            self.f.instructions.append(Instruction("copy", result, (b,), n.type))
+            self.raw.append(Instruction("copy", result, (b,), n.type))
             self.mark(end)
             return result
         raise AssertionError(f"unhandled typed expression {op}")
@@ -415,33 +545,29 @@ def lower(program):
             () if f.symbol.type.base == VOID else (l.const(0),),
             result=False,
         )
+        l.finish()
         functions.append(l.f)
 
     main = next(function for function in program.functions if function.symbol.key == "main")
     startup = FunctionIR("_start", [], [])
-    startup.instructions.extend(
-        [
-            Instruction("init_pic"),
-            Instruction("init_stack"),
-            Instruction("relocate_globals"),
-        ]
-    )
+    raw = [
+        Instruction("init_pic"),
+        Instruction("init_stack"),
+        Instruction("relocate_globals"),
+    ]
     if any(g.symbol.key == "__dyn_printf_framebuffer" for g in program.globals):
         address = startup.values
         startup.values += 1
-        startup.instructions.append(
+        raw.append(
             Instruction("global_addr", address, (), pointer(CHAR), "__dyn_printf_framebuffer")
         )
-        startup.instructions.append(
-            Instruction("init_text_screen", args=(address,))
-        )
-        startup.instructions.append(
-            Instruction("clear_text_framebuffer", args=(address,))
-        )
+        raw.append(Instruction("init_text_screen", args=(address,)))
+        raw.append(Instruction("clear_text_framebuffer", args=(address,)))
     result = startup.values
     startup.values += 1
-    startup.instructions.append(
+    raw.append(
         Instruction("direct_call", result, (), main.symbol.type.base, "main")
     )
-    startup.instructions.append(Instruction("halt", args=(result,)))
+    raw.append(Instruction("halt", args=(result,)))
+    startup.instructions = raw
     return ModuleIR(program.globals, [startup, *functions])
