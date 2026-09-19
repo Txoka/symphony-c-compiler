@@ -186,22 +186,19 @@ def sparse_conditional_constant_propagation(function):
                         Instruction("const", instruction.dst, (), instruction.type, result)
                     )
                     continue
-                surviving = tuple(
-                    (predecessor, operand)
-                    for predecessor, operand in instruction.extra
-                    if (predecessor, block.label) in executable_edges
-                )
-                if len(surviving) == 1:
+                # Executability is an analysis fact, not yet a structural CFG
+                # edit.  Unreachable predecessors remain in ``function``
+                # until CFG simplification removes them, so deleting their
+                # phi operands here would leave an invalid SSA graph in the
+                # interim.  A one-input phi is safe to collapse immediately;
+                # otherwise retain its complete structural operand set.
+                if len(instruction.extra) == 1:
                     body.append(
                         Instruction(
-                            "copy", instruction.dst, (surviving[0][1],), instruction.type
+                            "copy", instruction.dst, (instruction.extra[0][1],), instruction.type
                         )
                     )
                     continue
-                if surviving != instruction.extra:
-                    instruction = Instruction(
-                        "phi", instruction.dst, (), instruction.type, surviving
-                    )
                 body.append(instruction)
                 continue
 
@@ -230,6 +227,29 @@ def sparse_conditional_constant_propagation(function):
             body.append(instruction)
         new_blocks.append(BasicBlock(block.label, body))
     function.blocks = new_blocks
+    # Branch rewriting above changes real predecessor edges.  Reconcile phi
+    # operands against that emitted CFG (rather than against the analysis'
+    # executable-edge subset): unreachable blocks may still be structural,
+    # while a folded conditional really did remove one of its edges.
+    emitted_cfg = build_cfg(function)
+    reconciled = []
+    for block in function.blocks:
+        predecessors = set(emitted_cfg.by_label[block.label].predecessors)
+        items = []
+        for instruction in block.instructions:
+            if instruction.op == "phi":
+                extra = tuple(
+                    (predecessor, operand)
+                    for predecessor, operand in instruction.extra
+                    if predecessor in predecessors
+                )
+                if extra != instruction.extra:
+                    instruction = Instruction(
+                        "phi", instruction.dst, (), instruction.type, extra
+                    )
+            items.append(instruction)
+        reconciled.append(BasicBlock(block.label, items))
+    function.blocks = reconciled
     new_shape = tuple(
         (instruction.op, instruction.dst, instruction.args, instruction.extra)
         for block in function.blocks

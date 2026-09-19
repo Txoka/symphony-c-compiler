@@ -29,6 +29,11 @@ def promote_readonly_parameters(function):
             for address in addresses
         ):
             continue
+        # A previous invocation has already replaced every load but retains
+        # the dead address definition for DCE.  Do not manufacture a second
+        # ABI entry value for that now-unused address.
+        if not any(uses.get(address) for address in addresses):
+            continue
         value = function.values
         function.values += 1
         params.append(Instruction("param", value, (), parameter.type, (index, parameter.key)))

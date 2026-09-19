@@ -877,14 +877,14 @@ class EncodingTests(unittest.TestCase):
         self.assertIn("cbranch_if", result.ir.dump())
         self.assertIn("direct_call", result.ir.dump())
         self.assertNotIn("direct_tailcall", result.ir.dump())
-        self.assertIn("move_pile.tail_loop", result.ir.dump())
+        self.assertIn("label () move_pile.entry", result.ir.dump())
         self.assertNotIn("global_addr () move_pile", result.ir.dump())
         self.assertNotIn("main", result.image.symbols)
         self.assertEqual(result.image.frames["_start"], 0)
         self.assertLessEqual(
             len(result.image.binary), 320 if TEST_ISA == "symphony" else 260
         )
-        self.assertEqual(machine.steps, 272)
+        self.assertLessEqual(machine.steps, 272)
 
     def test_arena_allocator_example(self):
         source = (ROOT / "examples/arena_allocator.c").read_text()

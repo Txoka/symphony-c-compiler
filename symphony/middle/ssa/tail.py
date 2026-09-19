@@ -3,30 +3,63 @@
 from ..ir import BasicBlock, Instruction
 
 
-def eliminate_tail_calls(function):
+def eliminate_tail_calls(function, self_only=False):
     """Replace an in-block call/return pair with a tail-call terminator.
 
     This deliberately handles only the canonical adjacent form.  SSA block
     structure makes that form unambiguous, avoids control-flow surgery, and
     covers all calls emitted by the current lowerer after CFG simplification.
     """
-    local_keys = {symbol.key for symbol in function.locals}
-    if any(
-        instruction.op == "local_addr" and instruction.extra in local_keys
+    # A tail call may not retain an address into the dismantled frame.  The
+    # old mutable pass rejected the entire function when it contained a local
+    # address, which also rejected perfectly safe calls in functions that use
+    # a temporary earlier in another branch (notably Hanoi).  Trace just the
+    # prospective call arguments through transparent copies instead.
+    definitions = {
+        item.dst: item
         for block in function.blocks
-        for instruction in block.instructions
-    ):
+        for item in block.instructions
+        if item.dst is not None
+    }
+
+    def is_local_address(value):
+        seen = set()
+        while value not in seen:
+            seen.add(value)
+            definition = definitions.get(value)
+            if definition is None:
+                return False
+            if definition.op == "local_addr":
+                return True
+            if definition.op not in ("copy", "cast") or not definition.args:
+                return False
+            value = definition.args[0]
         return False
     changed = False
+    by_label = {block.label: block for block in function.blocks}
+
+    def trailing_return(items):
+        if len(items) >= 2 and items[-1].op == "return":
+            return items[-2], items[-1], 2
+        if len(items) >= 2 and items[-1].op == "jump":
+            target = by_label.get(items[-1].extra)
+            body = [] if target is None else [item for item in target.instructions if item.op != "label"]
+            if len(body) == 1 and body[0].op == "return":
+                return items[-2], body[0], 2
+        return None
+
     blocks = []
     for block in function.blocks:
         items = block.instructions
-        if len(items) >= 2:
-            call, result = items[-2:]
+        tail_pair = trailing_return(items)
+        if tail_pair is not None:
+            call, result, width = tail_pair
             arguments = len(call.args) - (call.op == "call")
             if (
                 call.op in ("call", "direct_call")
                 and arguments <= 6
+                and (not self_only or call.op == "direct_call" and call.extra == function.name)
+                and not any(is_local_address(value) for value in call.args[-arguments:])
                 and result.op == "return"
                 and ((not result.args and call.type.kind == "void") or result.args == (call.dst,))
             ):
@@ -36,7 +69,7 @@ def eliminate_tail_calls(function):
                     type=call.type,
                     extra=call.extra,
                 )
-                items = [*items[:-2], tail]
+                items = [*items[:-width], tail]
                 changed = True
         blocks.append(BasicBlock(block.label, list(items)))
     function.blocks = blocks

@@ -80,11 +80,29 @@ def _select_candidates(module):
     candidates = {}
     for function in module.functions:
         call_list = sites[function.name]
-        caller = call_list[0][0] if len(call_list) == 1 else None
+        # Runtime forwarding wrappers (for example ``__dyn_udiv`` forwarding
+        # to ``__dyn_udivmod`` with a fixed remainder flag) are deliberately
+        # tiny and side-effect-free.  Unlike ordinary functions, cloning them
+        # at each caller removes an otherwise exported helper and exposes the
+        # real implementation to subsequent module cleanup.
+        body = [
+            item
+            for block in function.blocks
+            for item in block.instructions
+            if item.op != "label"
+        ]
+        calls = [item for item in body if item.op in ("direct_call", "direct_tailcall")]
+        trivial_runtime_wrapper = (
+            function.name.startswith("__dyn_")
+            and len(calls) == 1
+            and all(item.op in ("param", "const", "copy", "cast", "direct_call", "direct_tailcall", "return") for item in body)
+        )
+        caller = call_list[0][0] if call_list else None
         if (
             function.name != "_start"
             and function.name not in observable
             and caller is not None
+            and (len(call_list) == 1 or trivial_runtime_wrapper)
             and caller is not function
             and not _reaches(edges, function.name, caller.name)
             and not any(
@@ -113,6 +131,16 @@ def _clone_callee(callee, caller, call_instruction, inline_id):
     base = caller.values
     value_map = {value: base + value for value in range(callee.values)}
     caller.values += callee.values
+    promoted_parameters = {
+        instruction.extra[1]: instruction.dst
+        for block in callee.blocks
+        for instruction in block.instructions
+        if instruction.op == "param"
+    }
+    for index, parameter in enumerate(callee.params):
+        value = promoted_parameters.get(parameter.key)
+        if value is not None:
+            value_map[value] = call_instruction.args[index]
 
     label_map = {
         block.label: f"{caller.name}.inline{inline_id}.{block.label}"
@@ -120,12 +148,17 @@ def _clone_callee(callee, caller, call_instruction, inline_id):
     }
     continuation = f"{caller.name}.inline{inline_id}.return"
 
-    caller.locals.extend(callee.params)
+    caller.locals.extend(
+        parameter for parameter in callee.params
+        if parameter.key not in promoted_parameters
+    )
     caller.locals.extend(callee.locals)
 
     param_addresses = {}
     binding = []
     for index, parameter in enumerate(callee.params):
+        if parameter.key in promoted_parameters:
+            continue
         address = caller.values
         caller.values += 1
         param_addresses[parameter.key] = address
@@ -155,6 +188,8 @@ def _clone_callee(callee, caller, call_instruction, inline_id):
         for instruction in block.instructions:
             if instruction.op in ("return", "tailcall", "direct_tailcall"):
                 break
+            if instruction.op == "param":
+                continue
             items.append(
                 Instruction(
                     instruction.op,

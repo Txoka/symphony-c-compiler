@@ -19,6 +19,7 @@ from .middle.ssa import (
     simplify_algebra,
     fuse_comparison_branches,
     reduce_strength,
+    identify_direct_calls,
     promote_readonly_parameters,
     eliminate_tail_calls,
     lower_self_tail_calls_to_loops,
@@ -64,6 +65,8 @@ class Compiler:
             verify(function)
             propagate_global_copies(function)
             verify(function)
+            identify_direct_calls(function)
+            verify(function)
             simplify_algebra(function)
             verify(function)
             propagate_global_copies(function)
@@ -82,8 +85,30 @@ class Compiler:
             verify(function)
             simplify_control_flow(function)
             verify(function)
+        # Make surviving runtime arithmetic ordinary call edges after scalar
+        # folding but before call-graph optimization, so wrapper helpers can
+        # participate in inlining and reachability.
+        legalize_runtime_arithmetic(ir)
+        # Form and lower self tails before selecting inline candidates.  Once
+        # a self call is a backedge it no longer disqualifies an otherwise
+        # single-caller function from being inlined into that caller.
+        for function in ir.functions:
+            promote_readonly_parameters(function)
+            verify(function)
+            eliminate_tail_calls(function, self_only=True)
+            verify(function)
+            lower_self_tail_calls_to_loops(function)
+            verify(function)
+            propagate_global_copies(function)
+            verify(function)
+            remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
+            verify(function)
         inline_single_call_functions(ir)
         for function in ir.functions:
+            verify(function)
+            identify_direct_calls(function)
             verify(function)
             promote_readonly_parameters(function)
             verify(function)
@@ -102,6 +127,8 @@ class Compiler:
         for function in ir.functions:
             sparse_conditional_constant_propagation(function)
             verify(function)
+            identify_direct_calls(function)
+            verify(function)
             remove_dead_values(function)
             verify(function)
             simplify_control_flow(function)
@@ -114,7 +141,6 @@ class Compiler:
             simplify_control_flow(function)
             verify(function)
             destruct(function)
-        legalize_runtime_arithmetic(ir)
         return Compilation(
             frontend.parsed,
             frontend.typed,

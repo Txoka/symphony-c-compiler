@@ -113,6 +113,34 @@ def simplify_control_flow(function):
         if _thread_jumps(function):
             step = True
         cfg = build_cfg(function)
+        # A conditional whose arms only traverse empty/jump-only blocks before
+        # rejoining has no control effect.  Keeping it needlessly preserves a
+        # branch on values whose computation (such as ``input()``) must stay,
+        # even when both outcomes are identical.
+        def trivial_destination(label):
+            seen = set()
+            while label not in seen:
+                seen.add(label)
+                candidate = cfg.by_label[label]
+                body = [item for item in candidate.instructions if item.op != "label"]
+                if body and not (len(body) == 1 and body[0].op == "jump"):
+                    return label
+                if len(candidate.successors) != 1:
+                    return label
+                label = candidate.successors[0]
+            return label
+
+        for index, block in enumerate(cfg.blocks[:-1]):
+            last = block.terminator()
+            if last is None or last.op not in ("branch_if", "cbranch_if"):
+                continue
+            if (
+                len(block.successors) == 2
+                and len({trivial_destination(successor) for successor in block.successors}) == 1
+                and cfg.blocks[index + 1].label in block.successors
+            ):
+                block.instructions.pop()
+                step = True
         for index, block in enumerate(cfg.blocks[:-1]):
             last = block.terminator()
             if last is None or last.op != "jump":

@@ -65,6 +65,58 @@ def _terminator_index(items):
 def destruct(function):
     """Rewrite ``function.blocks`` in place, removing every phi."""
     cfg = build_cfg(function)
+    # A loop header phi seeded directly by an ABI ``param`` can share that
+    # parameter's eventual non-SSA storage.  Without this coalescing, phi
+    # destruction emits a compulsory entry copy for every loop-carried
+    # parameter even though the ABI register already contains its first
+    # value.  This is a standard phi coalescing case: the preheader contains
+    # only ABI definitions and its jump, so the parameter has no competing
+    # live meaning on entry to the header.
+    definitions = {
+        item.dst: item
+        for block in cfg.blocks
+        for item in block.instructions
+        if item.dst is not None
+    }
+    coalesced = {}
+    for block in cfg.blocks:
+        for phi in block.instructions:
+            if phi.op != "phi":
+                continue
+            for predecessor, value in phi.extra:
+                predecessor_block = cfg.by_label[predecessor]
+                body = [item for item in predecessor_block.instructions if item.op != "label"]
+                if (
+                    len(body) >= 1
+                    and all(item.op in ("param", "jump") for item in body)
+                    and len(predecessor_block.successors) == 1
+                    and definitions.get(value) is not None
+                    and definitions[value].op == "param"
+                ):
+                    coalesced[phi.dst] = value
+                    break
+    if coalesced:
+        def resolve(value):
+            seen = set()
+            while value in coalesced and value not in seen:
+                seen.add(value)
+                value = coalesced[value]
+            return value
+
+        blocks = []
+        for block in function.blocks:
+            items = []
+            for item in block.instructions:
+                dst = resolve(item.dst) if item.dst is not None else None
+                args = tuple(resolve(value) for value in item.args)
+                extra = (
+                    tuple((predecessor, resolve(value)) for predecessor, value in item.extra)
+                    if item.op == "phi" else item.extra
+                )
+                items.append(Instruction(item.op, dst, args, item.type, extra))
+            blocks.append(BasicBlock(block.label, items))
+        function.blocks = blocks
+        cfg = build_cfg(function)
     phi_blocks = [
         block.label
         for block in cfg.blocks
