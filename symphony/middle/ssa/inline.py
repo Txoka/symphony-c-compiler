@@ -21,7 +21,7 @@ phi (see ``construct.py``'s docstring on why phi operands are label-keyed).
 A void callee, or a call whose result is unused, needs no such phi.
 """
 
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import prune_unreachable_blocks
@@ -288,19 +288,26 @@ def _retarget_predecessor(function, old_label, new_label, phi_users=None):
             phi_users[new_label].append(instruction)
 
 
+class _BlockNode:
+    """A temporary O(1)-splice view of a function's serialized blocks."""
+
+    __slots__ = ("block", "previous", "next")
+
+    def __init__(self, block):
+        self.block = block
+        self.previous = None
+        self.next = None
+
+
 def _inline_one_call(
-    caller, call_block_label, call_instruction, callee, inline_id, phi_users=None,
+    caller, call_node, call_instruction, callee, inline_id, phi_users=None,
 ):
     cloned_blocks, continuation = _clone_callee(callee, caller, call_instruction, inline_id)
     continuation_block = cloned_blocks[-1]
     assert continuation_block.label == continuation
 
-    call_index = next(
-        index
-        for index, block in enumerate(caller.blocks)
-        if block.label == call_block_label
-    )
-    call_block = caller.blocks[call_index]
+    call_block = call_node.block
+    call_block_label = call_block.label
     before = []
     after = []
     seen_call = False
@@ -310,14 +317,23 @@ def _inline_one_call(
             continue
         (after if seen_call else before).append(instruction)
     before.append(Instruction("jump", extra=cloned_blocks[0].label))
-    # Replace only the call-site block.  Rebuilding the full caller here made
-    # a long selfhost compile quadratic in its growing block count.
-    replacement = [
-        BasicBlock(call_block.label, before),
-        *cloned_blocks[:-1],
-        BasicBlock(continuation, continuation_block.instructions + after),
-    ]
-    caller.blocks[call_index : call_index + 1] = replacement
+    # Splice into the temporary linked sequence.  Materializing
+    # ``caller.blocks`` after every clone made selfhost quadratic in its
+    # growing block count.
+    call_node.block = BasicBlock(call_block.label, before)
+    inserted = [_BlockNode(block) for block in cloned_blocks[:-1]]
+    continuation_node = _BlockNode(
+        BasicBlock(continuation, continuation_block.instructions + after)
+    )
+    inserted.append(continuation_node)
+    previous, following = call_node, call_node.next
+    for node in inserted:
+        previous.next = node
+        node.previous = previous
+        previous = node
+    previous.next = following
+    if following is not None:
+        following.previous = previous
     if phi_users is not None:
         for block in cloned_blocks:
             for instruction in block.instructions:
@@ -325,50 +341,80 @@ def _inline_one_call(
                     for label, _ in instruction.extra:
                         phi_users[label].append(instruction)
     _retarget_predecessor(caller, call_block_label, continuation, phi_users)
-    return cloned_blocks
+    return cloned_blocks, continuation_node
 
 
 def _settle(function, candidates, edges, inline_id):
     """Inline every candidate call inside ``function`` until none remain,
-    returning the next unused ``inline_id``. Must only be called on a
-    function whose own callee candidates (if any) have already been settled
-    -- see ``inline_single_call_functions``'s bottom-up ordering -- so a
-    just-inlined callee's blocks never themselves contain another pending
-    candidate call that would need re-scanning mid-splice."""
+    returning the next unused ``inline_id``. A lexical worklist and temporary
+    linked block sequence make call selection and splicing independent of the
+    caller's growing size while preserving the prior rescan order."""
     phi_users = defaultdict(list)
     for block in function.blocks:
         for instruction in block.instructions:
             if instruction.op == "phi":
                 for label, _ in instruction.extra:
                     phi_users[label].append(instruction)
-    while True:
-        call_site = next(
-            (
-                (block.label, instruction)
-                for block in function.blocks
-                for instruction in block.instructions
-                if instruction.op == "direct_call"
-                and instruction.extra in candidates
-                and candidates[instruction.extra] is not function
-            ),
-            None,
-        )
-        if call_site is None:
-            return inline_id
-        call_block_label, call_instruction = call_site
-        callee = candidates[call_instruction.extra]
+    nodes = []
+    previous = None
+    for block in function.blocks:
+        node = _BlockNode(block)
+        node.previous = previous
+        if previous is not None:
+            previous.next = node
+        nodes.append(node)
+        previous = node
+    head = nodes[0] if nodes else None
+    active_candidates = dict(candidates)
+    worklist = deque()
+    for node in nodes:
+        reference = [node]
+        for instruction in node.block.instructions:
+            if (
+                instruction.op == "direct_call"
+                and instruction.extra in active_candidates
+                and active_candidates[instruction.extra] is not function
+            ):
+                worklist.append((instruction, reference))
+    while worklist:
+        call_instruction, reference = worklist.popleft()
+        callee = active_candidates.get(call_instruction.extra)
+        if callee is None or callee is function:
+            continue
         # A candidate can be reached from more than one syntactic form: a
         # tail edge is not itself inlined here, but it still closes a recursive
         # SCC. Never clone such a callee into a member of that SCC.
         if _reaches(edges, callee.name, function.name):
-            candidates = {
-                name: item for name, item in candidates.items() if name != callee.name
-            }
+            active_candidates.pop(callee.name)
             continue
         inline_id += 1
-        _inline_one_call(
-            function, call_block_label, call_instruction, callee, inline_id, phi_users
+        cloned_blocks, continuation_node = _inline_one_call(
+            function, reference[0], call_instruction, callee, inline_id, phi_users
         )
+        # Queued calls from the split source block follow the call and now
+        # reside in the continuation.  A cloned callee precedes them.
+        reference[0] = continuation_node
+        cloned_calls = []
+        for index, block in enumerate(cloned_blocks):
+            block_reference = reference if index == len(cloned_blocks) - 1 else [_BlockNode(block)]
+            # The node must be the one spliced above, not a detached wrapper.
+            if index < len(cloned_blocks) - 1:
+                block_reference[0] = reference[0].previous
+                for _ in range(len(cloned_blocks) - 2 - index):
+                    block_reference[0] = block_reference[0].previous
+            for instruction in block.instructions:
+                if (
+                    instruction.op == "direct_call"
+                    and instruction.extra in active_candidates
+                    and active_candidates[instruction.extra] is not function
+                ):
+                    cloned_calls.append((instruction, block_reference))
+        worklist.extendleft(reversed(cloned_calls))
+    function.blocks = []
+    while head is not None:
+        function.blocks.append(head.block)
+        head = head.next
+    return inline_id
 
 
 def inline_single_call_functions(module):
