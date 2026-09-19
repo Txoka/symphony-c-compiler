@@ -275,8 +275,9 @@ destruct→construct round trip today — only inlining will. Fixing this is
       through a loop latch.
 - [ ] `propagate_and_fold` — most of its barrier/alias-invalidation machinery
       exists only to cope with non-SSA mutable locals; should shrink a lot.
-- [ ] `fuse_comparison_branches` — local peephole, doesn't touch CFG shape,
-      should port nearly unchanged.
+- [x] `fuse_comparison_branches` (`symphony/middle/ssa/fuse_branches.py`) —
+      folds a comparison SSA value into a branch only when its SSA use count
+      is exactly one, including phi-edge uses in that count.
 
 ## Tier 3 — easy, mechanical
 

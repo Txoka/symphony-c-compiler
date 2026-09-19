@@ -12,6 +12,7 @@ from .induction import reduce_induction_strength
 from .loop_memory import eliminate_redundant_loop_memory
 from .copies import propagate_global_copies
 from .algebra import simplify_algebra
+from .fuse_branches import fuse_comparison_branches
 
 __all__ = [
     "construct",
@@ -27,4 +28,5 @@ __all__ = [
     "eliminate_redundant_loop_memory",
     "propagate_global_copies",
     "simplify_algebra",
+    "fuse_comparison_branches",
 ]

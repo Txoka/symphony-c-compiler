@@ -17,6 +17,7 @@ from .middle.ssa import (
     eliminate_redundant_loop_memory,
     propagate_global_copies,
     simplify_algebra,
+    fuse_comparison_branches,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -65,6 +66,8 @@ class Compiler:
             reduce_induction_strength(function)
             verify(function)
             eliminate_redundant_loop_memory(function)
+            verify(function)
+            fuse_comparison_branches(function)
             verify(function)
             remove_dead_values(function)
             verify(function)

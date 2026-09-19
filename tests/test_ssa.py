@@ -25,6 +25,7 @@ from symphony.middle.ssa import (
     eliminate_redundant_loop_memory,
     propagate_global_copies,
     simplify_algebra,
+    fuse_comparison_branches,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -415,6 +416,8 @@ def _run(source, ram=1 << 16):
         verify(function)
         reduce_induction_strength(function)
         verify(function)
+        fuse_comparison_branches(function)
+        verify(function)
     inline_single_call_functions(ir)
     for function in ir.functions:
         verify(function)
@@ -444,6 +447,30 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_comparison_branch_fusion_preserves_ssa_and_removes_temporary(self):
+        function = FunctionIR(
+            "fuse",
+            [],
+            [],
+            [
+                BasicBlock("entry", [
+                    Instruction("param", 0, (), INT, "left"),
+                    Instruction("param", 1, (), INT, "right"),
+                    Instruction("binary", 2, (0, 1), INT, "<"),
+                    Instruction("branch_if", None, (2,), INT, (True, "yes")),
+                ]),
+                BasicBlock("no", [Instruction("return", None, (0,), INT)]),
+                BasicBlock("yes", [Instruction("return", None, (1,), INT)]),
+            ],
+            3,
+        )
+        verify(function)
+        self.assertTrue(fuse_comparison_branches(function))
+        verify(function)
+        entry = function.blocks[0].instructions
+        self.assertEqual(entry[-1], Instruction("cbranch_if", args=(0, 1), type=INT, extra=("<", "yes")))
+        self.assertFalse(any(item.op == "binary" for item in entry))
+
     def test_algebra_simplifies_unknown_ssa_values_without_losing_validity(self):
         function = FunctionIR(
             "algebra",
