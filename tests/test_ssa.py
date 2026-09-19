@@ -367,8 +367,7 @@ class RoundTripTests(unittest.TestCase):
         (nothing ever reaches it with a defined value on that path, since
         nothing reads the phi's result there either) must not survive
         destruct() and confuse a second construct() call -- regression test
-        for the bug that triggered the stable-block-identity refactor: see
-        SSA_MIGRATION_PLAN.md."""
+        for the bug that triggered the stable-block-identity refactor."""
         ir = _build(
             """
             int f(int n) {
