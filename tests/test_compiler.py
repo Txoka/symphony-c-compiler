@@ -249,7 +249,9 @@ class ExecutionTests(unittest.TestCase):
             "int main(void){return malloc(input()) == 0;}",
             1,
             ram=1 << 13,
-            inputs=(7000,),
+            # Larger than the entire usable heap regardless of code-size and
+            # frame-size improvements made by the optimizer.
+            inputs=(8000,),
         )
         run(
             "int main(void){return calloc(0xffffffffu, 2) == 0;}",
@@ -805,12 +807,15 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(ABI.pic_base_register, isa.Register.R12)
 
     def test_r12_is_allocatable_only_without_pic(self):
-        body = """int a=x+1,b=x+2,c=x+3,d=x+4,e=x+5;
-            if(input()) return a+b+c+d+e; return a-b+c-d+e;"""
-        source = (
-            f"int f(int x){{{body}}} int g(int x){{return x;}} "
-            "int main(void){int (*p)(int)=input()?f:g;return p(9);}"
-        )
+        # Four values live across g() fill every non-PIC callee-saved home,
+        # including r12. Both functions have multiple callers so inlining does
+        # not erase the call boundary this test is deliberately exercising.
+        source = """int g(int x) { return x + input(); }
+            int f(int x) {
+                int a=x+1,b=x+2,c=x+3,d=x+4;
+                return g(x)+a+b+c+d;
+            }
+            int main(void) { return f(9)+f(2)+g(1); }"""
         for pic in (False, True):
             with self.subTest(pic=pic):
                 result = compile_source(source, target=Target(pic=pic, ram_size=4096))

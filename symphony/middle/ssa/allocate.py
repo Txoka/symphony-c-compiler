@@ -4,7 +4,12 @@ from ..analysis.cfg import build_cfg
 
 
 def interference_graph(function):
-    """Return ``(graph, live_across_call)`` for SSA values in *function*."""
+    """Return ``(graph, live_across_call)`` for values in *function*.
+
+    Control-flow edges do not clobber ordinary registers: branch selection
+    owns the dedicated backend scratch register.  Only calls and the runtime
+    arithmetic operations lowered as calls require a callee-saved home.
+    """
     cfg = build_cfg(function)
     use, define = {}, {}
     for block in cfg.blocks:
@@ -29,11 +34,6 @@ def interference_graph(function):
     graph, across = {}, set()
     for block in cfg.blocks:
         live = set(live_out[block.label])
-        # Keep values that cross a CFG edge in stable callee-saved homes.
-        # This avoids relying on a caller-saved register surviving the branch
-        # lowering's scratch use and lets the allocator reuse those registers
-        # only for truly block-local intervals.
-        across.update(live)
         for item in reversed(block.instructions):
             if item.op in ("call", "direct_call") or (item.op == "binary" and item.extra in ("*", "/", "%")):
                 across.update(live)

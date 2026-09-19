@@ -473,6 +473,17 @@ class OptimizationTests(unittest.TestCase):
         self.assertIn(1, across)
         self.assertIn(1, graph[0])
 
+    def test_allocator_does_not_treat_cfg_edge_as_call_clobber(self):
+        function = FunctionIR("edge", [], [], [
+            BasicBlock("entry", [
+                Instruction("const", 0, (), INT, 1),
+                Instruction("jump", extra="exit"),
+            ]),
+            BasicBlock("exit", [Instruction("return", None, (0,), INT)]),
+        ], 1)
+        _graph, across = interference_graph(function)
+        self.assertNotIn(0, across)
+
     def test_allocator_coalesces_only_noninterfering_copies(self):
         function = FunctionIR("copies", [], [], [BasicBlock("entry", [
             Instruction("copy", 1, (0,), INT),

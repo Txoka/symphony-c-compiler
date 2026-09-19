@@ -562,8 +562,8 @@ class Backend:
             for value in uses
             if value not in self.rematerialized and value in writes
         )
-        # A small global allocation for values that cross basic-block boundaries.
-        # Callee-saved homes remain valid over calls, branches, and loop backedges.
+        # A small global allocation across the complete CFG. Values live over a
+        # real call use callee-saved homes; ordinary branches preserve r3-r6.
         # Saving only selected registers keeps low-pressure functions inexpensive.
         scores = {
             value: sum(len(item.args) for item in definitions.get(value, ()))
