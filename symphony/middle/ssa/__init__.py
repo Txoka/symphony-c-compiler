@@ -15,6 +15,7 @@ from .algebra import simplify_algebra
 from .fuse_branches import fuse_comparison_branches
 from .strength import reduce_strength
 from .parameters import promote_readonly_parameters
+from .tail import eliminate_tail_calls
 
 __all__ = [
     "construct",
@@ -33,4 +34,5 @@ __all__ = [
     "fuse_comparison_branches",
     "reduce_strength",
     "promote_readonly_parameters",
+    "eliminate_tail_calls",
 ]

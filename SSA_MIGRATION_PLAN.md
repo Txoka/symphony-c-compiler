@@ -289,8 +289,9 @@ destruct→construct round trip today — only inlining will. Fixing this is
 - [x] `simplify_algebra` (`symphony/middle/ssa/algebra.py`) — rewrites
       side-effect-safe integer identities directly on immutable SSA values;
       follow-up copy propagation and DCE remove the now-dead definitions.
-- [ ] `eliminate_tail_calls`, `lower_self_tail_calls_to_loops` — self-contained,
-      single-function.
+- [~] `eliminate_tail_calls`, `lower_self_tail_calls_to_loops` — adjacent
+      call/return tail formation is implemented in `ssa/tail.py`; the
+      self-recursion rewrite is next and must introduce loop-header phis.
 - [x] `promote_readonly_parameters` (`symphony/middle/ssa/parameters.py`) —
       construction deliberately leaves parameter slots memory-backed; this
       promotes slots proven load-only into dominating entry SSA values.

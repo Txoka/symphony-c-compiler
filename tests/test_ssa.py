@@ -28,6 +28,7 @@ from symphony.middle.ssa import (
     fuse_comparison_branches,
     reduce_strength,
     promote_readonly_parameters,
+    eliminate_tail_calls,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -427,6 +428,8 @@ def _run(source, ram=1 << 16):
         verify(function)
         promote_readonly_parameters(function)
         verify(function)
+        eliminate_tail_calls(function)
+        verify(function)
         remove_dead_values(function)
         verify(function)
         destruct(function)
@@ -453,6 +456,17 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_adjacent_direct_call_and_return_becomes_tailcall(self):
+        function = FunctionIR("tail", [], [], [BasicBlock("entry", [
+            Instruction("const", 0, (), INT, 4),
+            Instruction("direct_call", 1, (0,), INT, "next"),
+            Instruction("return", None, (1,), INT),
+        ])], 2)
+        verify(function)
+        self.assertTrue(eliminate_tail_calls(function))
+        verify(function)
+        self.assertEqual(function.blocks[0].instructions[-1].op, "direct_tailcall")
+
     def test_readonly_parameter_is_promoted_to_dominating_ssa_value(self):
         ir = _build("int f(int x) { return x + 1; } int main(void) { return f(4); }")
         function = next(item for item in ir.functions if item.name == "f")
