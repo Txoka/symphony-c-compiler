@@ -22,6 +22,7 @@ from .middle.ssa import (
     promote_readonly_parameters,
     eliminate_tail_calls,
     lower_self_tail_calls_to_loops,
+    remove_unreachable_symbols,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -86,6 +87,8 @@ class Compiler:
             verify(function)
             lower_self_tail_calls_to_loops(function)
             verify(function)
+        remove_unreachable_symbols(ir)
+        for function in ir.functions:
             remove_dead_values(function)
             verify(function)
             simplify_control_flow(function)
