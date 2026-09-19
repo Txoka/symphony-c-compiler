@@ -796,6 +796,7 @@ class Backend:
         terminated = False
         for instruction_index, i in enumerate(instructions):
             op = i.op
+            result_register = 1
             if op in ("param", "init_pic", "init_stack", "relocate_globals"):
                 continue
             if op == "label":
@@ -807,15 +808,18 @@ class Backend:
             if op == "const":
                 if i.dst in self.rematerialized:
                     continue
-                a.emit(isa.cheap_constant(1, i.extra))
+                result_register = self.register_values.get(i.dst, 1)
+                a.emit(isa.cheap_constant(result_register, i.extra))
             elif op == "global_addr":
                 if i.dst in self.rematerialized:
                     continue
-                a.address(1, i.extra)
+                result_register = self.register_values.get(i.dst, 1)
+                a.address(result_register, i.extra)
             elif op == "local_addr":
                 if i.dst in self.rematerialized:
                     continue
-                self.slot_address(self.locals[i.extra], 1)
+                result_register = self.register_values.get(i.dst, 1)
+                self.slot_address(self.locals[i.extra], result_register)
             elif op == "stack_mark":
                 a.emit(isa.mov(1, 14))
             elif op == "stack_alloc":
@@ -883,13 +887,15 @@ class Backend:
                 a.branch("jne", loop)
                 continue
             elif op in ("cast", "copy"):
-                self.get(i.args[0], 1)
+                result_register = self.register_values.get(i.dst, 1)
+                self.get(i.args[0], result_register)
                 if op == "cast":
-                    self.normalize(1, i.type)
+                    self.normalize(result_register, i.type)
             elif op == "load":
-                self.get(i.args[0], 1)
-                a.emit(isa.load(i.type.size, 1, 1))
-                self.normalize(1, i.type)
+                result_register = self.register_values.get(i.dst, 1)
+                self.get(i.args[0], result_register)
+                a.emit(isa.load(i.type.size, result_register, result_register))
+                self.normalize(result_register, i.type)
             elif op == "store":
                 self.get(i.args[0], 1)
                 self.get(i.args[1], 2)
@@ -909,12 +915,22 @@ class Backend:
                 a.label(end)
                 continue
             elif op == "unary":
-                self.get(i.args[0], 1)
+                result_register = self.register_values.get(i.dst, 1)
+                self.get(i.args[0], result_register)
                 if i.extra == "!":
+                    # comparison() currently materializes its Boolean in r1.
+                    if result_register != 1:
+                        a.emit(isa.mov(1, result_register))
                     a.emit(isa.mov(2, 0))
                     self.comparison("==", False)
+                    result_register = 1
                 else:
-                    a.emit(isa.alu("sub" if i.extra == "-" else "nor", 1, 0, 1))
+                    a.emit(isa.alu(
+                        "sub" if i.extra == "-" else "nor",
+                        result_register,
+                        0,
+                        result_register,
+                    ))
             elif op == "binary":
                 left, right = i.args
                 immediate = None
@@ -934,12 +950,14 @@ class Backend:
                             if value <= 0xFFFF:
                                 left, right = right, left
                                 immediate = value
-                self.get(left, 1)
-                if immediate is None:
-                    self.get(right, 2)
                 if i.extra in ("==", "!=", "<", "<=", ">", ">="):
+                    self.get(left, 1)
+                    if immediate is None:
+                        self.get(right, 2)
                     self.comparison(i.extra, i.type.signed, immediate)
                 elif i.extra in ("*", "/", "%"):
+                    self.get(left, 1)
+                    self.get(right, 2)
                     helper = (
                         "__dyn_mul"
                         if i.extra == "*"
@@ -949,6 +967,24 @@ class Backend:
                     )
                     a.call(helper)
                 else:
+                    result_register = self.register_values.get(i.dst, 1)
+                    commutative = i.extra in ("+", "&", "|", "^")
+                    if (
+                        immediate is None
+                        and commutative
+                        and self.register_values.get(right) == result_register
+                    ):
+                        left, right = right, left
+                    preserve_right = (
+                        immediate is None
+                        and left != right
+                        and self.register_values.get(right) == result_register
+                    )
+                    if preserve_right:
+                        self.get(right, 2)
+                    self.get(left, result_register)
+                    if immediate is None and not preserve_right:
+                        self.get(right, 2)
                     name = {
                         "+": "add",
                         "-": "sub",
@@ -961,8 +997,8 @@ class Backend:
                     a.emit(
                         isa.alu(
                             name,
-                            1,
-                            1,
+                            result_register,
+                            result_register,
                             immediate if immediate is not None else 2,
                             immediate is not None,
                         )
@@ -1090,7 +1126,7 @@ class Backend:
                 continue
             else:
                 raise AssertionError(f"unhandled IR opcode {op}")
-            self.put(i.dst)
+            self.put(i.dst, result_register)
         if terminated:
             return
         a.label(epilogue)
