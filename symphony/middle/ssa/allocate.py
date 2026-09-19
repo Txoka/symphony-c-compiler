@@ -29,6 +29,11 @@ def interference_graph(function):
     graph, across = {}, set()
     for block in cfg.blocks:
         live = set(live_out[block.label])
+        # Keep values that cross a CFG edge in stable callee-saved homes.
+        # This avoids relying on a caller-saved register surviving the branch
+        # lowering's scratch use and lets the allocator reuse those registers
+        # only for truly block-local intervals.
+        across.update(live)
         for item in reversed(block.instructions):
             if item.op in ("call", "direct_call") or (item.op == "binary" and item.extra in ("*", "/", "%")):
                 across.update(live)
