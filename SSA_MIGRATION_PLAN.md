@@ -273,15 +273,19 @@ destruct→construct round trip today — only inlining will. Fixing this is
       operations. DCE cleans up the now-unused copies. Regression coverage
       includes a copy crossing a block boundary into a header phi and back out
       through a loop latch.
-- [ ] `propagate_and_fold` — most of its barrier/alias-invalidation machinery
-      exists only to cope with non-SSA mutable locals; should shrink a lot.
+- [x] `propagate_and_fold` — subsumed by SSA SCCP plus global-copy
+      propagation: SCCP supplies edge-aware constant folding and the latter
+      supplies dominance-safe aliases, so there is no mutable-local barrier
+      state left to port.
 - [x] `fuse_comparison_branches` (`symphony/middle/ssa/fuse_branches.py`) —
       folds a comparison SSA value into a branch only when its SSA use count
       is exactly one, including phi-edge uses in that count.
 
 ## Tier 3 — easy, mechanical
 
-- [ ] `strength_reduce` — pure per-instruction rewrites, no CFG/phi interaction.
+- [x] `strength_reduce` (`symphony/middle/ssa/strength.py`) — replaces
+      multiplication by powers of two with shifts, and unsigned power-of-two
+      division/remainder with shifts/masks.
 - [x] `simplify_algebra` (`symphony/middle/ssa/algebra.py`) — rewrites
       side-effect-safe integer identities directly on immutable SSA values;
       follow-up copy propagation and DCE remove the now-dead definitions.

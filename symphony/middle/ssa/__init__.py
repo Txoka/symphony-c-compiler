@@ -13,6 +13,7 @@ from .loop_memory import eliminate_redundant_loop_memory
 from .copies import propagate_global_copies
 from .algebra import simplify_algebra
 from .fuse_branches import fuse_comparison_branches
+from .strength import reduce_strength
 
 __all__ = [
     "construct",
@@ -29,4 +30,5 @@ __all__ = [
     "propagate_global_copies",
     "simplify_algebra",
     "fuse_comparison_branches",
+    "reduce_strength",
 ]

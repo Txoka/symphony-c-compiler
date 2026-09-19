@@ -26,6 +26,7 @@ from symphony.middle.ssa import (
     propagate_global_copies,
     simplify_algebra,
     fuse_comparison_branches,
+    reduce_strength,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -418,6 +419,8 @@ def _run(source, ram=1 << 16):
         verify(function)
         fuse_comparison_branches(function)
         verify(function)
+        reduce_strength(function)
+        verify(function)
     inline_single_call_functions(ir)
     for function in ir.functions:
         verify(function)
@@ -447,6 +450,26 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_strength_reduction_rewrites_multiply_and_unsigned_divide(self):
+        from symphony.middle.model import UINT
+        function = FunctionIR(
+            "strength",
+            [], [],
+            [BasicBlock("entry", [
+                Instruction("param", 0, (), UINT, "x"),
+                Instruction("const", 1, (), UINT, 8),
+                Instruction("const", 2, (), UINT, 4),
+                Instruction("binary", 3, (0, 1), UINT, "*"),
+                Instruction("binary", 4, (3, 2), UINT, "/"),
+                Instruction("return", None, (4,), UINT),
+            ])], 5,
+        )
+        verify(function)
+        self.assertTrue(reduce_strength(function))
+        verify(function)
+        operations = [item.extra for item in function.blocks[0].instructions if item.op == "binary"]
+        self.assertEqual(operations, ["<<", ">>"])
+
     def test_comparison_branch_fusion_preserves_ssa_and_removes_temporary(self):
         function = FunctionIR(
             "fuse",

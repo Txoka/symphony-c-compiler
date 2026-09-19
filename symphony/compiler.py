@@ -18,6 +18,7 @@ from .middle.ssa import (
     propagate_global_copies,
     simplify_algebra,
     fuse_comparison_branches,
+    reduce_strength,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -60,6 +61,8 @@ class Compiler:
             simplify_algebra(function)
             verify(function)
             propagate_global_copies(function)
+            verify(function)
+            reduce_strength(function)
             verify(function)
             hoist_loop_invariants(function)
             verify(function)
