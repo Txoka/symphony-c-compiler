@@ -11,6 +11,7 @@ from .simplify_cfg import simplify_control_flow
 from .induction import reduce_induction_strength
 from .loop_memory import eliminate_redundant_loop_memory
 from .copies import propagate_global_copies
+from .algebra import simplify_algebra
 
 __all__ = [
     "construct",
@@ -25,4 +26,5 @@ __all__ = [
     "reduce_induction_strength",
     "eliminate_redundant_loop_memory",
     "propagate_global_copies",
+    "simplify_algebra",
 ]

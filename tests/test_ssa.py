@@ -24,6 +24,7 @@ from symphony.middle.ssa import (
     hoist_loop_invariants,
     eliminate_redundant_loop_memory,
     propagate_global_copies,
+    simplify_algebra,
 )
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -404,6 +405,12 @@ def _run(source, ram=1 << 16):
         verify(function)
         sparse_conditional_constant_propagation(function)
         verify(function)
+        propagate_global_copies(function)
+        verify(function)
+        simplify_algebra(function)
+        verify(function)
+        propagate_global_copies(function)
+        verify(function)
         hoist_loop_invariants(function)
         verify(function)
         reduce_induction_strength(function)
@@ -437,6 +444,30 @@ class InlineTests(unittest.TestCase):
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_algebra_simplifies_unknown_ssa_values_without_losing_validity(self):
+        function = FunctionIR(
+            "algebra",
+            [],
+            [],
+            [BasicBlock("entry", [
+                Instruction("param", 0, (), INT, "x"),
+                Instruction("const", 1, (), INT, 0),
+                Instruction("const", 2, (), INT, -1),
+                Instruction("binary", 3, (0, 1), INT, "+"),
+                Instruction("binary", 4, (3, 2), INT, "&"),
+                Instruction("binary", 5, (4, 4), INT, "=="),
+                Instruction("return", None, (5,), INT),
+            ])],
+            6,
+        )
+        verify(function)
+        self.assertTrue(simplify_algebra(function))
+        verify(function)
+        instructions = function.blocks[0].instructions
+        self.assertEqual(instructions[3].op, "copy")
+        self.assertEqual(instructions[4].op, "copy")
+        self.assertEqual((instructions[5].op, instructions[5].extra), ("const", 1))
+
     def test_source_loop_uses_derived_induction_recurrence_and_runs(self):
         source = """
             int sum_offsets(int count) {

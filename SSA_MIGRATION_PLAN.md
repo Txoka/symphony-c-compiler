@@ -280,8 +280,10 @@ destruct→construct round trip today — only inlining will. Fixing this is
 
 ## Tier 3 — easy, mechanical
 
-- [ ] `strength_reduce`, `simplify_algebra` — pure per-instruction rewrites, no
-      CFG/phi interaction.
+- [ ] `strength_reduce` — pure per-instruction rewrites, no CFG/phi interaction.
+- [x] `simplify_algebra` (`symphony/middle/ssa/algebra.py`) — rewrites
+      side-effect-safe integer identities directly on immutable SSA values;
+      follow-up copy propagation and DCE remove the now-dead definitions.
 - [ ] `eliminate_tail_calls`, `lower_self_tail_calls_to_loops` — self-contained,
       single-function.
 - [ ] `promote_readonly_parameters` — check whether `construct.py`'s mem2reg
