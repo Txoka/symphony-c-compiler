@@ -82,6 +82,15 @@ def _reaches(edges, start, target):
 
 def _select_candidates(module):
     sites, edges = _call_sites(module)
+    incoming_edges = {function.name: 0 for function in module.functions}
+    for caller in module.functions:
+        for block in caller.blocks:
+            for instruction in block.instructions:
+                if (
+                    instruction.op in ("direct_call", "direct_tailcall")
+                    and instruction.extra in incoming_edges
+                ):
+                    incoming_edges[instruction.extra] += 1
     observable = _observable_addresses(module)
     candidates = {}
     for function in module.functions:
@@ -109,6 +118,7 @@ def _select_candidates(module):
             and function.name not in observable
             and caller is not None
             and (len(call_list) == 1 or trivial_runtime_wrapper)
+            and incoming_edges[function.name] == 1
             and caller is not function
             and not _reaches(edges, function.name, caller.name)
             and not any(
