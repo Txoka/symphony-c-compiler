@@ -1056,7 +1056,12 @@ class Backend:
                     a.label("_halt")
                     a.emit(isa.jump("jmp", 7))
                 terminated = True
-                break
+                # A graph rewrite may serialize another reachable block after
+                # a halt block (notably an explicit critical-edge trampoline
+                # appended by SSA destruction). Halt has no fallthrough, but
+                # those later labels still have to be emitted for incoming
+                # branches. `terminated` suppresses only the final epilogue.
+                continue
             else:
                 raise AssertionError(f"unhandled IR opcode {op}")
             self.put(i.dst)

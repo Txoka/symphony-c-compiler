@@ -27,8 +27,17 @@ def verify(function):
 
     definitions = {}
     def_block = {}
+    def_position = {}
     for block in cfg.blocks:
-        for instruction in block.instructions:
+        seen_non_phi = False
+        for position, instruction in enumerate(block.instructions):
+            if instruction.op == "phi" and seen_non_phi:
+                raise SSAVerificationError(
+                    f"{function.name}: phi %{instruction.dst} is not at the start "
+                    f"of block {block.label}"
+                )
+            if instruction.op not in ("label", "phi"):
+                seen_non_phi = True
             if instruction.dst is None:
                 continue
             if instruction.dst in definitions:
@@ -37,14 +46,15 @@ def verify(function):
                 )
             definitions[instruction.dst] = instruction
             def_block[instruction.dst] = block.label
+            def_position[instruction.dst] = position
 
     for block in cfg.blocks:
         if block.label not in reachable:
             continue
-        for instruction in block.instructions:
+        for position, instruction in enumerate(block.instructions):
             if instruction.op == "phi":
                 seen = {p for p, _ in instruction.extra}
-                if seen != set(block.predecessors):
+                if len(seen) != len(instruction.extra) or seen != set(block.predecessors):
                     raise SSAVerificationError(
                         f"{function.name}: phi %{instruction.dst} in block {block.label} "
                         f"covers predecessors {sorted(seen)}, block has {sorted(block.predecessors)}"
@@ -73,6 +83,11 @@ def verify(function):
                     raise SSAVerificationError(
                         f"{function.name}: %{value} defined in block {def_block[value]} "
                         f"does not dominate its use in block {block.label}"
+                    )
+                if def_block[value] == block.label and def_position[value] >= position:
+                    raise SSAVerificationError(
+                        f"{function.name}: %{value} is used before its definition "
+                        f"in block {block.label}"
                     )
 
 

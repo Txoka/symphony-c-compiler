@@ -36,7 +36,11 @@ def _sequentialize(pairs, fresh_value):
     pending = dict(pairs)
     result = []
     while pending:
-        ready = [dst for dst, src in pending.items() if src not in pending or src == dst]
+        # A destination is safe to overwrite once no other pending copy still
+        # needs its old value. Testing whether the source is a destination
+        # reverses this dependency and corrupts even a<-b, b<-c.
+        sources = set(pending.values())
+        ready = [dst for dst, src in pending.items() if dst not in sources or src == dst]
         if ready:
             for dst in ready:
                 src = pending.pop(dst)
@@ -46,7 +50,7 @@ def _sequentialize(pairs, fresh_value):
         # Every remaining pair is part of a cycle; break one edge with a
         # temporary so the rest can proceed as ordinary copies.
         dst = next(iter(pending))
-        temp = fresh_value()
+        temp = fresh_value(pending[dst])
         result.append((temp, pending[dst]))
         pending[dst] = temp
     return result
@@ -75,9 +79,10 @@ def destruct(function):
             if item.dst is not None:
                 types[item.dst] = item.type
 
-    def fresh_value():
+    def fresh_value(source):
         v = function.values
         function.values += 1
+        types[v] = types[source]
         return v
 
     edge_copies = {}

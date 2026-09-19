@@ -12,6 +12,7 @@ from .middle.ssa import (
     hoist_loop_invariants,
     remove_dead_values,
     inline_single_call_functions,
+    simplify_control_flow,
 )
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
@@ -57,6 +58,8 @@ class Compiler:
         for function in ir.functions:
             verify(function)
             remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
             verify(function)
             destruct(function)
         legalize_runtime_arithmetic(ir)

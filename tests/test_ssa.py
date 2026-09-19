@@ -10,13 +10,18 @@ import unittest
 from symphony.frontends.c import CFrontend
 from symphony.middle.passes.pipeline import lower_intrinsics
 from symphony.middle.analysis.cfg import prune_unreachable_blocks
+from symphony.middle.ir import BasicBlock, FunctionIR, Instruction, ModuleIR
+from symphony.middle.model import INT
 from symphony.middle.ssa import (
     construct,
     verify,
     destruct,
     remove_dead_values,
     inline_single_call_functions,
+    simplify_control_flow,
 )
+from symphony.middle.ssa.destruct import _sequentialize
+from symphony.middle.ssa.verify import SSAVerificationError
 from symphony.emulator import Machine, native_available, native_run
 from symphony.targets.symphony import generate, Target
 from symphony.targets.symphony.legalize import legalize_runtime_arithmetic
@@ -34,6 +39,121 @@ def _build(source):
 
 
 class RoundTripTests(unittest.TestCase):
+    def test_backend_emits_reachable_edge_block_after_halt_layout(self):
+        start = FunctionIR(
+            "_start",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "_start.entry",
+                    [
+                        Instruction("const", 0, (), INT, 0),
+                        Instruction(
+                            "branch_if", None, (0,), INT, (True, "_start.ssa_edge1")
+                        ),
+                    ],
+                ),
+                BasicBlock(
+                    "_start.halt",
+                    [
+                        Instruction("label", extra="_start.halt"),
+                        Instruction("const", 1, (), INT, 0),
+                        Instruction("halt", None, (1,), INT),
+                    ],
+                ),
+                BasicBlock(
+                    "_start.ssa_edge1",
+                    [
+                        Instruction("label", extra="_start.ssa_edge1"),
+                        Instruction("jump", extra="_start.halt"),
+                    ],
+                ),
+            ],
+            2,
+        )
+        image = generate(ModuleIR([], [start]), Target())
+        self.assertIn("_start.ssa_edge1", image.symbols)
+
+    def test_jump_threading_removes_stale_phi_predecessor(self):
+        function = FunctionIR(
+            "thread",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "entry",
+                    [
+                        Instruction("const", 0, (), INT, 0),
+                        Instruction("const", 1, (), INT, 10),
+                        Instruction("branch_if", None, (0,), INT, (True, "trampoline")),
+                    ],
+                ),
+                BasicBlock(
+                    "other",
+                    [
+                        Instruction("const", 2, (), INT, 20),
+                        Instruction("jump", extra="join"),
+                    ],
+                ),
+                BasicBlock("trampoline", [Instruction("jump", extra="join")]),
+                BasicBlock(
+                    "join",
+                    [
+                        Instruction(
+                            "phi", 3, (), INT, (("other", 2), ("trampoline", 1))
+                        ),
+                        Instruction("return", None, (3,), INT),
+                    ],
+                ),
+            ],
+            4,
+        )
+        verify(function)
+        self.assertTrue(simplify_control_flow(function))
+        verify(function)
+        self.assertEqual([block.label for block in function.blocks], ["entry", "other", "join"])
+        phi = function.blocks[-1].instructions[0]
+        self.assertEqual(phi.extra, (("entry", 1), ("other", 2)))
+
+    def test_parallel_copy_sequentialization_preserves_old_values(self):
+        def execute(pairs, sequence):
+            values = {1: "old1", 2: "old2", 3: "old3"}
+            expected = dict(values)
+            for destination, source in pairs:
+                expected[destination] = values[source]
+            for destination, source in sequence:
+                values[destination] = values[source]
+            return values, expected
+
+        fresh = iter(range(10, 20))
+        for pairs in (((1, 2), (2, 3)), ((1, 2), (2, 1))):
+            with self.subTest(pairs=pairs):
+                sequence = _sequentialize(pairs, lambda _source: next(fresh))
+                actual, expected = execute(pairs, sequence)
+                self.assertEqual(actual[1], expected[1])
+                self.assertEqual(actual[2], expected[2])
+
+    def test_verifier_rejects_same_block_use_before_definition(self):
+        function = FunctionIR(
+            "invalid",
+            [],
+            [],
+            [
+                BasicBlock(
+                    "invalid.entry",
+                    [
+                        Instruction("copy", 1, (2,), INT),
+                        Instruction("const", 2, (), INT, 7),
+                        Instruction("return", None, (1,), INT),
+                    ],
+                )
+            ],
+            3,
+        )
+        with self.assertRaisesRegex(SSAVerificationError, "used before"):
+            verify(function)
+
     def test_destruct_construct_round_trip_on_nested_loop_with_dead_join(self):
         """A dead &&/||/?: join-value phi with a None operand on one edge
         (nothing ever reaches it with a defined value on that path, since
@@ -168,6 +288,23 @@ class InlineTests(unittest.TestCase):
                 """
             ),
             25,
+        )
+
+    def test_parameter_binding_precedes_loop_header_and_runs_once(self):
+        """A callee whose entry block is also a loop header needs a distinct
+        one-shot parameter-binding block. The loop back edge must neither
+        skip the initial binding nor repeat it and reset the loop variable."""
+        self.assertEqual(
+            _run(
+                """
+                int count_down(int n) {
+                    while (n) n = n - 1;
+                    return n;
+                }
+                int main(void) { return count_down(3); }
+                """
+            ),
+            0,
         )
 
 

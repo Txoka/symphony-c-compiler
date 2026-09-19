@@ -220,14 +220,27 @@ destruct→construct round trip today — only inlining will. Fixing this is
       coverage for bug 2/bottom-up ordering), a recursive function
       (confirms it's correctly never selected), and a multi-call-site
       function (confirms it's correctly never selected either).
-- [ ] `simplify_control_flow` + `thread_jumps` (same family) — deletes/merges/
-      redirects blocks and edges. Every deletion must rewrite `phi.extra`'s
-      `(predecessor_label, value)` pairs (`redirect_edge`/`remove_block` in
-      `analysis/cfg.py` centralize this bookkeeping); labels are stable now,
-      so this is no longer the block-index-renumbering bug class that used
-      to bite `construct.py`, `destruct.py`, and `sccp.py` (see commit
-      `1d13c89` fix and prior stage-1 fixes) — but phi operands for a
-      removed predecessor still need explicit cleanup.
+- [x] `simplify_control_flow` + `thread_jumps` (`symphony/middle/ssa/simplify_cfg.py`)
+      — prunes unreachable blocks and redirects explicit edges through pure
+      jump trampolines directly on SSA. Each redirect copies the trampoline's
+      existing phi operand onto the new predecessor; unreachable-block pruning
+      then removes operands belonging to deleted predecessors. A trampoline is
+      deliberately retained when it distinguishes two edges from the same
+      source carrying different phi values, since collapsing those edges would
+      make the distinction unrepresentable by an ordinary block phi. Added a
+      direct regression for redirect -> prune -> phi cleanup. Stabilization of
+      this stage also added regressions and fixes for three pre-existing bugs
+      exposed by structural CFG work: parallel-copy destruction used the
+      dependency direction backwards, the verifier accepted a same-block use
+      before its definition, and inlining a parameterized callee whose entry
+      was a loop header either duplicated/skipped parameter binding or repeated
+      it on every back edge. Parameter binding now uses a distinct one-shot
+      entry block. Finally, the backend continues serializing reachable labeled
+      blocks laid out after `_start`'s `halt`, fixing an undefined appended
+      critical-edge trampoline in the self-host build. Focused SSA suite: 11/11
+      green on both ISAs; the ordinary Dynphony suite retains the same 32 known
+      missing-optimization failures as the pre-stabilization baseline, with no
+      new failing test names.
 - [ ] `reduce_induction_strength` — induction-variable recognition is a phi
       pattern (self-referential phi with a constant per-iteration step); real
       SSA should make identifying induction variables far more direct than

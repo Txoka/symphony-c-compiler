@@ -186,15 +186,32 @@ def _clone_callee(callee, caller, call_instruction, inline_id):
             items.append(Instruction("jump", extra=continuation))
         cloned_blocks.append(BasicBlock(new_label, items))
 
-    # The entry clone and the continuation are both explicit jump targets
-    # (from the call site, and from every cloned return, respectively), so
-    # each needs its own `label` instruction naming its canonical label --
-    # exactly what the lowerer already does for any block reachable other
-    # than by fallthrough (see `build_cfg`'s alias table, keyed off `label`
-    # instructions, not off `BasicBlock.label` directly).
-    entry_label = Instruction("label", extra=cloned_blocks[0].label)
-    entry_body = binding + cloned_blocks[0].instructions if binding else cloned_blocks[0].instructions
-    cloned_blocks[0] = BasicBlock(cloned_blocks[0].label, [entry_label, *entry_body])
+    # The cloned entry may itself be a loop header. Parameter stores must run
+    # once on entry to the clone, not every time a back edge reaches that
+    # header, so give them a distinct one-shot block. Putting them after the
+    # entry label reinitializes modified parameters on every iteration;
+    # putting them before an existing copy of that label lets the assembler's
+    # label target skip them (and can create a duplicate symbol).
+    entry_body = cloned_blocks[0].instructions
+    split = next((i for i, item in enumerate(entry_body) if item.op != "label"), len(entry_body))
+    leading_labels = entry_body[:split]
+    if not any(item.extra == cloned_blocks[0].label for item in leading_labels):
+        cloned_blocks[0].instructions.insert(
+            0, Instruction("label", extra=cloned_blocks[0].label)
+        )
+    if binding:
+        binding_label = f"{caller.name}.inline{inline_id}.entry"
+        cloned_blocks.insert(
+            0,
+            BasicBlock(
+                binding_label,
+                [
+                    Instruction("label", extra=binding_label),
+                    *binding,
+                    Instruction("jump", extra=label_map[callee.blocks[0].label]),
+                ],
+            ),
+        )
 
     continuation_items = [Instruction("label", extra=continuation)]
     if call_instruction.dst is not None and any(v is not None for _, v in return_values):

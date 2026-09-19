@@ -112,6 +112,18 @@ def prune_unreachable_blocks(function) -> bool:
     if len(reachable) == len(cfg.blocks):
         return False
     function.blocks = [block for block in cfg.blocks if block.label in reachable]
+    # Removing a predecessor also removes its phi operand. Rebuild first so
+    # aliases and fallthrough edges reflect the surviving block layout.
+    surviving_cfg = build_cfg(function)
+    for block in surviving_cfg.blocks:
+        predecessors = set(block.predecessors)
+        for instruction in block.instructions:
+            if instruction.op == "phi":
+                instruction.extra = tuple(
+                    (predecessor, value)
+                    for predecessor, value in instruction.extra
+                    if predecessor in predecessors
+                )
     return True
 
 
