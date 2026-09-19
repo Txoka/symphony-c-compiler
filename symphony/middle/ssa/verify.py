@@ -60,6 +60,13 @@ def verify(function):
                         f"covers predecessors {sorted(seen)}, block has {sorted(block.predecessors)}"
                     )
                 for predecessor, value in instruction.extra:
+                    # A phi input is used on its predecessor edge.  As with
+                    # ordinary instructions in unreachable blocks, an input
+                    # from an unreachable predecessor can never execute and
+                    # therefore imposes no dominance requirement. SCCP keeps
+                    # such structural edges until CFG cleanup removes them.
+                    if predecessor not in reachable:
+                        continue
                     if value is None:
                         continue
                     if value not in def_block:

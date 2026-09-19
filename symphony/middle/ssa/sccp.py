@@ -225,6 +225,15 @@ def sparse_conditional_constant_propagation(function):
                 if len(live) == 1:
                     instruction = Instruction("jump", extra=instruction.extra[1])
             body.append(instruction)
+        # Folding a leading phi to a const/copy must not leave a later,
+        # varying phi after that non-phi definition. Phi nodes are evaluated
+        # simultaneously on block entry, so retaining labels first and then
+        # every surviving phi is both semantically equivalent and preserves
+        # the structural SSA invariant required by all following passes.
+        labels = [item for item in body if item.op == "label"]
+        phis = [item for item in body if item.op == "phi"]
+        other = [item for item in body if item.op not in ("label", "phi")]
+        body = labels + phis + other
         new_blocks.append(BasicBlock(block.label, body))
     function.blocks = new_blocks
     # Branch rewriting above changes real predecessor edges.  Reconcile phi

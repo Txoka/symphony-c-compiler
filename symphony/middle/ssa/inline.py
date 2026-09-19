@@ -21,6 +21,8 @@ phi (see ``construct.py``'s docstring on why phi operands are label-keyed).
 A void callee, or a call whose result is unused, needs no such phi.
 """
 
+from collections import defaultdict
+
 from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import prune_unreachable_blocks
 from ..model import pointer
@@ -54,9 +56,13 @@ def _call_sites(module):
     for caller in module.functions:
         for block in caller.blocks:
             for instruction in block.instructions:
-                if instruction.op == "direct_call" and instruction.extra in names:
-                    sites[instruction.extra].append((caller, block.label, instruction))
+                if (
+                    instruction.op in ("direct_call", "direct_tailcall")
+                    and instruction.extra in names
+                ):
                     edges[caller.name].add(instruction.extra)
+                    if instruction.op == "direct_call":
+                        sites[instruction.extra].append((caller, block.label, instruction))
     return sites, edges
 
 
@@ -257,24 +263,34 @@ def _clone_callee(callee, caller, call_instruction, inline_id):
     return cloned_blocks + [continuation_block], continuation
 
 
-def _retarget_predecessor(function, old_label, new_label):
+def _retarget_predecessor(function, old_label, new_label, phi_users=None):
     """Every phi anywhere in ``function`` that names ``old_label`` as a
     predecessor now reaches its block via ``new_label`` instead: splitting
     the call site's block moved its terminator (and thus its identity as a
     CFG predecessor of whatever it originally jumped/fell through to) onto
     the new continuation block, while ``old_label`` keeps only the leading
     half, which now always jumps straight into the clone."""
-    for block in function.blocks:
-        for instruction in block.instructions:
-            if instruction.op != "phi":
-                continue
-            instruction.extra = tuple(
-                (new_label if label == old_label else label, value)
-                for label, value in instruction.extra
-            )
+    if phi_users is None:
+        instructions = (
+            instruction
+            for block in function.blocks
+            for instruction in block.instructions
+            if instruction.op == "phi"
+        )
+    else:
+        instructions = phi_users.pop(old_label, ())
+    for instruction in instructions:
+        instruction.extra = tuple(
+            (new_label if label == old_label else label, value)
+            for label, value in instruction.extra
+        )
+        if phi_users is not None:
+            phi_users[new_label].append(instruction)
 
 
-def _inline_one_call(caller, call_block_label, call_instruction, callee, inline_id):
+def _inline_one_call(
+    caller, call_block_label, call_instruction, callee, inline_id, phi_users=None
+):
     cloned_blocks, continuation = _clone_callee(callee, caller, call_instruction, inline_id)
     continuation_block = cloned_blocks[-1]
     assert continuation_block.label == continuation
@@ -297,16 +313,28 @@ def _inline_one_call(caller, call_block_label, call_instruction, callee, inline_
         new_blocks.extend(cloned_blocks[:-1])
         new_blocks.append(BasicBlock(continuation, continuation_block.instructions + after))
     caller.blocks = new_blocks
-    _retarget_predecessor(caller, call_block_label, continuation)
+    if phi_users is not None:
+        for block in cloned_blocks:
+            for instruction in block.instructions:
+                if instruction.op == "phi":
+                    for label, _ in instruction.extra:
+                        phi_users[label].append(instruction)
+    _retarget_predecessor(caller, call_block_label, continuation, phi_users)
 
 
-def _settle(function, candidates, inline_id):
+def _settle(function, candidates, edges, inline_id):
     """Inline every candidate call inside ``function`` until none remain,
     returning the next unused ``inline_id``. Must only be called on a
     function whose own callee candidates (if any) have already been settled
     -- see ``inline_single_call_functions``'s bottom-up ordering -- so a
     just-inlined callee's blocks never themselves contain another pending
     candidate call that would need re-scanning mid-splice."""
+    phi_users = defaultdict(list)
+    for block in function.blocks:
+        for instruction in block.instructions:
+            if instruction.op == "phi":
+                for label, _ in instruction.extra:
+                    phi_users[label].append(instruction)
     while True:
         call_site = next(
             (
@@ -323,8 +351,18 @@ def _settle(function, candidates, inline_id):
             return inline_id
         call_block_label, call_instruction = call_site
         callee = candidates[call_instruction.extra]
+        # A candidate can be reached from more than one syntactic form: a
+        # tail edge is not itself inlined here, but it still closes a recursive
+        # SCC. Never clone such a callee into a member of that SCC.
+        if _reaches(edges, callee.name, function.name):
+            candidates = {
+                name: item for name, item in candidates.items() if name != callee.name
+            }
+            continue
         inline_id += 1
-        _inline_one_call(function, call_block_label, call_instruction, callee, inline_id)
+        _inline_one_call(
+            function, call_block_label, call_instruction, callee, inline_id, phi_users
+        )
 
 
 def inline_single_call_functions(module):
@@ -354,13 +392,13 @@ def inline_single_call_functions(module):
         for callee_name in edges.get(name, ()):
             settle_transitively(callee_name)
         nonlocal inline_id
-        inline_id = _settle(candidates[name], candidates, inline_id)
+        inline_id = _settle(candidates[name], candidates, edges, inline_id)
 
     inline_id = getattr(module, "_inline_serial", 0)
     for function in module.functions:
         settle_transitively(function.name)
     for function in module.functions:
-        inline_id = _settle(function, candidates, inline_id)
+        inline_id = _settle(function, candidates, edges, inline_id)
     module._inline_serial = inline_id
 
     return True

@@ -676,6 +676,23 @@ class InlineTestsContinued(unittest.TestCase):
             120,
         )
 
+    def test_external_call_before_self_call_does_not_inline_recursion(self):
+        # The external call appears before the definition's self-call in
+        # module order. Candidate selection must reject recursion based on the
+        # graph, not on whichever call site happens to appear first.
+        self.assertEqual(
+            _run(
+                """
+                int count_down(int n);
+                int main(void) { return count_down(4); }
+                int count_down(int n) {
+                    return n ? count_down(n - 1) : 7;
+                }
+                """
+            ),
+            7,
+        )
+
     def test_multiple_call_sites_are_not_inlined(self):
         self.assertEqual(
             _run(
