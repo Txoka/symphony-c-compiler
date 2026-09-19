@@ -673,7 +673,12 @@ class Assembler:
             # relocation covering the whole 12-byte sequence; the linker
             # rewrites it in place once the symbol's address is known
             # (see symphony_ld.py's "abs32_la" reloc handling).
-            self.relocs.append((section, offset, s, 0, "abs32_la", int(dr)))
+            symbol, addend = parse_int_or_symbol(s), 0
+            if isinstance(symbol, tuple):
+                symbol, addend = symbol
+            if not isinstance(symbol, str):
+                raise ValueError(f"la requires a symbol operand, got {s!r}")
+            self.relocs.append((section, offset, symbol, addend, "abs32_la", int(dr)))
             return self._enc(isa.constant(dr, 0))
 
         raise ValueError(f"unsupported Symphony GCC mnemonic: {mnem} {operands}")

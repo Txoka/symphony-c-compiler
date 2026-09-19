@@ -56,9 +56,14 @@ def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp):
     # cases mostly use pure programs; benchmarks need the emulator protocol.
     machine = Machine(image, inputs=inputs, symphony=True)
     machine.pc = entry
-    machine.regs[14] = 0x7fffc
-    machine.regs[13] = 0xfffffffc
-    machine.run(halt_address=0xfffffffc, max_steps=max_steps)
+    # Match the GCC toolchain's ABI test harness: its heap runtime assumes
+    # the normal 16 MiB target RAM layout rather than dyncc's 1 MiB default.
+    machine.regs[14] = 0x800000
+    machine.regs[13] = 0xfffff0
+    if native_available(True):
+        native_run(machine, 0xfffff0, max_steps)
+    else:
+        machine.run(halt_address=0xfffff0, max_steps=max_steps)
     return len(image), machine.steps
 
 

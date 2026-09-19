@@ -488,6 +488,25 @@ compute:
         with pytest.raises(ValueError, match="__dyn_heap_anchor"):
             toolchain.link([obj], entry_symbol=None)
 
+    def test_la_symbol_addend_relocation(self, toolchain, tmp_path):
+        """`la symbol+N` must retain N in its abs32 relocation.
+
+        GCC's heap runtime initializes its bump pointer from
+        ``__dyn_heap_anchor+3``.  The assembler originally parsed addends
+        for data and call operands but recorded the whole ``la`` operand as
+        a literal symbol name, making that runtime impossible to link.
+        """
+        asm_source = """\
+\t.text
+\t.global\t_start
+_start:
+\tla\tr1, __dyn_heap_anchor+3
+\tlink_return
+"""
+        obj = toolchain.assemble_asm_source(asm_source, tmp_path, name="la_addend")
+        result, _machine, symtab = toolchain.link_and_run([obj], entry_symbol="_start")
+        assert result == symtab["__dyn_heap_anchor"] + 3
+
     def test_frame_pointer_not_reused_as_general_register(self, toolchain, tmp_path):
         """Regression test for the r11-not-FIXED_REGISTERS bug fixed
         alongside this test (see symphony.h's long comment above
