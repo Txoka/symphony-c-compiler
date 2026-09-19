@@ -105,6 +105,11 @@ class Compiler:
             verify(function)
             simplify_control_flow(function)
             verify(function)
+        # Candidate selection must see the live call graph.  In particular,
+        # arithmetic forwarding wrappers can have dead runtime-only callers;
+        # counting those stale edges would incorrectly prevent their sole
+        # reachable call site from being inlined.
+        remove_unreachable_symbols(ir)
         inline_single_call_functions(ir)
         for function in ir.functions:
             verify(function)
