@@ -11,6 +11,20 @@ extern unsigned char __dyn_printf_framebuffer[3840];
 extern unsigned int __dyn_printf_cursor;
 extern unsigned int __dyn_printf_column;
 
+unsigned int __dyn_printf_put(unsigned int value);
+unsigned int __dyn_printf_string(const char *text);
+
+int putchar(int character) {
+    __dyn_printf_put((unsigned int)(unsigned char)character);
+    return (unsigned char)character;
+}
+
+int puts(const char *text) {
+    __dyn_printf_string(text);
+    __dyn_printf_put(10);
+    return 0;
+}
+
 unsigned int __dyn_printf_put(unsigned int value) {
     if (value == 10) {
         if (__dyn_printf_column) {

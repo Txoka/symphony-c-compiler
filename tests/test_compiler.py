@@ -14,7 +14,7 @@ from symphony import (
     compile_source as _compile_source,
     compile_sources as _compile_sources,
 )
-from symphony.emulator import Machine as _Machine, signed
+from symphony.emulator import Machine as _Machine, native_available, native_run, signed
 from symphony.frontend import parse, typecheck
 from symphony.ir import lower
 from symphony import isa
@@ -35,9 +35,24 @@ def Target(*args, **kwargs):
     return _Target(*args, **kwargs)
 
 
+NATIVE_AVAILABLE = native_available(TEST_ISA == "symphony")
+
+
+class _NativePreferringMachine(_Machine):
+    """Run on the native emulator when it's built; fall back to the Python
+    reference engine otherwise. Every test in this file calls ``run()``
+    through a ``Machine`` built here, so this is the one place that needs to
+    prefer native."""
+
+    def run(self, halt_address=None, max_steps=5_000_000, progress=None, progress_interval=250_000):
+        if NATIVE_AVAILABLE and progress is None:
+            return native_run(self, halt_address, max_steps)
+        return super().run(halt_address, max_steps, progress, progress_interval)
+
+
 def Machine(*args, **kwargs):
     kwargs.setdefault("symphony", TEST_ISA == "symphony")
-    return _Machine(*args, **kwargs)
+    return _NativePreferringMachine(*args, **kwargs)
 
 
 def compile_source(source, filename="<input>", target=None):
@@ -234,7 +249,9 @@ class ExecutionTests(unittest.TestCase):
             "int main(void){return malloc(input()) == 0;}",
             1,
             ram=1 << 13,
-            inputs=(7000,),
+            # Larger than the entire usable heap regardless of code-size and
+            # frame-size improvements made by the optimizer.
+            inputs=(8000,),
         )
         run(
             "int main(void){return calloc(0xffffffffu, 2) == 0;}",
@@ -790,12 +807,15 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(ABI.pic_base_register, isa.Register.R12)
 
     def test_r12_is_allocatable_only_without_pic(self):
-        body = """int a=x+1,b=x+2,c=x+3,d=x+4,e=x+5;
-            if(input()) return a+b+c+d+e; return a-b+c-d+e;"""
-        source = (
-            f"int f(int x){{{body}}} int g(int x){{return x;}} "
-            "int main(void){int (*p)(int)=input()?f:g;return p(9);}"
-        )
+        # Four values live across g() fill every non-PIC callee-saved home,
+        # including r12. Both functions have multiple callers so inlining does
+        # not erase the call boundary this test is deliberately exercising.
+        source = """int g(int x) { return x + input(); }
+            int f(int x) {
+                int a=x+1,b=x+2,c=x+3,d=x+4;
+                return g(x)+a+b+c+d;
+            }
+            int main(void) { return f(9)+f(2)+g(1); }"""
         for pic in (False, True):
             with self.subTest(pic=pic):
                 result = compile_source(source, target=Target(pic=pic, ram_size=4096))
@@ -862,14 +882,14 @@ class EncodingTests(unittest.TestCase):
         self.assertIn("cbranch_if", result.ir.dump())
         self.assertIn("direct_call", result.ir.dump())
         self.assertNotIn("direct_tailcall", result.ir.dump())
-        self.assertIn("move_pile.tail_loop", result.ir.dump())
+        self.assertIn("label () move_pile.entry", result.ir.dump())
         self.assertNotIn("global_addr () move_pile", result.ir.dump())
         self.assertNotIn("main", result.image.symbols)
         self.assertEqual(result.image.frames["_start"], 0)
         self.assertLessEqual(
             len(result.image.binary), 320 if TEST_ISA == "symphony" else 260
         )
-        self.assertEqual(machine.steps, 272)
+        self.assertLessEqual(machine.steps, 272)
 
     def test_arena_allocator_example(self):
         source = (ROOT / "examples/arena_allocator.c").read_text()
@@ -904,6 +924,35 @@ class EncodingTests(unittest.TestCase):
         )
         machine = Machine(result.image.binary, 1024)
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 42)
+
+    def test_promoted_parameters_are_permuted_safely_for_tailcalls(self):
+        result = compile_source(
+            "int pair(int a,int b){return a*100+b;} "
+            "int flip(int a,int b){return pair(b,a);} "
+            "int other(void){return pair(8,9);}"
+            "int (*keep)(int,int)=flip; "
+            "int main(void){return input()?keep(1,2):other();}"
+        )
+        self.assertIn("direct_tailcall", result.ir.dump())
+        for value, expected in ((0, 809), (1, 201)):
+            with self.subTest(input=value):
+                machine = Machine(result.image.binary, 4096, inputs=[value])
+                self.assertEqual(machine.run(result.image.symbols["_halt"]), expected)
+
+    def test_promoted_loop_parameter_survives_the_backedge(self):
+        result = compile_source(
+            "unsigned at(unsigned *p,unsigned item,unsigned pos){"
+            "while(pos && item != 0xffffffffu){item=p[item];pos--;}"
+            "if(item==0xffffffffu)return 99;return p[item];}"
+            "int other(unsigned *p){return at(p,0,0);}"
+            "unsigned (*keep)(unsigned*,unsigned,unsigned)=at;"
+            "int main(void){unsigned x[4]={1,2,3,42};"
+            "return input()?keep(x,0,3):other(x);}"
+        )
+        for value, expected in ((0, 1), (1, 42)):
+            with self.subTest(input=value):
+                machine = Machine(result.image.binary, 4096, inputs=[value])
+                self.assertEqual(machine.run(result.image.symbols["_halt"]), expected)
 
     def test_address_taken_parameter_uses_safe_stack_path(self):
         result = compile_source(

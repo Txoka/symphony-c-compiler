@@ -31,6 +31,42 @@ Completed foundations:
 - [x] Fold typed big-endian loads from proven immutable scalar and array globals, including
   zero-addend symbolic pointer initializers, and rerun the global fixed point.
 
+## Benchmark-derived performance priorities
+
+The maintained native-emulator comparison in `docs/example-benchmarks.md`
+shows that the completed SSA pipeline is consistently smaller than GCC and
+already wins several large workloads, but GCC still wins cycles in particular
+on `pi`, `primes`, `insertion_sort`, `dynamic_sensor_report`, and small
+runtime-heavy programs. The remaining gap is primarily code generation and
+loop quality, not another local constant-folding rule.
+
+Implement the following in this order, measuring native termination steps and
+preserving the full suite after each atomic change:
+
+1. [ ] **SSA liveness and allocation.** Retain SSA value identity through
+   allocation; compute block liveness/live intervals or interference; make
+   loop-depth/use-frequency spill decisions; keep loop-carried pointers,
+   bounds, and invariant results in callee-saved registers across calls.
+2. [ ] **Conservative value numbering/CSE.** Reuse repeated arithmetic,
+   address formation, and loads whose memory version is proven unchanged.
+3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
+   work with pointer induction, pointer-limit exits, trip-count facts, and
+   proven bulk-fill/copy idioms. Keep growth-oriented unrolling opt-in.
+4. [ ] **Paired division/remainder.** Recognize same-operand `/` and `%` and
+   lower them to one two-result divmod operation when purity and ordering make
+   that valid.
+5. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
+   redundant spills/reloads, and needless address materializations; iterate
+   with branch/call relaxation.
+6. [ ] **Costed interprocedural specialization.** Consider constant-argument
+   specialization and multi-site inlining only under an explicit size/cycle
+   profitability policy, after the preceding foundations expose their gains.
+
+Do not treat a terminating program alone as a valid benchmark result: compare
+its return value and externally visible output to the reference run. The GCC
+`-O2` runtime `memset` self-recursion incident demonstrated why this check is
+required.
+
 The next milestone is one global fixed point containing only Tier 1 transformations:
 surviving function bodies are never duplicated, and a transformation is kept
 only when it preserves behavior without increasing final code size or runtime.

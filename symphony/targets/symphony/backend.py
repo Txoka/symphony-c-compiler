@@ -5,6 +5,7 @@ from .abi import ABI
 from .assembler import Assembler
 from .config import Image, Target
 from ...middle.model import CompileError, align_up
+from ...middle.ssa.allocate import copy_coalescing_groups, interference_graph
 
 
 class Backend:
@@ -53,7 +54,8 @@ class Backend:
             "return",
         }
         machine_binary = {"+", "-", "&", "|", "^", "<<", ">>"}
-        for instruction in f.instructions:
+        instructions = f.instructions
+        for instruction in instructions:
             if instruction.op not in allowed:
                 return False
             if instruction.op == "binary" and instruction.extra not in machine_binary:
@@ -66,9 +68,10 @@ class Backend:
             return False
 
         a = self.a
+        instructions = f.instructions
         remaining_uses = {}
         definitions = {}
-        for instruction in f.instructions:
+        for instruction in instructions:
             if instruction.dst is not None:
                 definitions[instruction.dst] = instruction
             for value in instruction.args:
@@ -76,7 +79,7 @@ class Backend:
 
         locations = {}
         register_values = {}
-        for instruction in f.instructions:
+        for instruction in instructions:
             if instruction.op == "param":
                 register = instruction.extra[0]
                 locations[instruction.dst] = register
@@ -111,7 +114,7 @@ class Backend:
                     return register
             return free_register()
 
-        for instruction in f.instructions:
+        for instruction in instructions:
             op = instruction.op
             if op in ("param", "const"):
                 continue
@@ -387,8 +390,12 @@ class Backend:
             self.a.emit(isa.push(1))
 
         homes = [self.register_values.get(value) for value in register_arguments]
+        # SSA entry parameters may still live in *any* argument register.
+        # Treat them all as simultaneous sources: otherwise materializing an
+        # early argument can overwrite a later one (for example, a tail call
+        # passing ``(b, a)`` when ``a`` and ``b`` reside in r1 and r2).
         caller_homes = any(
-            home is not None and 3 <= home <= 6 for home in homes
+            home is not None and home in ABI.argument_registers for home in homes
         )
         if not caller_homes:
             for register, value in enumerate(register_arguments, 1):
@@ -448,7 +455,12 @@ class Backend:
     ):
         # The frame pointer follows its saved predecessor, any saved value
         # registers, and an optional saved r13. Argument eight is at the entry SP.
-        offset = 4 * (position - 7 + saved_register_count + int(link_saved))
+        # The caller always pushes a full word regardless of the parameter's
+        # width; on this big-endian target the value occupies that word's
+        # low-order bytes, so a narrower load must start further into it.
+        offset = 4 * (position - 7 + saved_register_count + int(link_saved)) + (
+            4 - type_.size
+        )
         if offset <= 0xFFFF:
             self.a.emit(isa.alu("add", 7, ABI.frame_pointer, offset, True))
         else:
@@ -504,16 +516,21 @@ class Backend:
         """Lay out addressable objects and spill slots for live values."""
         offset = 0
         self.locals = {}
+        instructions = f.instructions
         promoted = {
             instruction.extra[1]
-            for instruction in f.instructions
+            for instruction in instructions
             if instruction.op == "param"
         }
         addressed = {
             instruction.extra
-            for instruction in f.instructions
+            for instruction in instructions
             if instruction.op == "local_addr"
         }
+        # An unused parameter has no local_addr (the lowerer only emits one on
+        # actual use), but the prologue below still stores its incoming
+        # argument register somewhere before anything has proven it unused.
+        addressed |= {symbol.key for symbol in f.params}
         for symbol in f.params + f.locals:
             if symbol.key in promoted or symbol.key not in addressed:
                 continue
@@ -524,7 +541,7 @@ class Backend:
         definitions = {}
         writes = {}
         uses = {}
-        for index, instruction in enumerate(f.instructions):
+        for index, instruction in enumerate(instructions):
             if instruction.dst is not None:
                 definitions.setdefault(instruction.dst, []).append(instruction)
                 writes.setdefault(instruction.dst, []).append(index)
@@ -549,21 +566,21 @@ class Backend:
             for value in uses
             if value not in self.rematerialized and value in writes
         )
-        # A small global allocation for values that cross basic-block boundaries.
-        # Callee-saved homes remain valid over calls, branches, and loop backedges.
+        # A small global allocation across the complete CFG. Values live over a
+        # real call use callee-saved homes; ordinary branches preserve r3-r6.
         # Saving only selected registers keeps low-pressure functions inexpensive.
         scores = {
             value: sum(len(item.args) for item in definitions.get(value, ()))
             + sum(
                 instruction.args.count(value)
-                for instruction in f.instructions
+                for instruction in instructions
             )
             for value in live_values
         }
         definition_indexes = {}
         use_indexes = {}
         call_indexes = []
-        for index, instruction in enumerate(f.instructions):
+        for index, instruction in enumerate(instructions):
             if instruction.dst is not None:
                 definition_indexes.setdefault(instruction.dst, []).append(index)
             for value in instruction.args:
@@ -580,46 +597,71 @@ class Backend:
                 call_indexes.append(index)
 
         pinned = {}
-        for index, instruction in enumerate(f.instructions):
+        for index, instruction in enumerate(instructions):
             if instruction.op != "halt" or not instruction.args:
                 continue
             value = instruction.args[0]
             if (
                 index > 0
-                and f.instructions[index - 1].op in ("call", "direct_call")
-                and f.instructions[index - 1].dst == value
+                and instructions[index - 1].op in ("call", "direct_call")
+                and instructions[index - 1].dst == value
             ):
                 # The ABI already leaves this immediately consumed result in r1.
                 pinned[value] = 1
 
-        ordered = sorted(live_values, key=lambda value: (-scores[value], value))
-        caller_candidates = [
-            value
-            for value in ordered
-            if value not in pinned
-            if value in definition_indexes
-            and value in use_indexes
-            and not any(
-                min(definition_indexes[value]) < call < max(use_indexes[value])
-                for call in call_indexes
+        graph, across_calls = interference_graph(f)
+        groups = copy_coalescing_groups(f, live_values, graph, pinned)
+        group_for = {
+            value: index for index, group in enumerate(groups) for value in group
+        }
+        group_graph = {index: set() for index in range(len(groups))}
+        for value, neighbours in graph.items():
+            if value not in group_for:
+                continue
+            group = group_for[value]
+            group_graph[group].update(
+                group_for[other]
+                for other in neighbours
+                if other in group_for and group_for[other] != group
             )
-        ][:4]
+        group_scores = {
+            index: sum(scores[value] for value in group)
+            for index, group in enumerate(groups)
+        }
+        ordered = sorted(
+            range(len(groups)),
+            key=lambda group: (
+                -len(group_graph[group]), -group_scores[group], min(groups[group])
+            ),
+        )
         self.register_values = dict(pinned)
-        self.register_values.update({
-            value: register
-            for value, register in zip(caller_candidates, range(3, 7))
-        })
-        remaining = [value for value in ordered if value not in self.register_values]
         callee_registers = [8, 9, 10]
         if not self.target.pic:
             callee_registers.append(12)
-        callee_candidates = remaining[:len(callee_registers)]
-        self.register_values.update(
-            {
-                value: register
-                for value, register in zip(callee_candidates, callee_registers)
+        for group in ordered:
+            values = groups[group]
+            assigned = {
+                self.register_values[value]
+                for value in values
+                if value in self.register_values
             }
-        )
+            if assigned:
+                register = next(iter(assigned))
+                self.register_values.update((value, register) for value in values)
+                continue
+            forbidden = {
+                self.register_values.get(other)
+                for neighbour in group_graph[group]
+                for other in groups[neighbour]
+            }
+            choices = (
+                callee_registers
+                if any(value in across_calls for value in values)
+                else [3, 4, 5, 6, *callee_registers]
+            )
+            register = next((item for item in choices if item not in forbidden), None)
+            if register is not None:
+                self.register_values.update((value, register) for value in values)
         live_values = [
             value for value in live_values if value not in self.register_values
         ]
@@ -632,7 +674,8 @@ class Backend:
     def function(self, f):
         a = self.a
         a.label(f.name)
-        for instruction in f.instructions:
+        instructions = f.instructions
+        for instruction in instructions:
             if instruction.op == "init_pic" and self.target.pic:
                 a.emit(isa.counter(ABI.pic_base_register))
             elif instruction.op == "init_stack":
@@ -652,7 +695,7 @@ class Backend:
         uses_frame = frame > 0 or len(f.params) > len(ABI.argument_registers)
         returns_to_caller = any(
             instruction.op in ("return", "tailcall", "direct_tailcall")
-            for instruction in f.instructions
+            for instruction in instructions
         )
         saves_link = returns_to_caller and any(
             instruction.op in ("call", "direct_call")
@@ -660,11 +703,11 @@ class Backend:
                 instruction.op == "binary"
                 and instruction.extra in ("*", "/", "%")
             )
-            for instruction in f.instructions
+            for instruction in instructions
         )
-        saved_registers = sorted(
+        saved_registers = sorted({
             register for register in self.register_values.values() if register >= 8
-        )
+        })
         staged_seventh = len(f.params) >= len(ABI.argument_registers)
         self.frames[f.name] = (
             frame + 4 * len(saved_registers)
@@ -687,7 +730,7 @@ class Backend:
                 a.emit(isa.alu("sub", 14, 14, 7))
         promoted = {
             instruction.extra[1]: instruction
-            for instruction in f.instructions
+            for instruction in instructions
             if instruction.op == "param"
         }
         if staged_seventh:
@@ -755,8 +798,9 @@ class Backend:
                 a.emit(isa.store(sym.type.size, 7, 1))
         epilogue = self.unique()
         terminated = False
-        for instruction_index, i in enumerate(f.instructions):
+        for instruction_index, i in enumerate(instructions):
             op = i.op
+            result_register = 1
             if op in ("param", "init_pic", "init_stack", "relocate_globals"):
                 continue
             if op == "label":
@@ -768,15 +812,18 @@ class Backend:
             if op == "const":
                 if i.dst in self.rematerialized:
                     continue
-                a.emit(isa.cheap_constant(1, i.extra))
+                result_register = self.register_values.get(i.dst, 1)
+                a.emit(isa.cheap_constant(result_register, i.extra))
             elif op == "global_addr":
                 if i.dst in self.rematerialized:
                     continue
-                a.address(1, i.extra)
+                result_register = self.register_values.get(i.dst, 1)
+                a.address(result_register, i.extra)
             elif op == "local_addr":
                 if i.dst in self.rematerialized:
                     continue
-                self.slot_address(self.locals[i.extra], 1)
+                result_register = self.register_values.get(i.dst, 1)
+                self.slot_address(self.locals[i.extra], result_register)
             elif op == "stack_mark":
                 a.emit(isa.mov(1, 14))
             elif op == "stack_alloc":
@@ -844,13 +891,15 @@ class Backend:
                 a.branch("jne", loop)
                 continue
             elif op in ("cast", "copy"):
-                self.get(i.args[0], 1)
+                result_register = self.register_values.get(i.dst, 1)
+                self.get(i.args[0], result_register)
                 if op == "cast":
-                    self.normalize(1, i.type)
+                    self.normalize(result_register, i.type)
             elif op == "load":
-                self.get(i.args[0], 1)
-                a.emit(isa.load(i.type.size, 1, 1))
-                self.normalize(1, i.type)
+                result_register = self.register_values.get(i.dst, 1)
+                self.get(i.args[0], result_register)
+                a.emit(isa.load(i.type.size, result_register, result_register))
+                self.normalize(result_register, i.type)
             elif op == "store":
                 self.get(i.args[0], 1)
                 self.get(i.args[1], 2)
@@ -870,12 +919,22 @@ class Backend:
                 a.label(end)
                 continue
             elif op == "unary":
-                self.get(i.args[0], 1)
+                result_register = self.register_values.get(i.dst, 1)
+                self.get(i.args[0], result_register)
                 if i.extra == "!":
+                    # comparison() currently materializes its Boolean in r1.
+                    if result_register != 1:
+                        a.emit(isa.mov(1, result_register))
                     a.emit(isa.mov(2, 0))
                     self.comparison("==", False)
+                    result_register = 1
                 else:
-                    a.emit(isa.alu("sub" if i.extra == "-" else "nor", 1, 0, 1))
+                    a.emit(isa.alu(
+                        "sub" if i.extra == "-" else "nor",
+                        result_register,
+                        0,
+                        result_register,
+                    ))
             elif op == "binary":
                 left, right = i.args
                 immediate = None
@@ -895,12 +954,14 @@ class Backend:
                             if value <= 0xFFFF:
                                 left, right = right, left
                                 immediate = value
-                self.get(left, 1)
-                if immediate is None:
-                    self.get(right, 2)
                 if i.extra in ("==", "!=", "<", "<=", ">", ">="):
+                    self.get(left, 1)
+                    if immediate is None:
+                        self.get(right, 2)
                     self.comparison(i.extra, i.type.signed, immediate)
                 elif i.extra in ("*", "/", "%"):
+                    self.get(left, 1)
+                    self.get(right, 2)
                     helper = (
                         "__dyn_mul"
                         if i.extra == "*"
@@ -910,6 +971,24 @@ class Backend:
                     )
                     a.call(helper)
                 else:
+                    result_register = self.register_values.get(i.dst, 1)
+                    commutative = i.extra in ("+", "&", "|", "^")
+                    if (
+                        immediate is None
+                        and commutative
+                        and self.register_values.get(right) == result_register
+                    ):
+                        left, right = right, left
+                    preserve_right = (
+                        immediate is None
+                        and left != right
+                        and self.register_values.get(right) == result_register
+                    )
+                    if preserve_right:
+                        self.get(right, 2)
+                    self.get(left, result_register)
+                    if immediate is None and not preserve_right:
+                        self.get(right, 2)
                     name = {
                         "+": "add",
                         "-": "sub",
@@ -922,8 +1001,8 @@ class Backend:
                     a.emit(
                         isa.alu(
                             name,
-                            1,
-                            1,
+                            result_register,
+                            result_register,
                             immediate if immediate is not None else 2,
                             immediate is not None,
                         )
@@ -1022,7 +1101,7 @@ class Backend:
             elif op == "return":
                 if i.args:
                     self.get(i.args[0], 1)
-                if instruction_index + 1 != len(f.instructions):
+                if instruction_index + 1 != len(instructions):
                     a.branch("jmp", epilogue)
                 continue
             elif op == "halt":
@@ -1043,10 +1122,15 @@ class Backend:
                     a.label("_halt")
                     a.emit(isa.jump("jmp", 7))
                 terminated = True
-                break
+                # A graph rewrite may serialize another reachable block after
+                # a halt block (notably an explicit critical-edge trampoline
+                # appended by SSA destruction). Halt has no fallthrough, but
+                # those later labels still have to be emitted for incoming
+                # branches. `terminated` suppresses only the final epilogue.
+                continue
             else:
                 raise AssertionError(f"unhandled IR opcode {op}")
-            self.put(i.dst)
+            self.put(i.dst, result_register)
         if terminated:
             return
         a.label(epilogue)

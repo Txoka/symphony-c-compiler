@@ -1,0 +1,33 @@
+"""Default-on switches for independently bisectable SSA optimizations.
+
+Tests and experiments may temporarily set an entry in ``OPTIMIZATIONS`` to
+``False``.  Required SSA construction, verification, destruction, intrinsic
+lowering, and target legalization are deliberately not represented here.
+"""
+
+OPTIMIZATIONS = {
+    "sccp": True,
+    "global_copy_propagation": True,
+    "direct_call_identification": True,
+    "algebraic_simplification": True,
+    "strength_reduction": True,
+    "loop_invariant_hoisting": True,
+    "induction_strength_reduction": True,
+    "redundant_loop_memory_elimination": True,
+    "comparison_branch_fusion": True,
+    "dead_value_elimination": True,
+    "cfg_simplification": True,
+    "readonly_parameter_promotion": True,
+    "tail_call_elimination": True,
+    "self_tail_loop_lowering": True,
+    "unreachable_symbol_elimination": True,
+    "immutable_global_folding": True,
+    "unused_stack_initialization_removal": True,
+    "single_call_inlining": True,
+}
+
+
+def enabled(name):
+    """Return whether the named optional optimization is enabled."""
+    return OPTIMIZATIONS[name]
+

@@ -488,6 +488,49 @@ compute:
         with pytest.raises(ValueError, match="__dyn_heap_anchor"):
             toolchain.link([obj], entry_symbol=None)
 
+    def test_la_symbol_addend_relocation(self, toolchain, tmp_path):
+        """`la symbol+N` must retain N in its abs32 relocation.
+
+        GCC's heap runtime initializes its bump pointer from
+        ``__dyn_heap_anchor+3``.  The assembler originally parsed addends
+        for data and call operands but recorded the whole ``la`` operand as
+        a literal symbol name, making that runtime impossible to link.
+        """
+        asm_source = """\
+\t.text
+\t.global\t_start
+_start:
+\tla\tr1, __dyn_heap_anchor+3
+\tlink_return
+"""
+        obj = toolchain.assemble_asm_source(asm_source, tmp_path, name="la_addend")
+        result, _machine, symtab = toolchain.link_and_run([obj], entry_symbol="_start")
+        assert result == symtab["__dyn_heap_anchor"] + 3
+
+    def test_optimized_runtime_does_not_recurse_through_memset(self, toolchain, tmp_path):
+        """The target runtime must not compile its own memset as a builtin call.
+
+        At ``-O2``, without ``-fno-builtin``, GCC rewrote memset's byte loop
+        into ``link_call memset`` with the original arguments.  Any runtime
+        use therefore self-recursed until stack corruption.  A volatile
+        function pointer prevents the test program itself from folding the
+        call away and exercises the separately optimized runtime object.
+        """
+        src = """
+        void *memset(void *, int, unsigned int);
+        int main(void) {
+            char bytes[4] = {0, 0, 0, 0};
+            void *(*volatile fill)(void *, int, unsigned int) = memset;
+            fill(bytes, 23, 4);
+            return bytes[3];
+        }
+        """
+        result, _machine, _symtab = toolchain.build_and_run(
+            src, tmp_path, name="runtime_memset", optimize="-O2",
+            runtime_optimize="-O2", max_steps=10_000,
+        )
+        assert result == 23
+
     def test_frame_pointer_not_reused_as_general_register(self, toolchain, tmp_path):
         """Regression test for the r11-not-FIXED_REGISTERS bug fixed
         alongside this test (see symphony.h's long comment above

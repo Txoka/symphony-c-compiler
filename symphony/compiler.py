@@ -3,9 +3,90 @@
 from dataclasses import dataclass
 from .frontends.c import CFrontend
 from .frontends.protocol import SourceFrontend
-from .middle.passes import optimize
+from .middle.lowering import lower_intrinsics
+from .middle.ssa import (
+    construct,
+    destruct,
+    verify,
+    sparse_conditional_constant_propagation,
+    hoist_loop_invariants,
+    remove_dead_values,
+    inline_single_call_functions,
+    simplify_control_flow,
+    reduce_induction_strength,
+    eliminate_redundant_loop_memory,
+    propagate_global_copies,
+    simplify_algebra,
+    fuse_comparison_branches,
+    reduce_strength,
+    identify_direct_calls,
+    promote_readonly_parameters,
+    eliminate_tail_calls,
+    lower_self_tail_calls_to_loops,
+    remove_unreachable_symbols,
+    fold_immutable_global_loads,
+    remove_unused_stack_initialization,
+)
 from .targets.symphony import generate, Target
 from .targets.symphony.legalize import legalize_runtime_arithmetic
+from .middle.ssa.optimizations import enabled as optimization_enabled
+
+
+def _optional_optimization(name, function):
+    """Gate one optional pass through the centralized default-on registry."""
+    def run(*args, **kwargs):
+        return function(*args, **kwargs) if optimization_enabled(name) else False
+    return run
+
+
+sparse_conditional_constant_propagation = _optional_optimization(
+    "sccp", sparse_conditional_constant_propagation
+)
+propagate_global_copies = _optional_optimization(
+    "global_copy_propagation", propagate_global_copies
+)
+identify_direct_calls = _optional_optimization(
+    "direct_call_identification", identify_direct_calls
+)
+simplify_algebra = _optional_optimization(
+    "algebraic_simplification", simplify_algebra
+)
+reduce_strength = _optional_optimization("strength_reduction", reduce_strength)
+hoist_loop_invariants = _optional_optimization(
+    "loop_invariant_hoisting", hoist_loop_invariants
+)
+reduce_induction_strength = _optional_optimization(
+    "induction_strength_reduction", reduce_induction_strength
+)
+eliminate_redundant_loop_memory = _optional_optimization(
+    "redundant_loop_memory_elimination", eliminate_redundant_loop_memory
+)
+fuse_comparison_branches = _optional_optimization(
+    "comparison_branch_fusion", fuse_comparison_branches
+)
+remove_dead_values = _optional_optimization("dead_value_elimination", remove_dead_values)
+simplify_control_flow = _optional_optimization("cfg_simplification", simplify_control_flow)
+promote_readonly_parameters = _optional_optimization(
+    "readonly_parameter_promotion", promote_readonly_parameters
+)
+eliminate_tail_calls = _optional_optimization(
+    "tail_call_elimination", eliminate_tail_calls
+)
+lower_self_tail_calls_to_loops = _optional_optimization(
+    "self_tail_loop_lowering", lower_self_tail_calls_to_loops
+)
+remove_unreachable_symbols = _optional_optimization(
+    "unreachable_symbol_elimination", remove_unreachable_symbols
+)
+fold_immutable_global_loads = _optional_optimization(
+    "immutable_global_folding", fold_immutable_global_loads
+)
+remove_unused_stack_initialization = _optional_optimization(
+    "unused_stack_initialization_removal", remove_unused_stack_initialization
+)
+inline_single_call_functions = _optional_optimization(
+    "single_call_inlining", inline_single_call_functions
+)
 
 
 @dataclass
@@ -31,9 +112,98 @@ class Compiler:
         return self.finish(self.frontend.lower_project(sources))
 
     def finish(self, frontend) -> Compilation:
-        ir = optimize(frontend.ir)
+        ir = frontend.ir
+        for function in ir.functions:
+            # Required legalization, not optimization: these intrinsics have
+            # no C body, only a target-instruction lowering.
+            lower_intrinsics(function)
+            construct(function)
+            verify(function)
+            sparse_conditional_constant_propagation(function)
+            verify(function)
+            propagate_global_copies(function)
+            verify(function)
+            identify_direct_calls(function)
+            verify(function)
+            simplify_algebra(function)
+            verify(function)
+            propagate_global_copies(function)
+            verify(function)
+            reduce_strength(function)
+            verify(function)
+            hoist_loop_invariants(function)
+            verify(function)
+            reduce_induction_strength(function)
+            verify(function)
+            eliminate_redundant_loop_memory(function)
+            verify(function)
+            fuse_comparison_branches(function)
+            verify(function)
+            remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
+            verify(function)
+        # Make surviving runtime arithmetic ordinary call edges after scalar
+        # folding but before call-graph optimization, so wrapper helpers can
+        # participate in inlining and reachability.
         legalize_runtime_arithmetic(ir)
-        ir = optimize(ir)
+        # Form and lower self tails before selecting inline candidates.  Once
+        # a self call is a backedge it no longer disqualifies an otherwise
+        # single-caller function from being inlined into that caller.
+        for function in ir.functions:
+            promote_readonly_parameters(function)
+            verify(function)
+            eliminate_tail_calls(function, self_only=True)
+            verify(function)
+            lower_self_tail_calls_to_loops(function)
+            verify(function)
+            propagate_global_copies(function)
+            verify(function)
+            remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
+            verify(function)
+        # Candidate selection must see the live call graph.  In particular,
+        # arithmetic forwarding wrappers can have dead runtime-only callers;
+        # counting those stale edges would incorrectly prevent their sole
+        # reachable call site from being inlined.
+        remove_unreachable_symbols(ir)
+        inline_single_call_functions(ir)
+        for function in ir.functions:
+            verify(function)
+            identify_direct_calls(function)
+            verify(function)
+            promote_readonly_parameters(function)
+            verify(function)
+            eliminate_tail_calls(function)
+            verify(function)
+            lower_self_tail_calls_to_loops(function)
+            verify(function)
+        while fold_immutable_global_loads(ir):
+            for function in ir.functions:
+                sparse_conditional_constant_propagation(function)
+                verify(function)
+                remove_dead_values(function)
+                verify(function)
+                simplify_control_flow(function)
+                verify(function)
+        for function in ir.functions:
+            sparse_conditional_constant_propagation(function)
+            verify(function)
+            identify_direct_calls(function)
+            verify(function)
+            remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
+            verify(function)
+        remove_unreachable_symbols(ir)
+        remove_unused_stack_initialization(ir)
+        for function in ir.functions:
+            remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
+            verify(function)
+            destruct(function)
         return Compilation(
             frontend.parsed,
             frontend.typed,

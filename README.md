@@ -287,6 +287,28 @@ of dyncc's own build. See [gcc-backend/README.md](gcc-backend/README.md)
 for how to build the cross-compiler, assemble its output, and run a fair
 comparison.
 
+To build the real same-ISA GCC toolchain and generate the maintained example
+comparison table in one command:
+
+```sh
+python tools/benchmark_examples.py --build-gcc
+```
+
+The first run installs the host build dependencies on Debian/Ubuntu systems,
+clones GCC 14 into `.cache/symphony-gcc/`, applies the local Symphony target,
+and builds `xgcc` plus `libgcc.a`. It can take some time. To do that step
+explicitly (or choose a different cache directory), use:
+
+```sh
+tools/build_symphony_gcc.sh --cache /path/to/gcc-cache
+SYMPHONY_GCC_PREFIX=/path/to/gcc-cache/build-stage1 \
+  python tools/benchmark_examples.py
+```
+
+The generated [example benchmark table](docs/example-benchmarks.md) compares
+the current checkout only with GCC `-Os` and `-O2`; it uses final target binary
+size and native-emulator instruction steps with documented deterministic inputs.
+
 ## Project structure
 
 ```text

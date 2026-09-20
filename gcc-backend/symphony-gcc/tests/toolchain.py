@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 GCC_BACKEND_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = GCC_BACKEND_ROOT / "runtime"
 TOOLS_DIR = GCC_BACKEND_ROOT / "tools"
+INCLUDE_DIR = GCC_BACKEND_ROOT / "include"
 
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
@@ -88,7 +89,7 @@ class Toolchain:
 
     def compile_to_asm(self, c_source_path, asm_out_path, optimize="-O0",
                         extra_flags=()):
-        cmd = [str(self.xgcc), f"-B{self.gcc_dir}/", "-S", optimize,
+        cmd = [str(self.xgcc), f"-B{self.gcc_dir}/", f"-I{INCLUDE_DIR}", "-S", optimize,
                str(c_source_path), "-o", str(asm_out_path), *extra_flags]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -151,7 +152,13 @@ class Toolchain:
         stem = c_path.stem
         asm_path = tmp_path / f"runtime_{stem}.s"
         obj_path = tmp_path / f"runtime_{stem}.o"
-        self.compile_to_asm(c_path, asm_path, optimize=optimize)
+        # These sources provide libc-like primitives themselves.  At -O2 GCC
+        # otherwise recognizes (for example) our memset implementation as a
+        # builtin and rewrites its loop into a call to memset, producing an
+        # immediate self-recursive runtime function.
+        self.compile_to_asm(
+            c_path, asm_path, optimize=optimize, extra_flags=("-fno-builtin",)
+        )
         self.assemble(asm_path, obj_path)
         obj = ObjectFile.load(obj_path)
         self._runtime_object_cache[key] = obj

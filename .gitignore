@@ -4,6 +4,7 @@ __pycache__/
 *.so
 *.pyd
 .venv/
+.cache/
 build/
 dist/
 *.bin
