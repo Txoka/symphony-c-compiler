@@ -279,13 +279,25 @@ The next substantial opportunities are dead-global elimination, immutable-global
 
 ## Comparing against GCC
 
-`gcc-backend/` is a bootstrap GCC machine-description target used purely to
-benchmark dyncc's codegen/optimizer output against real GCC (`-Os`/`-O2`) on
-the same example programs, by hijacking GCC's `moxie` target and
-hand-assembling its output into real Symphony machine code. It is not part
-of dyncc's own build. See [gcc-backend/README.md](gcc-backend/README.md)
-for how to build the cross-compiler, assemble its output, and run a fair
-comparison.
+`gcc-backend/` holds two independent GCC targets for this ISA, neither of
+which is part of dyncc's own build:
+
+- [`gcc-backend/symphony-gcc/`](gcc-backend/symphony-gcc/README.md) is a
+  **real** GCC backend — a genuine `.md`/`.cc`/`.h` machine-description
+  port (triple `symphony-elf`) that emits real target assembly, consumed
+  by this project's own from-scratch assembler+linker (no ELF, no `as`,
+  no `ld`) to produce a flat binary runnable on `symphony/emulator`, and
+  linked against a real `libgcc.a` plus a runtime library (printf family,
+  heap, I/O intrinsics) ported from dyncc's own C sources. It supports
+  both Symphony and Dynphony encodings. See that README for the build
+  recipe, known gaps, and a full dcc-vs-GCC size/step comparison table
+  across `examples/*.c`.
+- `gcc-backend/dynphony/` is an older, narrower bootstrap target used
+  purely to benchmark dyncc's codegen/optimizer output against real GCC
+  (`-Os`/`-O2`), by hijacking GCC's `moxie` target and hand-assembling its
+  output into Symphony machine code — no real machine description, no
+  libgcc, no linker of its own. See
+  [gcc-backend/README.md](gcc-backend/README.md) for how to build it.
 
 To build the real same-ISA GCC toolchain and generate the maintained example
 comparison table in one command:
