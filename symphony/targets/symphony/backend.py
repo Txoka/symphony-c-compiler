@@ -67,7 +67,12 @@ class Backend:
         branch = (
             address + self.instruction_size(isa.jump("jne", 7))
             if self.target.pic
-            else (4 if self.target.load_address <= 0xFF00 else
+            # The clear loop's final address within the image isn't known yet
+            # (layout hasn't happened), so bound it by the worst case the
+            # relaxer could still resolve to a short branch for: the target
+            # RAM's highest addressable byte. Matches Assembler.relax_controls,
+            # which picks a short branch only when load_address + offset <= 0xFFFF.
+            else (4 if self.target.load_address + self.target.ram_size - 1 <= 0xFFFF else
                   (16 if self.target.fixed_instruction_width else 15))
         )
         control = (

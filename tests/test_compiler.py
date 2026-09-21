@@ -410,6 +410,27 @@ class ExecutionTests(unittest.TestCase):
         never_zeroes = next(global_ for global_ in never.ir.globals if global_.symbol.name == "zeroes")
         self.assertEqual(never_zeroes.section, "data")
 
+    def test_bss_clear_branch_cost_accounts_for_ram_size_not_just_load_address(self):
+        # clear_plan_size estimates the branch encoding used by the emitted
+        # BSS-clear loop before layout has happened. The real assembler
+        # (Assembler.relax_controls) picks a short branch based on the
+        # *resolved* address, load_address + offset-within-image, against
+        # 0xFFFF -- so a target with load_address=0 can still need a long
+        # branch once the image is large enough. The estimate must not use
+        # load_address alone, or it can underestimate the loop's cost and
+        # wrongly select BSS placement over DATA.
+        from symphony.targets.symphony.backend import Backend
+
+        backend = Backend.__new__(Backend)
+
+        backend.target = Target(load_address=0, ram_size=1 << 16)
+        small_ram_cost = backend.clear_plan_size(64, 4)
+
+        backend.target = Target(load_address=0, ram_size=1 << 20)
+        large_ram_cost = backend.clear_plan_size(64, 4)
+
+        self.assertGreater(large_ram_cost, small_ram_cost)
+
     def test_big_endian_and_unaligned(self):
         run(
             "int main(void){int x=0x12345678; unsigned char *p=(unsigned char*)&x; return p[0]*256+p[3];}",
