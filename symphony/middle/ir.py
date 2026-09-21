@@ -193,6 +193,7 @@ class Lowerer:
         self.breaks = []
         self.case_labels = {}
         self.scopes = []
+        self.scope_markers = {}
         self.dynamic_locals = {}
 
     def finish(self):
@@ -212,6 +213,9 @@ class Lowerer:
     def label(self):
         self.label_id += 1
         return f"{self.f.name}.L{self.label_id}"
+
+    def user_label(self, name):
+        return f"{self.f.name}.label.{name}"
 
     def mark(self, label):
         self.emit("label", extra=label, result=False)
@@ -496,8 +500,12 @@ class Lowerer:
             )
             marker = self.emit("stack_mark", type_=UINT) if dynamic else None
             self.scopes.append(marker)
+            if n.value is not None:
+                self.scope_markers[n.value] = marker
             for child in n.children:
                 self.statement(child)
+            if n.value is not None:
+                self.scope_markers.pop(n.value, None)
             self.scopes.pop()
             if marker is not None:
                 self.emit("stack_restore", (marker,), result=False)
@@ -612,6 +620,8 @@ class Lowerer:
             if op == "for" and n.children[0].op == "declare" and n.children[0].value[3] is not None:
                 loop_marker = self.emit("stack_mark", type_=UINT)
                 self.scopes.append(loop_marker)
+            if n.value is not None:
+                self.scope_markers[n.value] = loop_marker
             if op == "for":
                 self.statement(n.children[0])
                 cond = n.children[1]
@@ -633,6 +643,8 @@ class Lowerer:
             self.mark(end)
             self.loops.pop()
             self.breaks.pop()
+            if n.value is not None:
+                self.scope_markers.pop(n.value, None)
             if loop_marker is not None:
                 self.scopes.pop()
                 self.emit("stack_restore", (loop_marker,), result=False)
@@ -652,6 +664,23 @@ class Lowerer:
             self.mark(self.case_labels[id(n)])
             for child in n.children:
                 self.statement(child)
+        elif op == "label":
+            self.mark(self.user_label(n.value))
+            self.statement(n.children[0])
+        elif op == "goto":
+            name, source_scopes, target_scopes = n.value
+            common = 0
+            while (
+                common < len(source_scopes)
+                and common < len(target_scopes)
+                and source_scopes[common] == target_scopes[common]
+            ):
+                common += 1
+            for scope_id in reversed(source_scopes[common:]):
+                marker = self.scope_markers.get(scope_id)
+                if marker is not None:
+                    self.emit("stack_restore", (marker,), result=False)
+            self.jump(self.user_label(name))
         else:
             raise AssertionError(f"unhandled typed statement {op}")
 

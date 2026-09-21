@@ -191,6 +191,36 @@ class ExecutionTests(unittest.TestCase):
             42,
         )
 
+    def test_goto_forward_backward_and_vla_scope_exit(self):
+        run(
+            """int main(void) {
+                int value = 0;
+                goto ready;
+                value = -1;
+            ready:
+                value += 2;
+            again:
+                value += 10;
+                if (value < 42) goto again;
+                return value;
+            }""",
+            42,
+        )
+        # The run helper also asserts that the stack pointer returns to zero.
+        run(
+            """int main(void) {
+                int count = 3;
+                {
+                    int values[count];
+                    values[0] = 9;
+                    goto done;
+                }
+            done:
+                return 42;
+            }""",
+            42,
+        )
+
     def test_short_circuit_and_conditional(self):
         run(
             """int main(void){int x=0; int a=0 && ++x; int b=1 || ++x;
@@ -910,6 +940,12 @@ class DiagnosticTests(unittest.TestCase):
             ("int main(void){switch(1){default:return 0;default:return 1;}}", "duplicate default"),
             ("int main(void){int a[2]={[2]=1};return 0;}", "outside the array"),
             ("int main(void){union U{int a;int b;};union U u={1,2};return 0;}", "exactly one"),
+            ("int main(void){goto missing;return 0;}", "undefined label"),
+            ("int main(void){x:return 0;x:return 1;}", "duplicate label"),
+            (
+                "int main(void){goto inside;{int n=2;int values[n];inside:return 0;}}",
+                "enters the scope",
+            ),
         ]
         for source, message in cases:
             with self.subTest(source=source):

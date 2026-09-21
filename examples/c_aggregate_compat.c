@@ -1,4 +1,4 @@
-/* Exercises switch, designated/brace-elided initializers, unions, and copies. */
+/* Exercises goto, switch, designated/brace-elided initializers, unions, and copies. */
 #include <stdio.h>
 
 struct Pair {
@@ -23,6 +23,12 @@ int main(void) {
     union Word selector = { .bytes = { 0, 0, 0, 3 } };
 
     selected = original;
+    goto dispatch;
+
+unexpected:
+    return -2;
+
+dispatch:
     switch (selector.value) {
     case 1:
         return 0;

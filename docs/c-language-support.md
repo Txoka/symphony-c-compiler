@@ -106,6 +106,9 @@ operations do not pull those helpers into the image.
   fallthrough, and `break`. The selector is evaluated once and currently
   lowers to a linear comparison-and-branch chain; no jump-table or hash
   dispatch is emitted.
+- Function-scope labels and forward/backward `goto`. Jumps leaving VLA scopes
+  release their dynamic stack storage; jumps entering the scope of a variably
+  modified object are diagnosed, as required by C.
 - Function declarations and definitions, direct calls, indirect function-pointer
   calls, ordinary recursion, and optimized tail calls.
 - Scalar parameters and scalar return values. Structures may be returned by
@@ -115,6 +118,11 @@ operations do not pull those helpers into the image.
 
 The program entry point must be `int main(void)` or `int main()`. In this subset,
 an empty parameter list means no parameters. Falling out of `main` returns zero.
+
+[`examples/c_aggregate_compat.c`](../examples/c_aggregate_compat.c) is an
+executable combined example of forward `goto`, `switch`, designated and
+brace-elided initialization, unions, aggregate assignment, and structure
+returns.
 
 ## Unsupported or incomplete C features
 
@@ -128,7 +136,6 @@ an empty parameter list means no parameters. Falling out of `main` returns zero.
 | Initializers | Some complex continuation cases after nested designated initializers |
 | Aggregate members | Anonymous members |
 | Arrays | Flexible array members |
-| Control flow | `goto` and labels used by `goto` |
 | Functions | Variadic functions, old-style definitions, aggregate parameter conventions, and union-return conventions |
 | Hosted runtime | File I/O, locale, and the rest of a hosted C library beyond the small freestanding headers listed below |
 | Character support | Wide and Unicode character/string literal types |

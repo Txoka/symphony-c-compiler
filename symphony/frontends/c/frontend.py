@@ -114,6 +114,11 @@ class Frontend:
         self.loop_depth = 0
         self.break_depth = 0
         self.switch_depth = 0
+        self.scope_serial = 0
+        self.scope_ids = [0]
+        self.scope_vlas = [False]
+        self.labels = {}
+        self.gotos = []
         self.return_type = VOID
         self.namespace = namespace
 
@@ -131,6 +136,34 @@ class Frontend:
             storage,
             name if storage in ("global", "function") else f"{name}.{self.serial}",
         )
+
+    def push_scope(self):
+        self.scopes.append({})
+        self.typedefs.append({})
+        self.records.append({})
+        self.enum_tags.append({})
+        self.scope_serial += 1
+        self.scope_ids.append(self.scope_serial)
+        self.scope_vlas.append(False)
+        return self.scope_serial
+
+    def pop_scope(self):
+        self.enum_tags.pop()
+        self.records.pop()
+        self.typedefs.pop()
+        self.scopes.pop()
+        self.scope_ids.pop()
+        self.scope_vlas.pop()
+
+    def resolve_gotos(self):
+        for node, name, source_scopes, source_vlas in self.gotos:
+            target = self.labels.get(name)
+            if target is None:
+                self.fail(node, f"undefined label {name}")
+            target_scopes, target_vlas = target
+            if not target_vlas <= source_vlas:
+                self.fail(node, f"goto {name} enters the scope of a variably modified object")
+            node.value = (name, source_scopes, target_scopes)
 
     def lookup(self, source):
         for scope in reversed(self.scopes):
@@ -887,16 +920,10 @@ class Frontend:
         if s is None:
             return Node("block")
         if isinstance(s, c.Compound):
-            self.scopes.append({})
-            self.typedefs.append({})
-            self.records.append({})
-            self.enum_tags.append({})
+            scope_id = self.push_scope()
             body = [self.statement(x) for x in s.block_items or []]
-            self.enum_tags.pop()
-            self.records.pop()
-            self.typedefs.pop()
-            self.scopes.pop()
-            return self.node(s, "block", children=body)
+            self.pop_scope()
+            return self.node(s, "block", children=body, value=scope_id)
         if isinstance(s, c.DeclList):
             return self.node(s, "block", children=[self.statement(x) for x in s.decls])
         if isinstance(s, c.Typedef):
@@ -918,6 +945,8 @@ class Frontend:
             t = self.resolve_array(s, self.typename(s))
             t, vla_bounds = self.bind_vla_bounds(s, t) if self.variably_modified(t) else (t, [])
             dynamic_object = t.kind in ("array", "vla") and self.variably_modified(t)
+            if self.variably_modified(t):
+                self.scope_vlas[-1] = True
             if t.kind in ("void", "function") or (not t.size and not dynamic_object and t.kind != "pointer"):
                 self.fail(s, "local variable requires a complete object type")
             if s.name in self.scopes[-1]:
@@ -1007,10 +1036,7 @@ class Frontend:
         if isinstance(s, (c.While, c.For, c.DoWhile)):
             self.loop_depth += 1
             self.break_depth += 1
-            self.scopes.append({})
-            self.typedefs.append({})
-            self.records.append({})
-            self.enum_tags.append({})
+            scope_id = self.push_scope()
             if isinstance(s, c.For):
                 init = self.statement(s.init)
                 cond = (
@@ -1020,7 +1046,7 @@ class Frontend:
                 )
                 step = self.statement(s.next)
                 body = self.statement(s.stmt)
-                n = self.node(s, "for", children=[init, cond, step, body])
+                n = self.node(s, "for", children=[init, cond, step, body], value=scope_id)
             else:
                 n = self.node(
                     s,
@@ -1028,12 +1054,9 @@ class Frontend:
                     children=[
                         self.scalar(s, self.expr(s.cond)),
                         self.statement(s.stmt),
-                    ],
+                    ], value=scope_id,
                 )
-            self.enum_tags.pop()
-            self.records.pop()
-            self.typedefs.pop()
-            self.scopes.pop()
+            self.pop_scope()
             self.loop_depth -= 1
             self.break_depth -= 1
             return n
@@ -1055,6 +1078,24 @@ class Frontend:
             if not self.switch_depth:
                 self.fail(s, "default outside switch")
             return self.node(s, "default", children=[self.statement(x) for x in s.stmts])
+        if isinstance(s, c.Label):
+            if s.name in self.labels:
+                self.fail(s, f"duplicate label {s.name}")
+            self.labels[s.name] = (tuple(self.scope_ids), frozenset(
+                scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+            ))
+            return self.node(s, "label", children=[self.statement(s.stmt)], value=s.name)
+        if isinstance(s, c.Goto):
+            node = self.node(s, "goto")
+            self.gotos.append((
+                node,
+                s.name,
+                tuple(self.scope_ids),
+                frozenset(
+                    scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+                ),
+            ))
+            return node
         if isinstance(s, c.EmptyStatement):
             return self.node(s, "block")
         return self.node(s, "expression", children=[self.expr(s)])
@@ -1194,10 +1235,9 @@ class Frontend:
         for name, item in definitions.items():
             sym = self.scopes[0][name]
             self.locals = []
-            self.scopes.append({})
-            self.typedefs.append({})
-            self.records.append({})
-            self.enum_tags.append({})
+            self.labels = {}
+            self.gotos = []
+            function_scope = self.push_scope()
             params = []
             declarations = item.decl.type.args.params if item.decl.type.args else []
             parameter_bounds = []
@@ -1214,6 +1254,8 @@ class Frontend:
                 p = self.new(d.name, t, "parameter")
                 params.append(p)
                 self.scopes[-1][d.name] = p
+                if self.variably_modified(t):
+                    self.scope_vlas[-1] = True
             self.return_type = sym.type.base
             body = self.node(
                 item.body,
@@ -1222,12 +1264,11 @@ class Frontend:
                     [self.node(item.body, "vla_bounds", value=parameter_bounds)]
                     if parameter_bounds else []
                 ) + [self.statement(x) for x in item.body.block_items or []],
+                value=function_scope,
             )
+            self.resolve_gotos()
             self.functions.append(Function(sym, params, self.locals, body))
-            self.enum_tags.pop()
-            self.records.pop()
-            self.typedefs.pop()
-            self.scopes.pop()
+            self.pop_scope()
         main = self.scopes[0].get("main")
         if require_main:
             if not main or "main" not in definitions:
