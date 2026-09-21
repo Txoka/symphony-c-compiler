@@ -5,7 +5,7 @@ are ordinary values. The backend never sees parser nodes or C expression trees.
 """
 
 from dataclasses import dataclass, field
-from .model import CHAR, INT, UINT, VOID, Node, Type, pointer, common
+from .model import INT, UINT, VOID, Node, Type, pointer, common
 
 
 @dataclass
@@ -556,13 +556,6 @@ def lower(program):
         *([Instruction("zero_bss")] if any(g.section == "zero" for g in program.globals) else []),
         Instruction("relocate_globals"),
     ]
-    if any(g.symbol.key == "__dyn_printf_framebuffer" for g in program.globals):
-        address = startup.values
-        startup.values += 1
-        raw.append(
-            Instruction("global_addr", address, (), pointer(CHAR), "__dyn_printf_framebuffer")
-        )
-        raw.append(Instruction("init_text_screen", args=(address,)))
     result = startup.values
     startup.values += 1
     raw.append(

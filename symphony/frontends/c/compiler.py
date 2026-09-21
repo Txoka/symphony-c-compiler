@@ -6,7 +6,7 @@ from pycparser import c_ast
 
 from ..protocol import FrontendResult
 from ...middle.ir import lower
-from ...middle.model import CHAR, INT, UINT, CompileError, Global, Program, Symbol, array
+from ...middle.model import INT, CompileError, Program
 from ...runtime import (
     NAMES as INTRINSIC_NAMES,
     PROTOTYPES,
@@ -129,16 +129,6 @@ class CFrontend:
         self.include_dirs = tuple(include_dirs)
         self.defines = tuple(defines)
 
-    @staticmethod
-    def uses_text_screen(tree):
-        def visit(node):
-            if isinstance(node, c_ast.FuncCall) and isinstance(node.name, c_ast.ID):
-                if node.name.name in TEXT_SCREEN_NAMES:
-                    return True
-            return any(visit(child) for _, child in node.children())
-
-        return visit(tree)
-
     def lower(self, source: str, filename: str = "<input>") -> FrontendResult:
         return self.lower_project([(filename, source)])
 
@@ -166,25 +156,17 @@ class CFrontend:
                         f"{item.decl.name} is a reserved device intrinsic"
                     )
 
-        uses_screen = any(self.uses_text_screen(tree) for tree in parsed_units)
-        runtime_source = "typedef _Bool bool;\n" + PROTOTYPES + LIBRARY_PROTOTYPES + SOURCE
-        if uses_screen:
-            runtime_source += SCREEN_SOURCE
+        runtime_source = (
+            "typedef _Bool bool;\n"
+            + PROTOTYPES
+            + LIBRARY_PROTOTYPES
+            + SOURCE
+            + SCREEN_SOURCE
+        )
         runtime_tree = parse(runtime_source, "<symphony-runtime>")
         programs.append(typecheck(runtime_tree, require_main=False, namespace="runtime"))
         typed = link_programs(programs)
 
-        if uses_screen:
-            typed.globals.extend(
-                [
-                    Global(
-                        Symbol("__dyn_printf_framebuffer", array(CHAR, 3840), "global", "__dyn_printf_framebuffer"),
-                        bytearray(3840),
-                    ),
-                    Global(Symbol("__dyn_printf_cursor", UINT, "global", "__dyn_printf_cursor"), bytearray(4)),
-                    Global(Symbol("__dyn_printf_column", UINT, "global", "__dyn_printf_column"), bytearray(4)),
-                ]
-            )
         assign_static_sections(typed)
         parsed = parsed_units[0] if len(parsed_units) == 1 else parsed_units
         return FrontendResult(parsed, typed, lower(typed))

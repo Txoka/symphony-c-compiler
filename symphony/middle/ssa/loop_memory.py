@@ -14,7 +14,7 @@ from ..ir import Instruction
 
 MEMORY_BARRIERS = {
     "call", "direct_call", "tailcall", "direct_tailcall", "intrinsic",
-    "stack_alloc", "init_text_screen", "zero_bss", "zero",
+    "stack_alloc", "zero_bss", "zero",
 }
 
 

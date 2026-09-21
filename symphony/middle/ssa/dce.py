@@ -14,7 +14,6 @@ known side-effecting ones: an instruction whose op isn't recognized as pure
 is always kept regardless of whether its ``dst`` looks unused. An
 enumerate-every-side-effect blocklist is one missed opcode away from
 silently deleting something load-bearing (e.g. a backend-only op like
-``init_text_screen``, which has no ``dst`` at all and exists purely for its
 side effect); the allowlist can only ever be too conservative, never wrong.
 
 This matters beyond ordinary cleanup: a dead phi can carry a ``None`` operand

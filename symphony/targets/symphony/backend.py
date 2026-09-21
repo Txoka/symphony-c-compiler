@@ -25,7 +25,6 @@ class Backend:
         self.private_id = 0
         self.needs_stack_overflow = False
         self.bss_clear_unroll = None
-        self.bss_start_live = None
         self.select_bss_sections()
 
     def unique(self):
@@ -127,6 +126,13 @@ class Backend:
             for instruction in function.instructions
         )
 
+    def needs_text_screen(self):
+        """Whether the retained program uses the text-screen runtime."""
+        return any(
+            global_.symbol.key == "__dyn_printf_framebuffer"
+            for global_ in self.module.globals
+        )
+
     def emit_zero_bss(self):
         """Clear the virtual BSS range with wide stores and exact-size tails."""
         globals_ = self.bss_globals()
@@ -134,9 +140,7 @@ class Backend:
             return
         size = self.bss_size(globals_)
         a = self.a
-        # Clear backward so r1 finishes at BSS start. A following consumer of
-        # the first BSS symbol can reuse that address without rematerializing
-        # it (notably a device configured to point at a BSS-backed buffer).
+        # Clear backward from the end of the virtual BSS range.
         a.address(1, "@bss.end")
         words = size // 4
         unroll = self.bss_clear_unroll
@@ -154,7 +158,14 @@ class Backend:
         for _ in range(words):
             a.emit(isa.alu("sub", 1, 1, 4, True))
             a.emit(isa.store(4, 1, 0))
-        self.bss_start_live = globals_[0].symbol.key
+
+    def emit_text_screen_setup(self):
+        """Bind the retained runtime framebuffer to the text-screen device."""
+        a = self.a
+        a.emit(isa.screen(0, 0, True))
+        a.emit(isa.constant(2, 1))
+        a.address(1, "__dyn_printf_framebuffer")
+        a.emit(isa.screen(2, 1))
 
     def emit_relocations(self):
         """Lower the startup IR operation that rebases static pointers."""
@@ -801,7 +812,6 @@ class Backend:
     def function(self, f):
         a = self.a
         a.label(f.name)
-        self.bss_start_live = None
         instructions = f.instructions
         for instruction in instructions:
             if instruction.op == "init_pic":
@@ -814,12 +824,10 @@ class Backend:
                 self.emit_zero_bss()
             elif instruction.op == "relocate_globals":
                 self.emit_relocations()
-                if self.target.pic and any(
-                    global_.relocations for global_ in self.module.globals
-                ):
-                    self.bss_start_live = None
             else:
                 break
+        if f.name == "_start" and self.needs_text_screen():
+            self.emit_text_screen_setup()
         leaf_start = len(a.code)
         if self.emit_straight_leaf(f):
             self.frames[f.name] = 0
@@ -951,19 +959,6 @@ class Backend:
                 result_register = self.register_values.get(i.dst, 1)
                 a.emit(isa.cheap_constant(result_register, i.extra))
             elif op == "global_addr":
-                next_ = (
-                    instructions[instruction_index + 1]
-                    if instruction_index + 1 < len(instructions) else None
-                )
-                if (
-                    self.bss_start_live == i.extra
-                    and next_ is not None
-                    and next_.op == "init_text_screen"
-                    and i.dst in next_.args
-                ):
-                    self.register_values[i.dst] = 1
-                    self.bss_start_live = None
-                    continue
                 if i.dst in self.rematerialized:
                     continue
                 result_register = self.register_values.get(i.dst, 1)
@@ -1014,12 +1009,6 @@ class Backend:
                 a.emit(isa.mov(1, 2))
             elif op == "stack_restore":
                 self.get(i.args[0], 14)
-                continue
-            elif op == "init_text_screen":
-                a.emit(isa.screen(0, 0, True))
-                a.emit(isa.constant(2, 1))
-                self.get(i.args[0], 1)
-                a.emit(isa.screen(2, 1))
                 continue
             elif op == "zero_bss":
                 self.emit_zero_bss()
