@@ -284,6 +284,32 @@ class ExecutionTests(unittest.TestCase):
             39,
         )
 
+    def test_union_local_initialized_from_union_lvalue(self):
+        run(
+            """union U { int a; unsigned char bytes[4]; };
+            int main(void) {
+                union U u1; u1.a = 5;
+                union U u2 = u1;
+                return u2.a;
+            }""",
+            5,
+        )
+
+    def test_switch_case_dedup_normalizes_to_promoted_type(self):
+        # unsigned char promotes to int, so -1 and 255 are distinct case
+        # values here (unlike if x's own type were used for normalization).
+        run(
+            """int main(void) {
+                unsigned char x = 255;
+                switch (x) {
+                case -1: return 1;
+                case 255: return 2;
+                default: return 3;
+                }
+            }""",
+            2,
+        )
+
     def test_union_layout_static_initialization_and_assignment(self):
         run(
             """union Packet { unsigned int word; unsigned char bytes[4]; };
@@ -945,6 +971,19 @@ class DiagnosticTests(unittest.TestCase):
             (
                 "int main(void){goto inside;{int n=2;int values[n];inside:return 0;}}",
                 "enters the scope",
+            ),
+            (
+                "int main(void){switch(1){int n=4;int values[n];case 1:return values[0];}return 0;}",
+                "enters the scope",
+            ),
+            (
+                "int main(void){switch(1){int n=4;int values[n];default:return values[0];}return 0;}",
+                "enters the scope",
+            ),
+            (
+                "int main(void){unsigned int x=0;"
+                "switch(x){case -1:return 1;case 4294967295u:return 2;default:return 0;}}",
+                "duplicate case",
             ),
         ]
         for source, message in cases:

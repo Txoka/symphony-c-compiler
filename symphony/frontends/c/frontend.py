@@ -114,6 +114,8 @@ class Frontend:
         self.loop_depth = 0
         self.break_depth = 0
         self.switch_depth = 0
+        self.switch_types = []
+        self.switch_vlas = []
         self.scope_serial = 0
         self.scope_ids = [0]
         self.scope_vlas = [False]
@@ -154,6 +156,13 @@ class Frontend:
         self.scopes.pop()
         self.scope_ids.pop()
         self.scope_vlas.pop()
+
+    def check_jump_into_vla(self, source, kind):
+        target_vlas = frozenset(
+            scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+        )
+        if not target_vlas <= self.switch_vlas[-1]:
+            self.fail(source, f"switch {kind} enters the scope of a variably modified object")
 
     def resolve_gotos(self):
         for node, name, source_scopes, source_vlas in self.gotos:
@@ -971,7 +980,7 @@ class Frontend:
                 self.fail(s, "variable-length arrays cannot have initializers")
             aggregate_initial = (
                 self.expr(s.init)
-                if t.kind == "struct" and s.init is not None and not isinstance(s.init, c.InitList)
+                if t.kind in ("struct", "union") and s.init is not None and not isinstance(s.init, c.InitList)
                 else None
             )
             if aggregate_initial is not None and (
@@ -1027,9 +1036,16 @@ class Frontend:
             if not condition.type.integer:
                 self.fail(s.cond, "switch condition requires an integer")
             condition = self.cast(condition, condition.type.promote())
+            source_vlas = frozenset(
+                scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+            )
             self.break_depth += 1
             self.switch_depth += 1
+            self.switch_types.append(condition.type)
+            self.switch_vlas.append(source_vlas)
             body = self.statement(s.stmt)
+            self.switch_vlas.pop()
+            self.switch_types.pop()
             self.switch_depth -= 1
             self.break_depth -= 1
             return self.node(s, "switch", children=[condition, body])
@@ -1071,12 +1087,15 @@ class Frontend:
         if isinstance(s, c.Case):
             if not self.switch_depth:
                 self.fail(s, "case outside switch")
+            self.check_jump_into_vla(s, "case")
+            value = self.normalize_constant(self.const_int(s.expr), self.switch_types[-1])
             return self.node(
-                s, "case", children=[self.statement(x) for x in s.stmts], value=self.const_int(s.expr)
+                s, "case", children=[self.statement(x) for x in s.stmts], value=value
             )
         if isinstance(s, c.Default):
             if not self.switch_depth:
                 self.fail(s, "default outside switch")
+            self.check_jump_into_vla(s, "default")
             return self.node(s, "default", children=[self.statement(x) for x in s.stmts])
         if isinstance(s, c.Label):
             if s.name in self.labels:
