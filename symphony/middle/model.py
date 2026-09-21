@@ -13,6 +13,7 @@ class Record:
     tag: str
     kind: str = "struct"
     members: tuple = ()
+    promoted_members: tuple = ()
     size: int = 0
     alignment: int = 1
     complete: bool = False

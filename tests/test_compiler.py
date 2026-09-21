@@ -323,6 +323,39 @@ class ExecutionTests(unittest.TestCase):
             10,
         )
 
+    def test_anonymous_struct_and_union_member_promotion(self):
+        run(
+            """struct Value {
+                int type;
+                union {
+                    struct { int x; int y; };
+                    struct { int r; int g; };
+                };
+            };
+            int main(void) {
+                struct Value value = { .type = 1, .x = 20, .y = 22 };
+                struct Value *pointer = &value;
+                pointer->r = 4;
+                pointer->g = 7;
+                return value.type + value.x + value.y + pointer->r + pointer->g;
+            }""",
+            23,
+        )
+
+    def test_anonymous_member_designator_brace_elision_continues_inside_member(self):
+        run(
+            """struct S { int tag; struct { int x; int y; }; int tail; };
+            int main(void) {
+                struct S value = { .x = 1, 2 };
+                return value.x * 100 + value.y * 10 + value.tail;
+            }""",
+            120,
+        )
+
+    def test_anonymous_aggregate_members_example(self):
+        source = (ROOT / "examples/anonymous_aggregate_members.c").read_text()
+        run(source, 28)
+
     def test_structure_returns_use_caller_owned_result_storage(self):
         run(
             """struct Pair { int left; int right; };
@@ -956,6 +989,25 @@ class DiagnosticTests(unittest.TestCase):
             ("int main(void){switch(1){default:return 0;default:return 1;}}", "duplicate default"),
             ("int main(void){int a[2]={[2]=1};return 0;}", "outside the array"),
             ("int main(void){union U{int a;int b;};union U u={1,2};return 0;}", "exactly one"),
+            (
+                "int main(void){struct S{union{struct{int x;};struct{int x;};};};"
+                "struct S value;return value.x;}",
+                "duplicate member",
+            ),
+            (
+                "struct Inner; struct Outer { struct Inner; int value; };"
+                "int main(void){return sizeof(struct Outer);}",
+                "complete object type",
+            ),
+            (
+                "int main(void){struct S{const struct{int x;};};"
+                "struct S value={{1}};value.x=2;return value.x;}",
+                "modifiable lvalue",
+            ),
+            (
+                "int main(void){struct S{volatile struct{int x;};};return 0;}",
+                "unsupported type qualifier",
+            ),
             ("int main(void){goto missing;return 0;}", "undefined label"),
             ("int main(void){x:return 0;x:return 1;}", "duplicate label"),
             (

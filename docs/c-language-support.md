@@ -83,6 +83,8 @@ operations do not pull those helpers into the image.
 - Member access with `.` and `->`.
 - Nested, designated, and brace-elided initialization for global and local
   structure objects.
+- Anonymous structure and union members, with recursively promoted member
+  access and member designators (for example, `value.x` and `.x = 1`).
 - `sizeof` for complete structure types and structure expressions.
 - Structure assignment, including assignments that overlap in memory.
 - Structure-returning functions, including direct and function-pointer calls.
@@ -95,6 +97,10 @@ operations do not pull those helpers into the image.
 - Named and anonymous unions, including nested arrays and structures as members.
 - Member access with `.` and `->`, initialization of a selected member, and
   union assignment.
+- Anonymous members promote their named submembers through surrounding
+  structures and unions. Duplicate promoted names are diagnosed when the
+  containing aggregate is defined; qualifiers on anonymous members apply to
+  their promoted submembers.
 
 ### Statements and functions
 
@@ -124,6 +130,10 @@ executable combined example of forward `goto`, `switch`, designated and
 brace-elided initialization, unions, aggregate assignment, and structure
 returns.
 
+[`examples/anonymous_aggregate_members.c`](../examples/anonymous_aggregate_members.c)
+shows a tagged point-or-color value using anonymous struct/union member
+promotion, a structure-returning constructor, and pointer-based mutation.
+
 ## Unsupported or incomplete C features
 
 | Area | Missing support |
@@ -134,7 +144,6 @@ returns.
 | Qualifiers/specifiers | `volatile`, `restrict`, `_Atomic`, thread-local storage, and local `extern` |
 | Aggregate operations | Aggregates passed to functions by value, unions returned by value, and aggregate assignment whose right-hand side is not an lvalue |
 | Initializers | Some complex continuation cases after nested designated initializers |
-| Aggregate members | Anonymous members |
 | Arrays | Flexible array members |
 | Functions | Variadic functions, old-style definitions, aggregate parameter conventions, and union-return conventions |
 | Hosted runtime | File I/O, locale, and the rest of a hosted C library beyond the small freestanding headers listed below |

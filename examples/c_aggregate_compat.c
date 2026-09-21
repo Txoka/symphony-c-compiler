@@ -1,4 +1,4 @@
-/* Exercises goto, switch, designated/brace-elided initializers, unions, and copies. */
+/* Exercises goto, switch, anonymous aggregates, designated/brace-elided initializers, unions, and copies. */
 #include <stdio.h>
 
 struct Pair {
@@ -11,6 +11,14 @@ union Word {
     unsigned char bytes[4];
 };
 
+struct Value {
+    int type;
+    union {
+        struct { int x; int y; };
+        struct { int r; int g; };
+    };
+};
+
 struct Pair make_pair(int left, int right) {
     struct Pair pair = { left, right };
     return pair;
@@ -21,8 +29,13 @@ int main(void) {
     struct Pair selected = { .right = 7, .left = 4 };
     int lookup[5] = { [3] = 9, [1] = 2 };
     union Word selector = { .bytes = { 0, 0, 0, 3 } };
+    struct Value value = { .type = 1, .x = 4, .y = 7 };
 
     selected = original;
+    if (value.x != 4 || value.y != 7) return -3;
+    value.r = 10;
+    value.g = 20;
+    if (value.x != 10 || value.y != 20) return -4;
     goto dispatch;
 
 unexpected:
