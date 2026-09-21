@@ -13,6 +13,7 @@ from .loop_memory import eliminate_redundant_loop_memory
 from .copies import propagate_global_copies
 from .algebra import simplify_algebra
 from .fuse_branches import fuse_comparison_branches, fuse_comparison_zero_tests
+from .divmod import pair_unsigned_divmod
 from .strength import reduce_strength
 from .calls import identify_direct_calls
 from .parameters import promote_readonly_parameters
@@ -35,6 +36,7 @@ __all__ = [
     "simplify_algebra",
     "fuse_comparison_branches",
     "fuse_comparison_zero_tests",
+    "pair_unsigned_divmod",
     "reduce_strength",
     "identify_direct_calls",
     "promote_readonly_parameters",

@@ -19,6 +19,7 @@ from .middle.ssa import (
     simplify_algebra,
     fuse_comparison_branches,
     fuse_comparison_zero_tests,
+    pair_unsigned_divmod,
     reduce_strength,
     identify_direct_calls,
     promote_readonly_parameters,
@@ -68,6 +69,7 @@ fuse_comparison_branches = _optional_optimization(
 fuse_comparison_zero_tests = _optional_optimization(
     "comparison_zero_test_fusion", fuse_comparison_zero_tests
 )
+pair_unsigned_divmod = _optional_optimization("paired_divmod", pair_unsigned_divmod)
 remove_dead_values = _optional_optimization("dead_value_elimination", remove_dead_values)
 simplify_control_flow = _optional_optimization("cfg_simplification", simplify_control_flow)
 promote_readonly_parameters = _optional_optimization(
@@ -142,6 +144,8 @@ class Compiler:
             eliminate_redundant_loop_memory(function)
             verify(function)
             fuse_comparison_zero_tests(function)
+            verify(function)
+            pair_unsigned_divmod(function)
             verify(function)
             fuse_comparison_branches(function)
             verify(function)

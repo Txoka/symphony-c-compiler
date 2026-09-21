@@ -52,9 +52,12 @@ preserving the full suite after each atomic change:
 3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
    work with pointer induction, pointer-limit exits, trip-count facts, and
    proven bulk-fill/copy idioms. Keep growth-oriented unrolling opt-in.
-4. [ ] **Paired division/remainder.** Recognize same-operand `/` and `%` and
-   lower them to one two-result divmod operation when purity and ordering make
-   that valid.
+4. [x] **Paired unsigned division/remainder (initial form).** Recognize a
+   same-operand `%` followed by `/` across only pure instructions and lower it
+   to one paired runtime call. Signed pairs and pairs crossing stores/calls
+   remain below as follow-up work. The focused regression falls from 684 to
+   596 bytes and 5,610 to 2,793 reference-emulator steps; maintained examples
+   are unchanged because none currently have this conservative shape.
 5. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
    redundant spills/reloads, and needless address materializations; iterate
    with branch/call relaxation.
@@ -95,13 +98,11 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   byte/word loop or runtime `memset`/`memcpy` call.  Preserve aliasing,
   overlap, observable bound evaluation, and target byte order.  GCC recognizes
   the sieve initialization as `memset`; scc currently emits the source loop.
-- [ ] **Paired division/remainder.** This remains the highest measured
-  arithmetic priority.  Represent the pair as an explicit two-result IR
-  operation and lower it to one `__dyn_[us]divmod` invocation whose quotient
-  and remainder occupy ABI result registers.  Do not infer a pair across a
-  call, store, possible trap/undefined operation, or mutable operand.  The
-  current decimal-format path in `primes.c` invokes the helper separately
-  for related quotient and remainder values.
+- [ ] **Extend paired division/remainder.** The initial unsigned pure-region
+  pairing is implemented. Add a true two-result IR/ABI operation only if its
+  cost model beats the current temporary-slot helper; then cover signed pairs
+  and prove whether the decimal-format path in `primes.c` can be safely
+  paired across its digit/count stores.
 - [ ] **Dead storage and bounded evaluation.** Prioritize the existing general
   dead-storage/evaluator item for fully known local-object programs.
   GCC reduces `arena_allocator.c`'s `main` to `mov r1, 1`; scc must
@@ -154,7 +155,7 @@ Remaining work, in dependency and payoff order:
    Use these facts for loop-invariant code motion and bounded evaluation first;
    retain code-growing unrolling behind its explicit option.
 4. [ ] Recognize matching quotient/remainder expressions with identical proven-pure
-   operands and lower them to a two-result `divmod` IR operation. Preserve signed
+   operands and lower them to a paired `divmod` runtime call. Preserve signed
    C semantics and reject intervening mutation, volatile access, and calls.
 5. [ ] Add local value numbering, then global value numbering, using conservative
    alias invalidation for loads. This removes repeated arithmetic and address work.

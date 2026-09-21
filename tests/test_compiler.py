@@ -1034,6 +1034,27 @@ class EncodingTests(unittest.TestCase):
             self.assertEqual(execute(optimized, inputs), expected)
         self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
 
+    def test_paired_divmod_example_runs_one_software_division(self):
+        source = (ROOT / "examples" / "divmod_pair.c").read_text()
+        old = OPTIMIZATIONS["paired_divmod"]
+        try:
+            OPTIMIZATIONS["paired_divmod"] = False
+            unoptimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["paired_divmod"] = old
+        optimized = _compile_source(source, target=Target())
+
+        def execute(result, value):
+            machine = Machine(result.image.binary, inputs=(value,))
+            machine.run(result.image.symbols["_halt"])
+            return machine.outputs, machine.steps
+
+        for value, expected in ((0, [0, 0]), (123456789, [12345678, 9])):
+            self.assertEqual(execute(unoptimized, value)[0], expected)
+            self.assertEqual(execute(optimized, value)[0], expected)
+        self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
+        self.assertLess(execute(optimized, 123456789)[1], execute(unoptimized, 123456789)[1])
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)
