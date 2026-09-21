@@ -74,7 +74,7 @@ struct __dyn_heap_block {
     struct __dyn_heap_block *next;
 };
 
-extern unsigned char __dyn_heap_anchor[7];
+extern unsigned char __dyn_heap_start;
 unsigned char *__dyn_heap_end;
 static struct __dyn_heap_block *__dyn_heap_free_list;
 
@@ -117,7 +117,7 @@ void *malloc(unsigned int size) {
     if (reused) return reused;
     if (!__dyn_heap_end) {
         __dyn_heap_end = (unsigned char *)(((unsigned int)
-            (__dyn_heap_anchor + sizeof(__dyn_heap_anchor)) + 3u) & ~3u);
+            &__dyn_heap_start + 3u) & ~3u);
     }
     required = sizeof(struct __dyn_heap_block) + size;
     if (__dyn_heap_remaining(__dyn_heap_end) < required) return 0;

@@ -185,12 +185,6 @@ class CFrontend:
                     Global(Symbol("__dyn_printf_column", UINT, "global", "__dyn_printf_column"), bytearray(4)),
                 ]
             )
-        typed.globals.append(
-            Global(
-                Symbol("__dyn_heap_anchor", array(CHAR, 7), "global", "__dyn_heap_anchor"),
-                bytearray(7),
-            )
-        )
         assign_static_sections(typed)
         parsed = parsed_units[0] if len(parsed_units) == 1 else parsed_units
         return FrontendResult(parsed, typed, lower(typed))

@@ -32,6 +32,17 @@ class Backend:
     def bss_globals(self):
         return [global_ for global_ in self.module.globals if global_.section == "bss"]
 
+    def needs_heap_start(self):
+        return any(
+            instruction.op == "stack_alloc"
+            or (
+                instruction.op == "global_addr"
+                and instruction.extra == "__dyn_heap_start"
+            )
+            for function in self.module.functions
+            for instruction in function.instructions
+        )
+
     def emit_zero_bss(self):
         """Clear the virtual BSS range with wide stores and exact-size tails."""
         globals_ = self.bss_globals()
@@ -893,7 +904,7 @@ class Backend:
                     have_heap = self.unique()
                     a.emit(isa.alu("cmp", 15, 1, 0))
                     a.branch("jne", have_heap)
-                a.address(1, "__dyn_heap_anchor", 7)
+                a.address(1, "__dyn_heap_start")
                 a.emit(isa.alu("add", 1, 1, 3, True))
                 a.emit(isa.cheap_constant(7, -4))
                 a.emit(isa.alu("and", 1, 1, 7))
@@ -1202,6 +1213,11 @@ class Backend:
             virtual_end += len(g.data)
         if bss:
             a.labels["@bss.end"] = virtual_end
+        if self.needs_heap_start():
+            a.labels["__dyn_heap_start"] = virtual_end
+            # PIC images may load at any byte address, so reserve the largest
+            # possible gap introduced by runtime four-byte alignment.
+            virtual_end += 3
         a.finish()
         for g in self.module.globals:
             for offset, symbol, addend in g.relocations:

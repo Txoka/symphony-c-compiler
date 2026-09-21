@@ -246,7 +246,7 @@ class CompilerIntegrationTests(unittest.TestCase):
                 0,
             ],
         )
-        self.assertIn("__dyn_heap_anchor", result.image.symbols)
+        self.assertIn("__dyn_heap_start", result.image.symbols)
 
     @unittest.skipUnless(NATIVE_AVAILABLE, "expensive example correctness checks require native emulator")
     def test_expensive_example_outputs(self):

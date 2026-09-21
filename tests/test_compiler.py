@@ -275,7 +275,7 @@ class ExecutionTests(unittest.TestCase):
             1,
         )
         self.assertGreater(
-            result.image.symbols["__dyn_heap_anchor"],
+            result.image.symbols["__dyn_heap_start"],
             result.image.symbols["__dyn_printf_framebuffer"],
         )
 
