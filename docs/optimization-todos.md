@@ -52,12 +52,11 @@ preserving the full suite after each atomic change:
 3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
    work with pointer induction, pointer-limit exits, trip-count facts, and
    proven bulk-fill/copy idioms. Keep growth-oriented unrolling opt-in.
-4. [x] **Paired unsigned division/remainder (initial form).** Recognize a
-   same-operand `%` followed by `/` across only pure instructions and lower it
-   to one paired runtime call. Signed pairs and pairs crossing stores/calls
-   remain below as follow-up work. The focused regression falls from 684 to
-   596 bytes and 5,610 to 2,793 reference-emulator steps; maintained examples
-   are unchanged because none currently have this conservative shape.
+4. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
+   followed by `/` across pure instructions and stores proven to target a
+   different local object. The focused regression falls from 684 to 596 bytes
+   and 5,610 to 2,793 reference-emulator steps. On `primes`, pairing reduces
+   2,372 to 2,140 bytes and 4,113,385 to 2,418,382 steps.
 5. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
    redundant spills/reloads, and needless address materializations; iterate
    with branch/call relaxation.
@@ -98,11 +97,11 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   byte/word loop or runtime `memset`/`memcpy` call.  Preserve aliasing,
   overlap, observable bound evaluation, and target byte order.  GCC recognizes
   the sieve initialization as `memset`; scc currently emits the source loop.
-- [ ] **Extend paired division/remainder.** The initial unsigned pure-region
-  pairing is implemented. Add a true two-result IR/ABI operation only if its
-  cost model beats the current temporary-slot helper; then cover signed pairs
-  and prove whether the decimal-format path in `primes.c` can be safely
-  paired across its digit/count stores.
+- [ ] **Extend paired division/remainder.** Pure-region and proven non-aliasing
+  local-store pairing are implemented. Add a true two-result IR/ABI operation
+  only if it beats the current temporary-slot helper, then cover signed pairs.
+  The ABI already permits multiple word results in `r1`-`r7`; scalar C still
+  exposes only `r1` today.
 - [ ] **Dead storage and bounded evaluation.** Prioritize the existing general
   dead-storage/evaluator item for fully known local-object programs.
   GCC reduces `arena_allocator.c`'s `main` to `mov r1, 1`; scc must

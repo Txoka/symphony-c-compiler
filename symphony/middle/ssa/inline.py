@@ -150,7 +150,24 @@ def _loop_pressure_risk(caller, call_block, callee):
     if not callee_loops:
         return False
     caller_loops = find_natural_loops(build_dominator_tree(build_cfg(caller)))
-    return any(call_block in loop.blocks for loop in caller_loops)
+    if not any(call_block in loop.blocks for loop in caller_loops):
+        return False
+    # Count the loop's actual SSA working set, rather than treating every
+    # loop helper as expensive.  Seven is the volatile register budget.
+    loop_values = {
+        item.dst
+        for loop in callee_loops
+        for block in loop.blocks
+        for item in build_cfg(callee).by_label[block].instructions
+        if item.dst is not None
+    }
+    caller_values = {
+        item.dst
+        for block in caller.blocks
+        for item in block.instructions
+        if item.dst is not None
+    }
+    return len(loop_values) + len(caller_values) > 7
 
 
 def _clone_callee(callee, caller, call_instruction, inline_id):

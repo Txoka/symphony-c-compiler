@@ -1061,14 +1061,43 @@ class EncodingTests(unittest.TestCase):
         try:
             OPTIMIZATIONS["loop_pressure_aware_inlining"] = False
             inlined = _compile_source(source, target=Target())
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = True
+            guarded = _compile_source(source, target=Target())
         finally:
             OPTIMIZATIONS["loop_pressure_aware_inlining"] = old
-        guarded = _compile_source(source, target=Target())
         self.assertNotIn("helper", inlined.image.symbols)
         self.assertIn("helper", guarded.image.symbols)
         for result in (inlined, guarded):
             machine = Machine(result.image.binary)
             self.assertEqual(machine.run(result.image.symbols["_halt"]), 316)
+
+    def test_alias_aware_divmod_improves_primes(self):
+        source = (ROOT / "examples" / "primes.c").read_text()
+        old_pair = OPTIMIZATIONS["paired_divmod"]
+        old_alias = OPTIMIZATIONS["alias_aware_divmod_pairing"]
+        old_guard = OPTIMIZATIONS["loop_pressure_aware_inlining"]
+        try:
+            OPTIMIZATIONS["paired_divmod"] = False
+            OPTIMIZATIONS["alias_aware_divmod_pairing"] = False
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["paired_divmod"] = True
+            OPTIMIZATIONS["alias_aware_divmod_pairing"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["paired_divmod"] = old_pair
+            OPTIMIZATIONS["alias_aware_divmod_pairing"] = old_alias
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            return machine.run(result.image.symbols["_halt"]), machine.outputs, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(optimized_result[:2], baseline_result[:2])
+        self.assertLess(optimized_result[2], baseline_result[2])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
 
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)

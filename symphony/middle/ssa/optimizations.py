@@ -17,6 +17,7 @@ OPTIMIZATIONS = {
     "comparison_branch_fusion": True,
     "comparison_zero_test_fusion": True,
     "paired_divmod": True,
+    "alias_aware_divmod_pairing": True,
     "dead_value_elimination": True,
     "cfg_simplification": True,
     "readonly_parameter_promotion": True,
@@ -26,7 +27,8 @@ OPTIMIZATIONS = {
     "immutable_global_folding": True,
     "unused_stack_initialization_removal": True,
     "single_call_inlining": True,
-    "loop_pressure_aware_inlining": True,
+    # Experimental until the estimate uses true live-at-call pressure.
+    "loop_pressure_aware_inlining": False,
 }
 
 
