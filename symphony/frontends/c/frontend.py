@@ -297,6 +297,13 @@ class Frontend:
                 if declaration.name and declaration.name in names:
                     self.fail(declaration, "duplicate structure member")
                 member_type = self.typename(declaration)
+                # pycparser keeps qualifiers on an anonymous declaration's
+                # ``Decl`` rather than its aggregate node. Unlike a named
+                # pointer declarator, there is no duplicate qualifier here.
+                if not declaration.name and declaration.quals:
+                    member_type = self.apply_qualifiers(
+                        declaration, member_type, declaration.quals
+                    )
                 if not declaration.name and member_type.kind not in ("struct", "union"):
                     self.fail(declaration, "anonymous member must be a structure or union")
                 if member_type.kind in ("void", "function") or not member_type.size:
@@ -308,6 +315,29 @@ class Frontend:
                 offset = max(offset, member_type.size) if kind == "union" else offset + member_type.size
                 alignment = max(alignment, member_type.align)
             record.members = tuple(members)
+            promoted = []
+            for index, (name, member_type, member_offset) in enumerate(members):
+                if name is not None:
+                    promoted.append((name, index, member_type, member_offset, (index,)))
+                elif member_type.kind in ("struct", "union"):
+                    for (
+                        promoted_name,
+                        _,
+                        promoted_type,
+                        promoted_offset,
+                        promoted_path,
+                    ) in member_type.record.promoted_members:
+                        promoted.append((
+                            promoted_name,
+                            index,
+                            promoted_type.qualified(*member_type.qualifiers),
+                            member_offset + promoted_offset,
+                            (index, *promoted_path),
+                        ))
+            promoted_names = [name for name, *_ in promoted]
+            if len(promoted_names) != len(set(promoted_names)):
+                self.fail(t, "duplicate member name through anonymous aggregates")
+            record.promoted_members = tuple(promoted)
             record.alignment = alignment
             record.size = align_up(offset, alignment)
             record.complete = True
@@ -378,26 +408,40 @@ class Frontend:
         return False
 
     def member_lookup(self, source, aggregate, name):
-        """Resolve a direct or anonymously promoted aggregate member."""
-        matches = []
-
-        def visit(type_, base, direct_index=None):
-            for index, (member_name, member_type, member_offset) in enumerate(
-                type_.record.members
-            ):
-                root_index = index if direct_index is None else direct_index
-                offset = base + member_offset
-                if member_name == name:
-                    matches.append((root_index, member_type, offset))
-                elif member_name is None and member_type.kind in ("struct", "union"):
-                    visit(member_type, offset, root_index)
-
-        visit(aggregate, 0)
-        if not matches:
+        """Resolve a direct or anonymously promoted member from its table."""
+        found = next(
+            (entry for entry in aggregate.record.promoted_members if entry[0] == name),
+            None,
+        )
+        if found is None:
             self.fail(source, f"{aggregate.kind} has no member {name}")
-        if len(matches) != 1:
-            self.fail(source, f"ambiguous member {name} through anonymous aggregates")
-        return matches[0]
+        return found[1:]
+
+    def designated_continuation(self, aggregate, path):
+        """Subobjects following a designated member in brace-elided input."""
+        continuation = []
+        type_ = aggregate
+        base = 0
+        qualifiers = set(aggregate.qualifiers)
+        root_index = path[0]
+        levels = []
+        for index in path:
+            levels.append((type_, index, base, frozenset(qualifiers)))
+            _, member_type, member_offset = type_.record.members[index]
+            base += member_offset
+            qualifiers.update(member_type.qualifiers)
+            type_ = member_type
+        for level_type, index, level_base, level_qualifiers in reversed(levels):
+            if level_type.kind != "struct":
+                continue
+            for sibling_index in range(index + 1, len(level_type.record.members)):
+                _, sibling_type, sibling_offset = level_type.record.members[sibling_index]
+                continuation.append((
+                    sibling_type.qualified(*level_qualifiers),
+                    level_base + sibling_offset,
+                    sibling_index if level_type is aggregate else root_index,
+                ))
+        return continuation
 
     def bind_vla_bounds(self, declarator, t):
         """Attach saved declaration-time bounds to a variably modified type."""
@@ -640,7 +684,7 @@ class Frontend:
                     self.fail(s, ". requires a structure or union lvalue")
                 structure = base.type
                 address = self.node(s, "address", pointer(structure), [base])
-            _, member_type, offset = self.member_lookup(
+            _, member_type, offset, _ = self.member_lookup(
                 s.field, structure, s.field.name
             )
             if "const" in structure.qualifiers:
@@ -796,13 +840,17 @@ class Frontend:
         """
         offset = 0
         direct_index = None
+        continuation = []
         for designator in designators:
             if isinstance(designator, c.ID) and t.kind in ("struct", "union"):
-                index, t, member_offset = self.member_lookup(
-                    designator, t, designator.name
+                aggregate = t
+                index, member_type, member_offset, path = self.member_lookup(
+                    designator, aggregate, designator.name
                 )
                 direct_index = index if direct_index is None else direct_index
                 offset += member_offset
+                continuation = self.designated_continuation(aggregate, path)
+                t = member_type
             elif isinstance(designator, c.Constant) and t.kind == "array":
                 index = self.const_int(designator)
                 if not 0 <= index < t.count:
@@ -814,7 +862,7 @@ class Frontend:
                 self.fail(designator, "invalid initializer designator")
         if direct_index is None:
             self.fail(source, "empty initializer designator")
-        return direct_index, t, offset
+        return direct_index, t, offset, continuation
 
     def consume_initializer(self, source, t, expressions, position):
         """Consume one possibly brace-elided aggregate initializer."""
@@ -847,11 +895,30 @@ class Frontend:
         while position < len(expressions):
             expression = expressions[position]
             if isinstance(expression, c.NamedInitializer):
-                member_index, member_type, member_offset = self.designated_member(
+                member_index, member_type, member_offset, continuation = self.designated_member(
                     source, t, expression.name
                 )
                 entries = self.initializer(source, member_type, expression.expr)
                 position += 1
+                out.extend(
+                    (member_offset + offset, type_, node)
+                    for offset, type_, node in entries
+                )
+                member_index += 1
+                for next_type, next_offset, next_root in continuation:
+                    if position >= len(expressions) or isinstance(
+                        expressions[position], c.NamedInitializer
+                    ):
+                        break
+                    entries, position = self.consume_initializer(
+                        source, next_type, expressions, position
+                    )
+                    out.extend(
+                        (next_offset + offset, type_, node)
+                        for offset, type_, node in entries
+                    )
+                    member_index = max(member_index, next_root + 1)
+                continue
             else:
                 if member_index >= len(members):
                     break
@@ -900,7 +967,7 @@ class Frontend:
                 expression = init.exprs[0]
                 member_index = 0
                 if isinstance(expression, c.NamedInitializer):
-                    member_index, member_type, member_offset = self.designated_member(
+                    member_index, member_type, member_offset, _ = self.designated_member(
                         s, t, expression.name
                     )
                     expression = expression.expr

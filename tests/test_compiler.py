@@ -342,6 +342,16 @@ class ExecutionTests(unittest.TestCase):
             23,
         )
 
+    def test_anonymous_member_designator_brace_elision_continues_inside_member(self):
+        run(
+            """struct S { int tag; struct { int x; int y; }; int tail; };
+            int main(void) {
+                struct S value = { .x = 1, 2 };
+                return value.x * 100 + value.y * 10 + value.tail;
+            }""",
+            120,
+        )
+
     def test_anonymous_aggregate_members_example(self):
         source = (ROOT / "examples/anonymous_aggregate_members.c").read_text()
         run(source, 28)
@@ -992,7 +1002,21 @@ class DiagnosticTests(unittest.TestCase):
             (
                 "int main(void){struct S{union{struct{int x;};struct{int x;};};};"
                 "struct S value;return value.x;}",
-                "ambiguous member",
+                "duplicate member",
+            ),
+            (
+                "struct Inner; struct Outer { struct Inner; int value; };"
+                "int main(void){return sizeof(struct Outer);}",
+                "complete object type",
+            ),
+            (
+                "int main(void){struct S{const struct{int x;};};"
+                "struct S value={{1}};value.x=2;return value.x;}",
+                "modifiable lvalue",
+            ),
+            (
+                "int main(void){struct S{volatile struct{int x;};};return 0;}",
+                "unsupported type qualifier",
             ),
             ("int main(void){goto missing;return 0;}", "undefined label"),
             ("int main(void){x:return 0;x:return 1;}", "duplicate label"),

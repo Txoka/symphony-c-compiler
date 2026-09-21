@@ -98,7 +98,9 @@ operations do not pull those helpers into the image.
 - Member access with `.` and `->`, initialization of a selected member, and
   union assignment.
 - Anonymous members promote their named submembers through surrounding
-  structures and unions. An ambiguous promoted name is diagnosed.
+  structures and unions. Duplicate promoted names are diagnosed when the
+  containing aggregate is defined; qualifiers on anonymous members apply to
+  their promoted submembers.
 
 ### Statements and functions
 
