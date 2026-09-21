@@ -294,16 +294,17 @@ class Frontend:
             for declaration in t.decls:
                 if declaration.bitsize is not None:
                     self.fail(declaration, "bit-fields are not yet supported")
-                if not declaration.name:
-                    self.fail(declaration, "anonymous structure members are unsupported")
-                if declaration.name in names:
+                if declaration.name and declaration.name in names:
                     self.fail(declaration, "duplicate structure member")
                 member_type = self.typename(declaration)
+                if not declaration.name and member_type.kind not in ("struct", "union"):
+                    self.fail(declaration, "anonymous member must be a structure or union")
                 if member_type.kind in ("void", "function") or not member_type.size:
                     self.fail(declaration, "structure member requires a complete object type")
                 offset = 0 if kind == "union" else align_up(offset, member_type.align)
                 members.append((declaration.name, member_type, offset))
-                names.add(declaration.name)
+                if declaration.name:
+                    names.add(declaration.name)
                 offset = max(offset, member_type.size) if kind == "union" else offset + member_type.size
                 alignment = max(alignment, member_type.align)
             record.members = tuple(members)
@@ -375,6 +376,28 @@ class Frontend:
                 return False
             return Frontend.compatible_type(a.base, b.base)
         return False
+
+    def member_lookup(self, source, aggregate, name):
+        """Resolve a direct or anonymously promoted aggregate member."""
+        matches = []
+
+        def visit(type_, base, direct_index=None):
+            for index, (member_name, member_type, member_offset) in enumerate(
+                type_.record.members
+            ):
+                root_index = index if direct_index is None else direct_index
+                offset = base + member_offset
+                if member_name == name:
+                    matches.append((root_index, member_type, offset))
+                elif member_name is None and member_type.kind in ("struct", "union"):
+                    visit(member_type, offset, root_index)
+
+        visit(aggregate, 0)
+        if not matches:
+            self.fail(source, f"{aggregate.kind} has no member {name}")
+        if len(matches) != 1:
+            self.fail(source, f"ambiguous member {name} through anonymous aggregates")
+        return matches[0]
 
     def bind_vla_bounds(self, declarator, t):
         """Attach saved declaration-time bounds to a variably modified type."""
@@ -617,13 +640,9 @@ class Frontend:
                     self.fail(s, ". requires a structure or union lvalue")
                 structure = base.type
                 address = self.node(s, "address", pointer(structure), [base])
-            member = next(
-                (item for item in structure.record.members if item[0] == s.field.name),
-                None,
+            _, member_type, offset = self.member_lookup(
+                s.field, structure, s.field.name
             )
-            if member is None:
-                self.fail(s.field, f"structure has no member {s.field.name}")
-            _, member_type, offset = member
             if "const" in structure.qualifiers:
                 member_type = member_type.qualified("const")
             return self.node(
@@ -779,17 +798,9 @@ class Frontend:
         direct_index = None
         for designator in designators:
             if isinstance(designator, c.ID) and t.kind in ("struct", "union"):
-                found = next(
-                    (
-                        (index, member_type, member_offset)
-                        for index, (name, member_type, member_offset) in enumerate(t.record.members)
-                        if name == designator.name
-                    ),
-                    None,
+                index, t, member_offset = self.member_lookup(
+                    designator, t, designator.name
                 )
-                if found is None:
-                    self.fail(designator, f"{t.kind} has no member {designator.name}")
-                index, t, member_offset = found
                 direct_index = index if direct_index is None else direct_index
                 offset += member_offset
             elif isinstance(designator, c.Constant) and t.kind == "array":
