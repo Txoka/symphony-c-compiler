@@ -5,7 +5,7 @@ are ordinary values. The backend never sees parser nodes or C expression trees.
 """
 
 from dataclasses import dataclass, field
-from .model import INT, UINT, VOID, Node, Type, pointer, common
+from .model import INT, UINT, VOID, CompileError, Node, Symbol, Type, pointer, common
 
 
 @dataclass
@@ -170,10 +170,28 @@ class Lowerer:
     """
 
     def __init__(self, function):
-        self.f = FunctionIR(function.symbol.key, function.params, function.locals)
+        self.aggregate_return = function.symbol.type.base if function.symbol.type.base.kind == "struct" else None
+        self.sret = (
+            Symbol(
+                "__sret",
+                pointer(self.aggregate_return),
+                "parameter",
+                f"{function.symbol.key}.__sret",
+            )
+            if self.aggregate_return is not None
+            else None
+        )
+        self.f = FunctionIR(
+            function.symbol.key,
+            ([self.sret] if self.sret is not None else []) + function.params,
+            function.locals,
+        )
         self.raw = []
         self.label_id = 0
+        self.temporary_id = 0
         self.loops = []
+        self.breaks = []
+        self.case_labels = {}
         self.scopes = []
         self.dynamic_locals = {}
 
@@ -216,7 +234,49 @@ class Lowerer:
     def store(self, address, value, t):
         self.emit("store", (address, value), t, result=False)
 
+    def aggregate_copy(self, destination, source, size):
+        """Copy through virtual values so partially overlapping objects are safe."""
+        chunks = []
+        offset = 0
+        while offset < size:
+            width = min(4, size - offset)
+            type_ = Type(size=width, signed=False)
+            src = self.binary("+", source, self.const(offset, UINT), UINT) if offset else source
+            chunks.append((offset, type_, self.emit("load", (src,), type_)))
+            offset += width
+        for offset, type_, value in chunks:
+            dst = self.binary("+", destination, self.const(offset, UINT), UINT) if offset else destination
+            self.store(dst, value, type_)
+
+    def aggregate_temporary(self, t):
+        """Reserve caller-owned storage for a structure result."""
+        self.temporary_id += 1
+        symbol = Symbol(
+            "__aggregate_result",
+            t,
+            "local",
+            f"{self.f.name}.__aggregate_result.{self.temporary_id}",
+        )
+        self.f.locals.append(symbol)
+        return self.emit("local_addr", type_=pointer(t), extra=symbol.key)
+
+    def aggregate_call(self, n):
+        destination = self.aggregate_temporary(n.type)
+        target = n.children[0]
+        arguments = [destination, *[self.expr(argument) for argument in n.children[1:]]]
+        if (
+            target.op == "address"
+            and target.children[0].op == "var"
+            and target.children[0].value.storage == "function"
+        ):
+            self.emit("direct_call", arguments, VOID, target.children[0].value.key, result=False)
+        else:
+            self.emit("call", [self.expr(target), *arguments], VOID, result=False)
+        return destination
+
     def address(self, n):
+        if n.op == "aggregate_call":
+            return self.aggregate_call(n)
         if n.op == "var":
             sym = n.value
             if sym.key in self.dynamic_locals:
@@ -261,6 +321,8 @@ class Lowerer:
             return self.emit("load", (self.address(n),), n.type)
         if op == "address":
             return self.address(n.children[0])
+        if op == "aggregate_call":
+            return self.aggregate_call(n)
         if op == "cast":
             return self.cast(self.expr(n.children[0]), n.type)
         if op == "bool_cast":
@@ -313,6 +375,11 @@ class Lowerer:
             value = self.expr(n.children[1])
             self.store(addr, value, n.type)
             return value
+        if op == "aggregate_assign":
+            destination = self.address(n.children[0])
+            source = self.address(n.children[1])
+            self.aggregate_copy(destination, source, n.type.size)
+            return destination
         if op == "compound_assign":
             lhs, rhs = n.children
             addr = self.address(lhs)
@@ -461,13 +528,22 @@ class Lowerer:
                 return
             if entries is not None:
                 addr = self.emit("local_addr", type_=pointer(sym.type), extra=sym.key)
-                if sym.type.kind in ("array", "struct"):
+                if sym.type.kind in ("array", "struct", "union"):
                     self.emit("zero", (addr,), extra=sym.type.size, result=False)
                 for off, t, value in entries:
                     p = self.binary("+", addr, self.const(off), UINT) if off else addr
                     self.store(p, self.expr(value), t)
         elif op == "return":
-            result = self.expr(n.children[0]) if n.children else None
+            if self.aggregate_return is not None and n.children:
+                destination = self.emit(
+                    "load",
+                    (self.emit("local_addr", type_=pointer(pointer(self.aggregate_return)), extra=self.sret.key),),
+                    pointer(self.aggregate_return),
+                )
+                self.aggregate_copy(destination, self.address(n.children[0]), self.aggregate_return.size)
+                result = None
+            else:
+                result = self.expr(n.children[0]) if n.children else None
             for marker in reversed(self.scopes):
                 if marker is not None:
                     self.emit("stack_restore", (marker,), result=False)
@@ -484,6 +560,46 @@ class Lowerer:
             self.jump(end)
             self.mark(no)
             self.statement(n.children[2])
+            self.mark(end)
+        elif op == "switch":
+            cases = []
+
+            def collect(node):
+                if node.op == "switch":
+                    return
+                if node.op in ("case", "default"):
+                    cases.append(node)
+                for child in node.children:
+                    collect(child)
+
+            collect(n.children[1])
+            values = set()
+            default = None
+            for case in cases:
+                if case.op == "default":
+                    if default is not None:
+                        raise CompileError("duplicate default label")
+                    default = case
+                elif case.value in values:
+                    raise CompileError("duplicate case label")
+                else:
+                    values.add(case.value)
+            end = self.label()
+            labels = {id(case): self.label() for case in cases}
+            self.case_labels.update(labels)
+            selector = self.expr(n.children[0])
+            for case in cases:
+                if case.op == "case":
+                    comparison = self.binary(
+                        "==", selector, self.const(case.value, n.children[0].type), INT
+                    )
+                    self.branch(comparison, labels[id(case)])
+            self.jump(labels[id(default)] if default is not None else end)
+            self.breaks.append((end, len(self.scopes)))
+            self.statement(n.children[1])
+            self.breaks.pop()
+            for case in cases:
+                self.case_labels.pop(id(case), None)
             self.mark(end)
         elif op in ("while", "for", "do"):
             test, body, step, end = (
@@ -503,6 +619,7 @@ class Lowerer:
             else:
                 cond, stmt = n.children
             self.loops.append((end, step, len(self.scopes) - (1 if loop_marker is not None else 0)))
+            self.breaks.append((end, len(self.scopes) - (1 if loop_marker is not None else 0)))
             if op == "do":
                 self.jump(body)
             self.mark(test)
@@ -515,11 +632,12 @@ class Lowerer:
             self.jump(test)
             self.mark(end)
             self.loops.pop()
+            self.breaks.pop()
             if loop_marker is not None:
                 self.scopes.pop()
                 self.emit("stack_restore", (loop_marker,), result=False)
         elif op == "break":
-            end, _, scope_start = self.loops[-1]
+            end, scope_start = self.breaks[-1]
             for marker in reversed(self.scopes[scope_start:]):
                 if marker is not None:
                     self.emit("stack_restore", (marker,), result=False)
@@ -530,6 +648,10 @@ class Lowerer:
                 if marker is not None:
                     self.emit("stack_restore", (marker,), result=False)
             self.jump(step)
+        elif op in ("case", "default"):
+            self.mark(self.case_labels[id(n)])
+            for child in n.children:
+                self.statement(child)
         else:
             raise AssertionError(f"unhandled typed statement {op}")
 
@@ -542,7 +664,7 @@ def lower(program):
         # Deterministic fallthrough; only main's implicit return is specified by C.
         l.emit(
             "return",
-            () if f.symbol.type.base == VOID else (l.const(0),),
+            () if f.symbol.type.base in (VOID,) or f.symbol.type.base.kind == "struct" else (l.const(0),),
             result=False,
         )
         l.finish()

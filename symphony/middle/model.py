@@ -11,6 +11,7 @@ class CompileError(Exception):
 @dataclass(eq=False)
 class Record:
     tag: str
+    kind: str = "struct"
     members: tuple = ()
     size: int = 0
     alignment: int = 1
@@ -53,13 +54,13 @@ class Type:
 
     @property
     def size(self):
-        return self.record.size if self.kind == "struct" else self.width
+        return self.record.size if self.kind in ("struct", "union") else self.width
 
     @property
     def align(self):
         if self.kind in ("array", "vla"):
             return self.base.align
-        if self.kind == "struct":
+        if self.kind in ("struct", "union"):
             return self.record.alignment
         return min(max(self.size, 1), 4)
 
@@ -112,8 +113,8 @@ class Type:
             return f"{prefix}{self.base}[*]"
         if self.kind == "function":
             return f'{prefix}{self.base}({", ".join(map(str, self.params))})'
-        if self.kind == "struct":
-            return f"{prefix}struct {self.record.tag or '<anonymous>'}"
+        if self.kind in ("struct", "union"):
+            return f"{prefix}{self.kind} {self.record.tag or '<anonymous>'}"
         if self.kind == "void":
             return f"{prefix}void"
         if self.kind == "bool":

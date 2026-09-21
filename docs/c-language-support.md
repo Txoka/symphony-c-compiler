@@ -64,7 +64,9 @@ operations do not pull those helpers into the image.
 - File-scope `extern` declarations resolved across all linked translation units.
 - File-scope and block-scope `typedef` declarations, including normal shadowing.
 - Fixed-size arrays, multidimensional arrays, inferred outer bounds, partial
-  brace initialization, and character-array initialization from strings.
+  initialization, brace elision, member designators such as `.field = value`,
+  array-index designators such as `[3] = value`, and character-array
+  initialization from strings.
 - Runtime-sized local arrays (VLAs), including `char bytes[count]`,
   `int matrix[rows][columns]`, pointer-to-VLA parameters, and VLA typedefs. Bounds
   are evaluated once at declaration or function entry. Storage is reserved when the
@@ -79,8 +81,20 @@ operations do not pull those helpers into the image.
 - Natural member alignment capped at four bytes, including tail padding.
 - Nested structures and arrays as members.
 - Member access with `.` and `->`.
-- Nested brace initialization for global and local structure objects.
+- Nested, designated, and brace-elided initialization for global and local
+  structure objects.
 - `sizeof` for complete structure types and structure expressions.
+- Structure assignment, including assignments that overlap in memory.
+- Structure-returning functions, including direct and function-pointer calls.
+  The ABI passes a hidden pointer to caller-owned result storage as the first
+  argument; source code still uses ordinary C `return object;` and
+  `struct T value = make();` forms.
+
+### Unions
+
+- Named and anonymous unions, including nested arrays and structures as members.
+- Member access with `.` and `->`, initialization of a selected member, and
+  union assignment.
 
 ### Statements and functions
 
@@ -88,11 +102,16 @@ operations do not pull those helpers into the image.
 - `if`/`else`.
 - `while`, `do`/`while`, and `for`, including declaration initializers.
 - `break` and `continue` inside loops.
+- `switch` with integer constant-expression `case` labels, `default`,
+  fallthrough, and `break`. The selector is evaluated once and currently
+  lowers to a linear comparison-and-branch chain; no jump-table or hash
+  dispatch is emitted.
 - Function declarations and definitions, direct calls, indirect function-pointer
   calls, ordinary recursion, and optimized tail calls.
-- Scalar parameters and scalar return values. Arguments one through seven use
-  `r1` through `r7`; later scalar arguments are passed on the stack. `r1` holds
-  the return value.
+- Scalar parameters and scalar return values. Structures may be returned by
+  value through a hidden caller-provided result pointer; aggregate parameters
+  remain unsupported. Arguments one through seven use `r1` through `r7`; later
+  scalar arguments are passed on the stack. `r1` holds a scalar return value.
 
 The program entry point must be `int main(void)` or `int main()`. In this subset,
 an empty parameter list means no parameters. Falling out of `main` returns zero.
@@ -103,20 +122,23 @@ an empty parameter list means no parameters. Falling out of `main` returns zero.
 |---|---|
 | Source processing | Macro stringification/pasting, variadic macros, full hosted headers, and some implementation-specific directives |
 | Separate compilation | Serializable object files, archives, incremental linking, external binary libraries, and dynamic linking |
-| Types | `long long`, floating point, complex types, unions, and bit-fields |
+| Types | `long long`, floating point, complex types, and bit-fields |
 | Qualifiers/specifiers | `volatile`, `restrict`, `_Atomic`, thread-local storage, and local `extern` |
-| Aggregate operations | Structure assignment and structures passed to or returned from functions by value |
-| Initializers | Designated initializers and general brace elision |
+| Aggregate operations | Aggregates passed to functions by value, unions returned by value, and aggregate assignment whose right-hand side is not an lvalue |
+| Initializers | Some complex continuation cases after nested designated initializers |
+| Aggregate members | Anonymous members |
 | Arrays | Flexible array members |
-| Control flow | `switch`/`case`/`default`, `goto`, and labels used by `goto` |
-| Functions | Variadic functions, old-style definitions, and aggregate calling conventions |
+| Control flow | `goto` and labels used by `goto` |
+| Functions | Variadic functions, old-style definitions, aggregate parameter conventions, and union-return conventions |
 | Hosted runtime | File I/O, locale, and the rest of a hosted C library beyond the small freestanding headers listed below |
 | Character support | Wide and Unicode character/string literal types |
 | Low-level extensions | Inline assembly and compiler-specific attribute syntax |
 
 Multiple tentative definitions of one global are rejected rather than merged.
-Non-VLA array bounds must be compile-time constants. Aggregate initialization requires
-the currently supported nested-brace form. Decimal constants above `2147483647`
+Non-VLA array bounds must be compile-time constants. Designators may select a
+structure member or a constant fixed-array index; nested/brace-elided forms work
+for ordinary aggregate initialization, while some C continuation edge cases after
+a nested designator remain unsupported. Decimal constants above `2147483647`
 need an explicit `U` suffix when their value fits `unsigned int`; values that
 require a 64-bit C type are unsupported.
 

@@ -237,10 +237,10 @@ This is a C subset compiler, not a conforming full C implementation. Unsupported
 - Multiple source translation units link directly into one optimized flat image.
   Serializable object files, archives, dynamic linking, and incremental linking
   are not yet implemented.
-- No 64-bit `long long`, floating point, unions, bit-fields, or variadic functions.
-- No `volatile` or `restrict`, local `extern`, designated initializers, `switch`, `goto`, or inline assembly.
-- No aggregate arguments/returns or old-style function definitions.
-- Structure assignment is not implemented. Aggregate initializers require nested braces; brace elision and designated initialization are not implemented. Non-VLA array bounds must be compile-time constants. Multiple tentative global definitions are rejected rather than merged.
+- No 64-bit `long long`, floating point, bit-fields, or variadic functions.
+- No `volatile` or `restrict`, local `extern`, `goto`, or inline assembly.
+- No aggregate arguments, union returns, or old-style function definitions.
+- Structures return by value through caller-owned result storage. Aggregate initializers support ordinary and designated forms, including brace elision; advanced designated-initializer continuation cases remain incomplete. Non-VLA array bounds must be compile-time constants. Multiple tentative global definitions are rejected rather than merged.
 - Decimal literals above `2147483647` need an explicit `U` suffix because unsuffixed decimal values would require an unsupported 64-bit C type. Write the minimum signed integer as `(-2147483647 - 1)` or cast `0x80000000u`.
 - Strings use ordinary single-byte characters and escapes; no wide/Unicode literal types. String literals reside in writable unified memory, but modifying one is still C undefined behavior.
 - The optimizer promotes non-escaping scalar locals, propagates copies and constants, folds scalar expressions, simplifies control flow, rematerializes constants and addresses, selects immediate ALU forms, removes unused pure values and functions, strength-reduces power-of-two arithmetic, and includes only reachable arithmetic helpers.
