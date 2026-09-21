@@ -12,7 +12,7 @@ from .induction import reduce_induction_strength
 from .loop_memory import eliminate_redundant_loop_memory
 from .copies import propagate_global_copies
 from .algebra import simplify_algebra
-from .fuse_branches import fuse_comparison_branches
+from .fuse_branches import fuse_comparison_branches, fuse_comparison_zero_tests
 from .strength import reduce_strength
 from .calls import identify_direct_calls
 from .parameters import promote_readonly_parameters
@@ -34,6 +34,7 @@ __all__ = [
     "propagate_global_copies",
     "simplify_algebra",
     "fuse_comparison_branches",
+    "fuse_comparison_zero_tests",
     "reduce_strength",
     "identify_direct_calls",
     "promote_readonly_parameters",

@@ -62,6 +62,66 @@ preserving the full suite after each atomic change:
    specialization and multi-site inlining only under an explicit size/cycle
    profitability policy, after the preceding foundations expose their gains.
 
+## GCC differential review (2026-09)
+
+The real same-ISA GCC backend was used to compile every checked-in example at
+`-Os` and `-O2`.  This is an instruction-selection comparison, not a
+host-code comparison: both compilers emit the same Symphony `mov`, ALU,
+load/store, conditional-branch, and link-register-call encodings.  GCC's
+advantages therefore identify missing IR and code-generation transformations;
+its raw-image-size disadvantages often identify runtime/linker policy instead.
+
+- [x] **Branch merging and jump threading.** The existing CFG pass removes
+  convergent conditional paths and redundant jumps when phi values permit it.
+  `examples/branch_merge.c` is the executable regression: 44 bytes with CFG
+  simplification disabled, 12 bytes enabled, with both branch outcomes checked.
+- [x] **Comparison-zero-test fusion.** A safe local implementation folds a
+  sole-use `(comparison == 0)` or `(comparison != 0)` branch back to its
+  original predicate.  `examples/comparison_zero_test.c` is the executable
+  regression: 96 bytes with the pass disabled, 52 bytes enabled, with both
+  branch outcomes checked.
+- [ ] **Short-circuit predicate fusion.** Recognize a compare whose 0/1 result
+  flows through a loop-carried phi/copy and a zero-test before a branch.  Apply
+  only when the alternate incoming value and all uses preserve Boolean
+  semantics.  `insertion_sort.c` currently exposes this form; the existing
+  local comparison-branch fusion cannot cross that phi.
+- [ ] **Pointer induction and loop-address CSE.** Give an indexed loop a
+  derived advancing pointer and, where valid, a pointer end bound.  Reuse
+  bases and address increments rather than recomputing `base + index`.
+  This is the most visible instruction-level difference in GCC's
+  `insertion_sort`, sieve, and numeric-array loops.
+- [ ] **Bulk memory idioms.** Recognize proven non-overlapping fixed-size or
+  counted byte fill/copy loops and choose a size/cycle-costed inline
+  byte/word loop or runtime `memset`/`memcpy` call.  Preserve aliasing,
+  overlap, observable bound evaluation, and target byte order.  GCC recognizes
+  the sieve initialization as `memset`; scc currently emits the source loop.
+- [ ] **Paired division/remainder.** This remains the highest measured
+  arithmetic priority.  Represent the pair as an explicit two-result IR
+  operation and lower it to one `__dyn_[us]divmod` invocation whose quotient
+  and remainder occupy ABI result registers.  Do not infer a pair across a
+  call, store, possible trap/undefined operation, or mutable operand.  The
+  current decimal-format path in `primes.c` invokes the helper separately
+  for related quotient and remainder values.
+- [ ] **Dead storage and bounded evaluation.** Prioritize the existing general
+  dead-storage/evaluator item for fully known local-object programs.
+  GCC reduces `arena_allocator.c`'s `main` to `mov r1, 1`; scc must
+  prove the local writes and copies unobservable before doing the same.
+- [ ] **SSA-aware liveness/allocation.** Retain its existing priority after
+  the loop transformations above expose durable pointer and bound values.
+  Prefer keeping those values in registers over allocating stack homes around
+  calls.
+- [ ] **Comparison measurement hygiene.** Report GCC source text, data, and
+  BSS separately from its linked raw image.  The current GCC linker serializes
+  BSS zeroes, producing 7.25 MiB for `hypercube.c` and 586 KiB for
+  `render.c`; this is a toolchain-image policy difference, not code size or
+  an optimization regression in scc.  Keep scc's compact BSS-clear strategy
+  as the baseline unless a loader/BSS contract is introduced deliberately.
+
+GCC is not uniformly better: scc's single-site inlining and self-tail-loop
+lowering make `towers_of_hanoi.c` substantially smaller and faster.  Preserve
+that behavior while improving ordinary loops; do not replace it with a generic
+recursive-layout transformation.
+
 Do not treat a terminating program alone as a valid benchmark result: compare
 its return value and externally visible output to the reference run. The GCC
 `-O2` runtime `memset` self-recursion incident demonstrated why this check is

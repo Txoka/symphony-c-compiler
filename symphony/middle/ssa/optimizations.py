@@ -15,6 +15,7 @@ OPTIMIZATIONS = {
     "induction_strength_reduction": True,
     "redundant_loop_memory_elimination": True,
     "comparison_branch_fusion": True,
+    "comparison_zero_test_fusion": True,
     "dead_value_elimination": True,
     "cfg_simplification": True,
     "readonly_parameter_promotion": True,
@@ -30,4 +31,3 @@ OPTIMIZATIONS = {
 def enabled(name):
     """Return whether the named optional optimization is enabled."""
     return OPTIMIZATIONS[name]
-

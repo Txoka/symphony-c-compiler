@@ -19,6 +19,7 @@ from symphony.frontend import parse, typecheck
 from symphony.ir import lower
 from symphony import isa
 from symphony.targets.symphony.abi import ABI
+from symphony.middle.ssa.optimizations import OPTIMIZATIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ISA = os.environ.get("SYMPHONY_TEST_ISA", "symphony")
@@ -995,6 +996,44 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class EncodingTests(unittest.TestCase):
+    def test_branch_merge_example_beats_unoptimized_cfg(self):
+        source = (ROOT / "examples" / "branch_merge.c").read_text()
+        old = OPTIMIZATIONS["cfg_simplification"]
+        try:
+            OPTIMIZATIONS["cfg_simplification"] = False
+            unoptimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["cfg_simplification"] = old
+        optimized = _compile_source(source, target=Target())
+
+        def execute(result, inputs):
+            machine = Machine(result.image.binary, inputs=inputs)
+            return machine.run(result.image.symbols["_halt"])
+
+        for inputs in ((0,), (1,)):
+            self.assertEqual(execute(unoptimized, inputs), 4)
+            self.assertEqual(execute(optimized, inputs), 4)
+        self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
+
+    def test_comparison_zero_test_example_beats_unoptimized_branch_form(self):
+        source = (ROOT / "examples" / "comparison_zero_test.c").read_text()
+        old = OPTIMIZATIONS["comparison_zero_test_fusion"]
+        try:
+            OPTIMIZATIONS["comparison_zero_test_fusion"] = False
+            unoptimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["comparison_zero_test_fusion"] = old
+        optimized = _compile_source(source, target=Target())
+
+        def execute(result, inputs):
+            machine = Machine(result.image.binary, inputs=inputs)
+            return machine.run(result.image.symbols["_halt"])
+
+        for inputs, expected in (((1, 2), 7), ((2, 1), 3)):
+            self.assertEqual(execute(unoptimized, inputs), expected)
+            self.assertEqual(execute(optimized, inputs), expected)
+        self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

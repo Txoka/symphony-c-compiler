@@ -26,6 +26,7 @@ from symphony.middle.ssa import (
     propagate_global_copies,
     simplify_algebra,
     fuse_comparison_branches,
+    fuse_comparison_zero_tests,
     reduce_strength,
     promote_readonly_parameters,
     eliminate_tail_calls,
@@ -606,6 +607,32 @@ class OptimizationTests(unittest.TestCase):
         entry = function.blocks[0].instructions
         self.assertEqual(entry[-1], Instruction("cbranch_if", args=(0, 1), type=INT, extra=("<", "yes")))
         self.assertFalse(any(item.op == "binary" for item in entry))
+
+    def test_comparison_zero_test_branch_fuses_to_original_predicate(self):
+        function = FunctionIR(
+            "fuse_zero_test",
+            [],
+            [],
+            [
+                BasicBlock("entry", [
+                    Instruction("param", 0, (), INT, "left"),
+                    Instruction("param", 1, (), INT, "right"),
+                    Instruction("binary", 2, (0, 1), INT, ">"),
+                    Instruction("const", 3, (), INT, 0),
+                    Instruction("binary", 4, (2, 3), INT, "!="),
+                    Instruction("branch_if", None, (4,), INT, (True, "yes")),
+                ]),
+                BasicBlock("no", [Instruction("return", None, (0,), INT)]),
+                BasicBlock("yes", [Instruction("return", None, (1,), INT)]),
+            ],
+            5,
+        )
+        verify(function)
+        self.assertTrue(fuse_comparison_zero_tests(function))
+        verify(function)
+        entry = function.blocks[0].instructions
+        self.assertEqual(entry[-1], Instruction("cbranch_if", args=(0, 1), type=INT, extra=(">", "yes")))
+        self.assertFalse(any(item.dst in (2, 4) for item in entry))
 
     def test_algebra_simplifies_unknown_ssa_values_without_losing_validity(self):
         function = FunctionIR(

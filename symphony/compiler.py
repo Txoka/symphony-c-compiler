@@ -18,6 +18,7 @@ from .middle.ssa import (
     propagate_global_copies,
     simplify_algebra,
     fuse_comparison_branches,
+    fuse_comparison_zero_tests,
     reduce_strength,
     identify_direct_calls,
     promote_readonly_parameters,
@@ -63,6 +64,9 @@ eliminate_redundant_loop_memory = _optional_optimization(
 )
 fuse_comparison_branches = _optional_optimization(
     "comparison_branch_fusion", fuse_comparison_branches
+)
+fuse_comparison_zero_tests = _optional_optimization(
+    "comparison_zero_test_fusion", fuse_comparison_zero_tests
 )
 remove_dead_values = _optional_optimization("dead_value_elimination", remove_dead_values)
 simplify_control_flow = _optional_optimization("cfg_simplification", simplify_control_flow)
@@ -136,6 +140,8 @@ class Compiler:
             reduce_induction_strength(function)
             verify(function)
             eliminate_redundant_loop_memory(function)
+            verify(function)
+            fuse_comparison_zero_tests(function)
             verify(function)
             fuse_comparison_branches(function)
             verify(function)

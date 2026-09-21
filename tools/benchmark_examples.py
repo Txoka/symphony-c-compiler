@@ -26,6 +26,7 @@ from toolchain import Toolchain, ToolchainNotBuilt
 CASES = {
     "arena_allocator.c": (),
     "bigprime.c": (),
+    "c_aggregate_compat.c": (),
     "constant_folding.c": (),
     "demo.c": (),
     "dynamic_sensor_report.c": (8, 4, -2, 4, 9, 0, -2, 7, 1),
@@ -90,10 +91,10 @@ def main():
     rows, notes = [], []
     with tempfile.TemporaryDirectory(prefix="symphony-example-bench-") as raw_tmp:
         tmp = Path(raw_tmp)
-        for path in sorted((ROOT / "examples").glob("*.c")):
-            inputs = CASES.get(path.name)
-            if inputs is None:
-                raise RuntimeError(f"missing deterministic input case for {path.name}")
+        for name, inputs in sorted(CASES.items()):
+            path = ROOT / "examples" / name
+            if not path.is_file():
+                raise RuntimeError(f"benchmark source is missing: {path}")
             source = path.read_text()
             values = []
             for label, runner in (
