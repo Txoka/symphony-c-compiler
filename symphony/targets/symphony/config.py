@@ -11,7 +11,7 @@ class Target:
     persistent_size: int = 0
     load_address: int = 0
     pic: bool = False
-    include_framebuffer: bool = False
+    bss_mode: str = "auto"
     isa: str = "symphony"
 
     def validate(self):
@@ -29,6 +29,10 @@ class Target:
             raise CompileError("load address must fit 32 bits")
         if self.isa not in ("dynphony", "symphony"):
             raise CompileError("ISA must be 'dynphony' or 'symphony'")
+        if self.bss_mode not in ("auto", "never", "assume-zeroed"):
+            raise CompileError(
+                "BSS mode must be 'auto', 'never', or 'assume-zeroed'"
+            )
 
     @property
     def fixed_instruction_width(self):

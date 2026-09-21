@@ -28,12 +28,12 @@ char *screen_framebuffer(void);
 void screen_cursor(unsigned int x, unsigned int y);
 """
 
-# Included only when the source contains a direct call to printf or one of the
-# text-screen helpers. ASCII 8 mode maps one byte to each of 96 * 40 cells.
+# Text-screen runtime. ASCII 8 mode maps one byte to each of 96 * 40 cells.
+# Its functions and globals are pruned like every other unused runtime symbol.
 SCREEN_SOURCE = r"""
-extern unsigned char __dyn_printf_framebuffer[3840];
-extern unsigned int __dyn_printf_cursor;
-extern unsigned int __dyn_printf_column;
+unsigned char __dyn_printf_framebuffer[3840];
+unsigned int __dyn_printf_cursor;
+unsigned int __dyn_printf_column;
 
 unsigned int __dyn_printf_put(unsigned int value) {
     if (value == 10) {

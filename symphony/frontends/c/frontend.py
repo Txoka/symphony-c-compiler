@@ -517,7 +517,7 @@ class Frontend:
                     f"__string_{self.serial}", array(CHAR, len(data)), "global"
                 )
                 sym.key = self.internal_key(sym.key)
-                self.globals.append(Global(sym, bytearray(data)))
+                self.globals.append(Global(sym, bytearray(data), section="rodata"))
                 return self.node(s, "var", sym.type, value=sym, lvalue=True)
             if s.type == "char":
                 data = literal_bytes(s.value, "'")

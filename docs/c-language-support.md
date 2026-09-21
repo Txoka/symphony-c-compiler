@@ -135,7 +135,7 @@ heap-colliding dynamic stack allocations enter the `_stack_overflow` loop.
 Include `<stdlib.h>` for `malloc`, `free`, `calloc`, and `realloc`; include
 `<string.h>` for `memcpy`, `memmove`, `memset`, and `memcmp`. Their size/count
 parameters use `size_t`, the target's 32-bit unsigned size type. The heap begins after all static
-and reserved data, grows upward, and is checked against the live descending
+storage (including BSS), grows upward, and is checked against the live descending
 stack whenever it grows. Allocations are 4-byte aligned. The allocator uses a
 first-fit free list with block splitting and adjacent-block coalescing. Zero-size
 allocation returns null; allocation failure and `calloc` multiplication overflow
@@ -204,17 +204,30 @@ Its format must be a literal and supports `%%`, `%c`, `%d`, `%u`, `%x`, and
 `%s`. Variadic function declarations are not generally supported yet; the
 minimal `<stdio.h>` declaration is recognized specially for this built-in.
 
-The text framebuffer is reserved only when a direct call to `printf`,
-`screen_framebuffer`, or `screen_cursor` appears in the source. By default it
-is placed immediately after the serialized image rather than increasing the
-binary by 3,840 bytes. Startup clears that reservation with 960 32-bit stores,
-unrolled eight at a time, selects ASCII 8 mode, and points the screen at it
-while leaving color and font settings unchanged. Pass `--include-framebuffer`
-to serialize its zero-filled 3,840 bytes into the binary instead; this makes
-the file larger but avoids the startup clear. Newlines
+The text framebuffer is allocated in BSS only when a direct call to `printf`,
+`screen_framebuffer`, or `screen_cursor` appears in the source. It is therefore
+placed immediately after the serialized image without increasing the binary by
+3,840 bytes. Startup clears the complete BSS range, selects ASCII 8 mode, and
+points the screen at the framebuffer while leaving color and font settings
+unchanged. `--bss=assume-zeroed` omits that clear when the loader/platform
+guarantees zero-filled RAM. Newlines
 advance to the next 96-character row. Output past row 40 is discarded;
 scrolling can be implemented by application code that rewrites the buffer and
 calls `screen_cursor`.
+
+### Static storage layout
+
+After whole-program optimization removes unused globals, static objects are
+laid out in three logical sections. RODATA contains string literals and const
+objects; DATA contains initialized mutable objects and address relocations; BSS
+contains selected all-zero, non-relocatable mutable objects, including
+zero-initialized globals and static locals. RODATA and DATA are serialized in
+the raw image; BSS has virtual addresses after it and is zeroed at startup.
+`--bss=auto` (the default) selects BSS only when its word-clear code is smaller
+than serializing the zero bytes. `--bss=never` serializes those bytes instead;
+`--bss=assume-zeroed` uses BSS without emitting startup clears. The raw
+image has no hardware read-only mapping yet, so RODATA is an organizational
+distinction rather than write protection.
 
 ## Other target facilities
 

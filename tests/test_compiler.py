@@ -71,14 +71,12 @@ def run(
     address=0,
     ram=1 << 20,
     inputs=(),
-    include_framebuffer=False,
 ):
     source = source.replace("-2147483648", "(-2147483647-1)")
     target = Target(
         ram_size=ram,
         pic=pic,
         load_address=0 if pic else address,
-        include_framebuffer=include_framebuffer,
     )
     result = compile_source(source, target=target)
     machine = Machine(result.image.binary, ram, address, inputs=inputs)
@@ -265,24 +263,21 @@ class ExecutionTests(unittest.TestCase):
         )
 
     def test_heap_starts_after_text_framebuffer(self):
-        for include in (False, True):
-            with self.subTest(include_framebuffer=include):
-                result, _ = run(
-                    """int main(void) {
-                        unsigned char *framebuffer =
-                            (unsigned char *)screen_framebuffer();
-                        unsigned char *allocation = malloc(4);
-                        return allocation != 0
-                            && allocation >= framebuffer + 3840
-                            && (((unsigned int)allocation & 3u) == 0);
-                    }""",
-                    1,
-                    include_framebuffer=include,
-                )
-                self.assertGreater(
-                    result.image.symbols["__dyn_heap_anchor"],
-                    result.image.symbols["__dyn_printf_framebuffer"],
-                )
+        result, _ = run(
+            """int main(void) {
+                unsigned char *framebuffer =
+                    (unsigned char *)screen_framebuffer();
+                unsigned char *allocation = malloc(4);
+                return allocation != 0
+                    && allocation >= framebuffer + 3840
+                    && (((unsigned int)allocation & 3u) == 0);
+            }""",
+            1,
+        )
+        self.assertGreater(
+            result.image.symbols["__dyn_heap_start"],
+            result.image.symbols["__dyn_printf_framebuffer"],
+        )
 
     def test_bool_type_and_char_arrays(self):
         run("bool global_flag = 9; int main(void) { return global_flag; }", 1)
@@ -355,16 +350,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(bytes(machine.memory[framebuffer + 192 : framebuffer + 197]), b"hello")
         self.assertEqual(machine.memory[framebuffer + 288], ord("A"))
 
-        included, included_machine = run(source, 0, include_framebuffer=True)
-        included_framebuffer = included.image.symbols["__dyn_printf_framebuffer"]
-        self.assertGreater(len(included.image.binary), len(result.image.binary) + 3_700)
-        self.assertLess(included_framebuffer, len(included.image.binary))
         self.assertGreaterEqual(framebuffer, len(result.image.binary))
-        self.assertLess(included_machine.steps + 900, machine.steps)
-        self.assertEqual(
-            bytes(included_machine.memory[included_framebuffer : included_framebuffer + 2]),
-            b"42",
-        )
 
         result, machine = run(
             """int main(void) {
@@ -377,6 +363,52 @@ class ExecutionTests(unittest.TestCase):
         )
         self.assertIn("__dyn_printf_framebuffer", result.image.symbols)
         self.assertEqual(machine.memory[result.image.symbols["__dyn_printf_framebuffer"] + 197], 90)
+
+    def test_static_storage_sections_and_bss_startup_zeroing(self):
+        source = """int initialized = 9;
+            const int read_only = 4;
+            int zeroes[256];
+            static unsigned char bytes[3];
+            int main(void) {
+                static unsigned short local_zero;
+                output((unsigned int)&initialized);
+                output((unsigned int)&read_only);
+                output((unsigned int)&zeroes);
+                output((unsigned int)&bytes);
+                output((unsigned int)&local_zero);
+                return initialized + read_only + zeroes[255] + bytes[2] + local_zero;
+            }"""
+        result, _ = run(source, 13)
+        globals_ = {global_.symbol.name: global_ for global_ in result.ir.globals}
+        sections = {name: global_.section for name, global_ in globals_.items()}
+        self.assertEqual(sections["initialized"], "data")
+        self.assertEqual(sections["read_only"], "rodata")
+        self.assertEqual(sections["zeroes"], "bss")
+        self.assertEqual(sections["bytes"], "bss")
+        self.assertEqual(sections["local_zero"], "bss")
+        self.assertLess(result.image.symbols[globals_["initialized"].symbol.key], len(result.image.binary))
+        self.assertLess(result.image.symbols[globals_["read_only"].symbol.key], len(result.image.binary))
+        for name in ("zeroes", "bytes"):
+            self.assertGreaterEqual(
+                result.image.symbols[globals_[name].symbol.key], len(result.image.binary)
+            )
+
+        assumed = compile_source(source, target=Target(bss_mode="assume-zeroed"))
+        self.assertLess(len(assumed.image.binary), len(result.image.binary))
+        self.assertGreaterEqual(
+            assumed.image.symbols["zeroes"], len(assumed.image.binary)
+        )
+
+        tiny = compile_source(
+            "static unsigned char byte; int main(void) { output((unsigned int)&byte); return byte; }"
+        )
+        tiny_global = next(global_ for global_ in tiny.ir.globals if global_.symbol.name == "byte")
+        self.assertEqual(tiny_global.section, "data")
+        self.assertLess(tiny.image.symbols[tiny_global.symbol.key], len(tiny.image.binary))
+
+        never = compile_source(source, target=Target(bss_mode="never"))
+        never_zeroes = next(global_ for global_ in never.ir.globals if global_.symbol.name == "zeroes")
+        self.assertEqual(never_zeroes.section, "data")
 
     def test_big_endian_and_unaligned(self):
         run(
@@ -786,6 +818,8 @@ class DiagnosticTests(unittest.TestCase):
             Target(persistent_size=13),
             Target(load_address=-1),
             Target(ram_size=4),
+            Target(bss_mode="invalid"),
+            Target(bss_mode="always"),
         ]:
             with self.subTest(target=target), self.assertRaises(CompileError):
                 compile_source("int main(void){return 0;}", target=target)
@@ -1235,6 +1269,7 @@ class EncodingTests(unittest.TestCase):
                 "-o",
                 str(path / "demo.bin"),
                 "--pic",
+                "--bss=assume-zeroed",
                 "--run",
                 "--run-address",
                 "0x12345",
@@ -1251,6 +1286,10 @@ class EncodingTests(unittest.TestCase):
             self.assertTrue((path / "demo.bin").stat().st_size > 0)
             self.assertTrue(
                 json.loads((path / "map.json").read_text())["target"]["pic"]
+            )
+            self.assertTrue(
+                json.loads((path / "map.json").read_text())["target"]["bss_mode"]
+                == "assume-zeroed"
             )
             self.assertEqual(
                 json.loads((path / "map.json").read_text())["target"]["isa"],

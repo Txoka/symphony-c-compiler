@@ -195,7 +195,13 @@ class CompilerIntegrationTests(unittest.TestCase):
         result, machine = compile_and_run(
             MIXED_FEATURE_PROGRAM, 36, target=target
         )
-        self.assertTrue(all(address % 4 == 0 for address in result.image.symbols.values()))
+        self.assertTrue(
+            all(
+                address % 4 == 0
+                for name, address in result.image.symbols.items()
+                if not name.startswith("@")
+            )
+        )
         self.assertEqual(machine.regs[14], 0)
         compile_and_run(
             MIXED_FEATURE_PROGRAM,
@@ -240,7 +246,7 @@ class CompilerIntegrationTests(unittest.TestCase):
                 0,
             ],
         )
-        self.assertIn("__dyn_heap_anchor", result.image.symbols)
+        self.assertIn("__dyn_heap_start", result.image.symbols)
 
     @unittest.skipUnless(NATIVE_AVAILABLE, "expensive example correctness checks require native emulator")
     def test_expensive_example_outputs(self):
@@ -298,23 +304,18 @@ class CompilerIntegrationTests(unittest.TestCase):
             printf("%c", 'A');
             return framebuffer[0] + framebuffer[5] + framebuffer[96];
         }'''
-        for include_framebuffer in (False, True):
-            with self.subTest(include_framebuffer=include_framebuffer):
-                result, machine = compile_and_run(
-                    source,
-                    ord("v") + ord("=") + ord("A"),
-                    target=Target(include_framebuffer=include_framebuffer),
-                )
-                framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
-                self.assertEqual(machine.screen_updates, [(0, 0), (1, framebuffer)])
-                self.assertEqual(
-                    bytes(machine.memory[framebuffer : framebuffer + 8]), b"value=2a"
-                )
-                self.assertEqual(machine.memory[framebuffer + 96], ord("A"))
-                if include_framebuffer:
-                    self.assertLess(framebuffer, len(result.image.binary))
-                else:
-                    self.assertGreaterEqual(framebuffer, len(result.image.binary))
+        result, machine = compile_and_run(
+            source,
+            ord("v") + ord("=") + ord("A"),
+            target=Target(),
+        )
+        framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+        self.assertEqual(machine.screen_updates, [(0, 0), (1, framebuffer)])
+        self.assertEqual(
+            bytes(machine.memory[framebuffer : framebuffer + 8]), b"value=2a"
+        )
+        self.assertEqual(machine.memory[framebuffer + 96], ord("A"))
+        self.assertGreaterEqual(framebuffer, len(result.image.binary))
 
     def test_division_and_multiply_helper_edge_cases(self):
         """Regression coverage for __dyn_udivmod's algorithm swap (fixed

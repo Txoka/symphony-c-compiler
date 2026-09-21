@@ -24,10 +24,145 @@ class Backend:
         self.frames = {}
         self.private_id = 0
         self.needs_stack_overflow = False
+        self.bss_clear_unroll = None
+        self.select_bss_sections()
 
     def unique(self):
         self.private_id += 1
         return f"@backend.{self.private_id}"
+
+    def bss_globals(self):
+        return [global_ for global_ in self.module.globals if global_.section == "bss"]
+
+    def bss_size(self, globals_=None):
+        size = 0
+        for global_ in self.bss_globals() if globals_ is None else globals_:
+            size = align_up(size, global_.symbol.type.align)
+            size += len(global_.data)
+        # The heap begins after BSS, so final alignment padding is available
+        # to the clear routine. This permits word-only clearing.
+        return align_up(size, 4)
+
+    def instruction_size(self, data):
+        if not self.target.fixed_instruction_width:
+            return len(data)
+        # Every instruction emitted here occupies one Symphony slot; the
+        # encodings passed to this helper never contain multiple instructions.
+        return 4
+
+    def clear_plan_size(self, words, unroll):
+        """Serialized size for a word-clear plan, including its address load."""
+        if not words:
+            return 0
+        address = 12 + (4 if self.target.pic else 0)
+        store = self.instruction_size(isa.store(4, 1, 0))
+        add = self.instruction_size(isa.alu("add", 1, 1, 4, True))
+        if unroll is None:
+            return address + words * store + (words - 1) * add
+        groups, tail = divmod(words, unroll)
+        if groups < 2:
+            return None
+        counter = len(isa.cheap_constant(2, groups))
+        body = unroll * (store + add)
+        branch = (
+            address + self.instruction_size(isa.jump("jne", 7))
+            if self.target.pic
+            else (4 if self.target.load_address <= 0xFF00 else
+                  (16 if self.target.fixed_instruction_width else 15))
+        )
+        control = (
+            self.instruction_size(isa.alu("sub", 2, 2, 1, True))
+            + self.instruction_size(isa.alu("cmp", 15, 2, 0))
+            + branch
+        )
+        tail_code = tail * store + max(tail - 1, 0) * add
+        return address + counter + body + control + tail_code
+
+    def clear_plans(self, size):
+        words = size // 4
+        return [
+            (unroll, cost)
+            for unroll in (None, 1, 2, 4, 8)
+            if (cost := self.clear_plan_size(words, unroll)) is not None
+        ]
+
+    def select_bss_sections(self):
+        candidates = [g for g in self.module.globals if g.section == "zero"]
+        if not candidates:
+            return
+        if self.target.bss_mode == "assume-zeroed":
+            section = "bss"
+        elif self.target.bss_mode == "never":
+            section = "data"
+        else:
+            bss_size = self.bss_size(candidates)
+            data_size = sum(len(global_.data) for global_ in candidates)
+            eligible = [
+                unroll for unroll, cost in self.clear_plans(bss_size)
+                if cost < data_size
+            ]
+            section = "bss" if eligible else "data"
+            if eligible:
+                # More unrolling executes fewer loop-control instructions;
+                # choose the fastest plan that still beats DATA on size.
+                self.bss_clear_unroll = max(
+                    (unroll for unroll in eligible if unroll is not None),
+                    default=None,
+                )
+        for global_ in candidates:
+            global_.section = section
+
+    def needs_heap_start(self):
+        return any(
+            instruction.op == "stack_alloc"
+            or (
+                instruction.op == "global_addr"
+                and instruction.extra == "__dyn_heap_start"
+            )
+            for function in self.module.functions
+            for instruction in function.instructions
+        )
+
+    def needs_text_screen(self):
+        """Whether the retained program uses the text-screen runtime."""
+        return any(
+            global_.symbol.key == "__dyn_printf_framebuffer"
+            for global_ in self.module.globals
+        )
+
+    def emit_zero_bss(self):
+        """Clear the virtual BSS range with wide stores and exact-size tails."""
+        globals_ = self.bss_globals()
+        if not globals_ or self.target.bss_mode == "assume-zeroed":
+            return
+        size = self.bss_size(globals_)
+        a = self.a
+        # Clear backward from the end of the virtual BSS range.
+        a.address(1, "@bss.end")
+        words = size // 4
+        unroll = self.bss_clear_unroll
+        if unroll:
+            groups, words = divmod(words, unroll)
+            a.emit(isa.cheap_constant(2, groups))
+            loop = self.unique()
+            a.label(loop)
+            for _ in range(unroll):
+                a.emit(isa.alu("sub", 1, 1, 4, True))
+                a.emit(isa.store(4, 1, 0))
+            a.emit(isa.alu("sub", 2, 2, 1, True))
+            a.emit(isa.alu("cmp", 15, 2, 0))
+            a.branch("jne", loop)
+        for _ in range(words):
+            a.emit(isa.alu("sub", 1, 1, 4, True))
+            a.emit(isa.store(4, 1, 0))
+
+    def emit_text_screen_setup(self):
+        """Bind the retained runtime framebuffer to the text-screen device."""
+        a = self.a
+        a.emit(isa.screen(0, 0, True))
+        a.emit(isa.constant(2, 1))
+        a.address(1, "__dyn_printf_framebuffer")
+        a.emit(isa.screen(2, 1))
 
     def emit_relocations(self):
         """Lower the startup IR operation that rebases static pointers."""
@@ -676,14 +811,20 @@ class Backend:
         a.label(f.name)
         instructions = f.instructions
         for instruction in instructions:
-            if instruction.op == "init_pic" and self.target.pic:
-                a.emit(isa.counter(ABI.pic_base_register))
+            if instruction.op == "init_pic":
+                if self.target.pic:
+                    a.emit(isa.counter(ABI.pic_base_register))
             elif instruction.op == "init_stack":
-                a.emit(isa.mov(14, 0))
+                if self.target.pic:
+                    a.emit(isa.mov(14, 0))
+            elif instruction.op == "zero_bss":
+                self.emit_zero_bss()
             elif instruction.op == "relocate_globals":
                 self.emit_relocations()
             else:
                 break
+        if f.name == "_start" and self.needs_text_screen():
+            self.emit_text_screen_setup()
         leaf_start = len(a.code)
         if self.emit_straight_leaf(f):
             self.frames[f.name] = 0
@@ -801,7 +942,7 @@ class Backend:
         for instruction_index, i in enumerate(instructions):
             op = i.op
             result_register = 1
-            if op in ("param", "init_pic", "init_stack", "relocate_globals"):
+            if op in ("param", "init_pic", "init_stack", "zero_bss", "relocate_globals"):
                 continue
             if op == "label":
                 a.label(i.extra)
@@ -853,7 +994,7 @@ class Backend:
                     have_heap = self.unique()
                     a.emit(isa.alu("cmp", 15, 1, 0))
                     a.branch("jne", have_heap)
-                a.address(1, "__dyn_heap_anchor", 7)
+                a.address(1, "__dyn_heap_start")
                 a.emit(isa.alu("add", 1, 1, 3, True))
                 a.emit(isa.cheap_constant(7, -4))
                 a.emit(isa.alu("and", 1, 1, 7))
@@ -866,29 +1007,8 @@ class Backend:
             elif op == "stack_restore":
                 self.get(i.args[0], 14)
                 continue
-            elif op == "init_text_screen":
-                a.emit(isa.screen(0, 0, True))
-                a.emit(isa.constant(2, 1))
-                self.get(i.args[0], 1)
-                a.emit(isa.screen(2, 1))
-                continue
-            elif op == "clear_text_framebuffer":
-                if self.target.include_framebuffer:
-                    continue
-                self.get(i.args[0], 1)
-                # The 3,840-byte framebuffer has 960 words.  Clear eight
-                # words per trip: stores have no offset form, so advancing
-                # the address after each one is still required, but the
-                # counter, compare, and branch are amortized over eight.
-                a.emit(isa.cheap_constant(2, 120))
-                loop = self.unique()
-                a.label(loop)
-                for _ in range(8):
-                    a.emit(isa.store(4, 1, 0))
-                    a.emit(isa.alu("add", 1, 1, 4, True))
-                a.emit(isa.alu("sub", 2, 2, 1, True))
-                a.emit(isa.alu("cmp", 15, 2, 0))
-                a.branch("jne", loop)
+            elif op == "zero_bss":
+                self.emit_zero_bss()
                 continue
             elif op in ("cast", "copy"):
                 result_register = self.register_values.get(i.dst, 1)
@@ -1154,22 +1274,35 @@ class Backend:
             a.branch("jmp", overflow_loop)
             a.label(overflow_loop)
             a.branch("jmp", "_stack_overflow")
-        for g in self.module.globals:
-            if g.reserved and not self.target.include_framebuffer:
-                continue
-            a.emit_data(bytes(align_up(len(a.code), g.symbol.type.align) - len(a.code)))
-            a.label(g.symbol.key)
-            a.emit_data(g.data or bytes(g.reserved))
+        for section in ("rodata", "data"):
+            for g in self.module.globals:
+                if g.section != section:
+                    continue
+                a.emit_data(bytes(align_up(len(a.code), g.symbol.type.align) - len(a.code)))
+                a.label(g.symbol.key)
+                a.emit_data(g.data)
         # Relax branches/calls before assigning addresses to reservations that
         # live immediately after the serialized image.
         a.relax_controls()
         virtual_end = len(a.code)
-        for g in self.module.globals:
-            if not g.reserved or self.target.include_framebuffer:
-                continue
+        bss = self.bss_globals()
+        if bss:
+            virtual_end = align_up(
+                virtual_end, max(4, max(g.symbol.type.align for g in bss))
+            )
+            a.labels["@bss.start"] = virtual_end
+        for g in bss:
             virtual_end = align_up(virtual_end, g.symbol.type.align)
             a.labels[g.symbol.key] = virtual_end
-            virtual_end += g.reserved
+            virtual_end += len(g.data)
+        if bss:
+            virtual_end = align_up(virtual_end, 4)
+            a.labels["@bss.end"] = virtual_end
+        if self.needs_heap_start():
+            a.labels["__dyn_heap_start"] = virtual_end
+            # PIC images may load at any byte address, so reserve the largest
+            # possible gap introduced by runtime four-byte alignment.
+            virtual_end += 3
         a.finish()
         for g in self.module.globals:
             for offset, symbol, addend in g.relocations:
