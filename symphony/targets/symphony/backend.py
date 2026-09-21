@@ -24,6 +24,7 @@ class Backend:
         self.frames = {}
         self.private_id = 0
         self.needs_stack_overflow = False
+        self.bss_clear_unroll = None
         self.select_bss_sections()
 
     def unique(self):
@@ -49,26 +50,41 @@ class Backend:
         # encodings passed to this helper never contain multiple instructions.
         return 4
 
-    def clear_code_size(self, size):
-        """Conservative serialized size of a word-only BSS clear sequence."""
-        words = size // 4
+    def clear_plan_size(self, words, unroll):
+        """Serialized size for a word-clear plan, including its address load."""
         if not words:
             return 0
         address = 12 + (4 if self.target.pic else 0)
         store = self.instruction_size(isa.store(4, 1, 0))
         add = self.instruction_size(isa.alu("add", 1, 1, 4, True))
-        if words < 16:
+        if unroll is None:
             return address + words * store + (words - 1) * add
-        groups, tail = divmod(words, 8)
+        groups, tail = divmod(words, unroll)
+        if groups < 2:
+            return None
         counter = len(isa.cheap_constant(2, groups))
-        body = 8 * (store + add)
+        body = unroll * (store + add)
+        branch = (
+            address + self.instruction_size(isa.jump("jne", 7))
+            if self.target.pic
+            else (4 if self.target.load_address <= 0xFF00 else
+                  (16 if self.target.fixed_instruction_width else 15))
+        )
         control = (
             self.instruction_size(isa.alu("sub", 2, 2, 1, True))
             + self.instruction_size(isa.alu("cmp", 15, 2, 0))
-            + (16 if self.target.fixed_instruction_width else 15)
+            + branch
         )
         tail_code = tail * store + max(tail - 1, 0) * add
         return address + counter + body + control + tail_code
+
+    def clear_plans(self, size):
+        words = size // 4
+        return [
+            (unroll, cost)
+            for unroll in (None, 1, 2, 4, 8)
+            if (cost := self.clear_plan_size(words, unroll)) is not None
+        ]
 
     def select_bss_sections(self):
         candidates = [g for g in self.module.globals if g.section == "zero"]
@@ -76,12 +92,26 @@ class Backend:
             return
         if self.target.bss_mode in ("always", "assume-zeroed"):
             section = "bss"
+            size = self.bss_size(candidates)
+            loops = [unroll for unroll, _ in self.clear_plans(size) if unroll]
+            self.bss_clear_unroll = max(loops, default=None)
         elif self.target.bss_mode == "never":
             section = "data"
         else:
             bss_size = self.bss_size(candidates)
             data_size = sum(len(global_.data) for global_ in candidates)
-            section = "bss" if data_size > self.clear_code_size(bss_size) else "data"
+            eligible = [
+                unroll for unroll, cost in self.clear_plans(bss_size)
+                if cost < data_size
+            ]
+            section = "bss" if eligible else "data"
+            if eligible:
+                # More unrolling executes fewer loop-control instructions;
+                # choose the fastest plan that still beats DATA on size.
+                self.bss_clear_unroll = max(
+                    (unroll for unroll in eligible if unroll is not None),
+                    default=None,
+                )
         for global_ in candidates:
             global_.section = section
 
@@ -105,12 +135,13 @@ class Backend:
         a = self.a
         a.address(1, "@bss.start")
         words = size // 4
-        if words >= 16:
-            groups, words = divmod(words, 8)
+        unroll = self.bss_clear_unroll
+        if unroll:
+            groups, words = divmod(words, unroll)
             a.emit(isa.cheap_constant(2, groups))
             loop = self.unique()
             a.label(loop)
-            for _ in range(8):
+            for _ in range(unroll):
                 a.emit(isa.store(4, 1, 0))
                 a.emit(isa.alu("add", 1, 1, 4, True))
             a.emit(isa.alu("sub", 2, 2, 1, True))
