@@ -29,6 +29,42 @@ class Backend:
         self.private_id += 1
         return f"@backend.{self.private_id}"
 
+    def bss_globals(self):
+        return [global_ for global_ in self.module.globals if global_.section == "bss"]
+
+    def emit_zero_bss(self):
+        """Clear the virtual BSS range with wide stores and exact-size tails."""
+        globals_ = self.bss_globals()
+        if not globals_ or self.target.assume_zeroed_ram:
+            return
+        size = 0
+        for global_ in globals_:
+            size = align_up(size, global_.symbol.type.align)
+            size += len(global_.data)
+        a = self.a
+        a.address(1, "@bss.start")
+        words, tail = divmod(size, 4)
+        groups, words = divmod(words, 8)
+        if groups:
+            a.emit(isa.cheap_constant(2, groups))
+            loop = self.unique()
+            a.label(loop)
+            for _ in range(8):
+                a.emit(isa.store(4, 1, 0))
+                a.emit(isa.alu("add", 1, 1, 4, True))
+            a.emit(isa.alu("sub", 2, 2, 1, True))
+            a.emit(isa.alu("cmp", 15, 2, 0))
+            a.branch("jne", loop)
+        for _ in range(words):
+            a.emit(isa.store(4, 1, 0))
+            a.emit(isa.alu("add", 1, 1, 4, True))
+        if tail >= 2:
+            a.emit(isa.store(2, 1, 0))
+            a.emit(isa.alu("add", 1, 1, 2, True))
+            tail -= 2
+        if tail:
+            a.emit(isa.store(1, 1, 0))
+
     def emit_relocations(self):
         """Lower the startup IR operation that rebases static pointers."""
         if not self.target.pic:
@@ -676,10 +712,14 @@ class Backend:
         a.label(f.name)
         instructions = f.instructions
         for instruction in instructions:
-            if instruction.op == "init_pic" and self.target.pic:
-                a.emit(isa.counter(ABI.pic_base_register))
+            if instruction.op == "init_pic":
+                if self.target.pic:
+                    a.emit(isa.counter(ABI.pic_base_register))
             elif instruction.op == "init_stack":
-                a.emit(isa.mov(14, 0))
+                if self.target.pic:
+                    a.emit(isa.mov(14, 0))
+            elif instruction.op == "zero_bss":
+                self.emit_zero_bss()
             elif instruction.op == "relocate_globals":
                 self.emit_relocations()
             else:
@@ -801,7 +841,7 @@ class Backend:
         for instruction_index, i in enumerate(instructions):
             op = i.op
             result_register = 1
-            if op in ("param", "init_pic", "init_stack", "relocate_globals"):
+            if op in ("param", "init_pic", "init_stack", "zero_bss", "relocate_globals"):
                 continue
             if op == "label":
                 a.label(i.extra)
@@ -872,23 +912,8 @@ class Backend:
                 self.get(i.args[0], 1)
                 a.emit(isa.screen(2, 1))
                 continue
-            elif op == "clear_text_framebuffer":
-                if self.target.include_framebuffer:
-                    continue
-                self.get(i.args[0], 1)
-                # The 3,840-byte framebuffer has 960 words.  Clear eight
-                # words per trip: stores have no offset form, so advancing
-                # the address after each one is still required, but the
-                # counter, compare, and branch are amortized over eight.
-                a.emit(isa.cheap_constant(2, 120))
-                loop = self.unique()
-                a.label(loop)
-                for _ in range(8):
-                    a.emit(isa.store(4, 1, 0))
-                    a.emit(isa.alu("add", 1, 1, 4, True))
-                a.emit(isa.alu("sub", 2, 2, 1, True))
-                a.emit(isa.alu("cmp", 15, 2, 0))
-                a.branch("jne", loop)
+            elif op == "zero_bss":
+                self.emit_zero_bss()
                 continue
             elif op in ("cast", "copy"):
                 result_register = self.register_values.get(i.dst, 1)
@@ -1154,22 +1179,29 @@ class Backend:
             a.branch("jmp", overflow_loop)
             a.label(overflow_loop)
             a.branch("jmp", "_stack_overflow")
-        for g in self.module.globals:
-            if g.reserved and not self.target.include_framebuffer:
-                continue
-            a.emit_data(bytes(align_up(len(a.code), g.symbol.type.align) - len(a.code)))
-            a.label(g.symbol.key)
-            a.emit_data(g.data or bytes(g.reserved))
+        for section in ("rodata", "data"):
+            for g in self.module.globals:
+                if g.section != section:
+                    continue
+                a.emit_data(bytes(align_up(len(a.code), g.symbol.type.align) - len(a.code)))
+                a.label(g.symbol.key)
+                a.emit_data(g.data)
         # Relax branches/calls before assigning addresses to reservations that
         # live immediately after the serialized image.
         a.relax_controls()
         virtual_end = len(a.code)
-        for g in self.module.globals:
-            if not g.reserved or self.target.include_framebuffer:
-                continue
+        bss = self.bss_globals()
+        if bss:
+            virtual_end = align_up(
+                virtual_end, max(g.symbol.type.align for g in bss)
+            )
+            a.labels["@bss.start"] = virtual_end
+        for g in bss:
             virtual_end = align_up(virtual_end, g.symbol.type.align)
             a.labels[g.symbol.key] = virtual_end
-            virtual_end += g.reserved
+            virtual_end += len(g.data)
+        if bss:
+            a.labels["@bss.end"] = virtual_end
         a.finish()
         for g in self.module.globals:
             for offset, symbol, addend in g.relocations:

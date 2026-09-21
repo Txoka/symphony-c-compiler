@@ -20,6 +20,29 @@ from .parser import parse, strip_comments
 from .preprocessor import Preprocessor
 
 
+def readonly_object(type_):
+    """Whether the object itself, rather than only a pointed-to value, is const."""
+    return "const" in type_.qualifiers or (
+        type_.kind == "array" and readonly_object(type_.base)
+    )
+
+
+def assign_static_sections(program):
+    """Classify live-independent static storage before IR lowering.
+
+    BSS contains only all-zero, non-relocatable mutable objects.  Pointer and
+    function-address initializers stay in DATA because fixed images patch their
+    serialized slots directly and PIC images relocate them during startup.
+    """
+    for global_ in program.globals:
+        if global_.section == "rodata" or readonly_object(global_.symbol.type):
+            global_.section = "rodata"
+        elif not global_.relocations and not any(global_.data):
+            global_.section = "bss"
+        else:
+            global_.section = "data"
+
+
 def compatible_types(a, b, seen=None):
     """C-compatible cross-unit type comparison, including recursive structs."""
     seen = set() if seen is None else seen
@@ -156,8 +179,7 @@ class CFrontend:
                 [
                     Global(
                         Symbol("__dyn_printf_framebuffer", array(CHAR, 3840), "global", "__dyn_printf_framebuffer"),
-                        bytearray(),
-                        reserved=3840,
+                        bytearray(3840),
                     ),
                     Global(Symbol("__dyn_printf_cursor", UINT, "global", "__dyn_printf_cursor"), bytearray(4)),
                     Global(Symbol("__dyn_printf_column", UINT, "global", "__dyn_printf_column"), bytearray(4)),
@@ -166,10 +188,10 @@ class CFrontend:
         typed.globals.append(
             Global(
                 Symbol("__dyn_heap_anchor", array(CHAR, 7), "global", "__dyn_heap_anchor"),
-                bytearray(),
-                reserved=7,
+                bytearray(7),
             )
         )
+        assign_static_sections(typed)
         parsed = parsed_units[0] if len(parsed_units) == 1 else parsed_units
         return FrontendResult(parsed, typed, lower(typed))
 

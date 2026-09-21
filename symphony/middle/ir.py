@@ -553,6 +553,7 @@ def lower(program):
     raw = [
         Instruction("init_pic"),
         Instruction("init_stack"),
+        *([Instruction("zero_bss")] if any(g.section == "bss" for g in program.globals) else []),
         Instruction("relocate_globals"),
     ]
     if any(g.symbol.key == "__dyn_printf_framebuffer" for g in program.globals):
@@ -562,7 +563,6 @@ def lower(program):
             Instruction("global_addr", address, (), pointer(CHAR), "__dyn_printf_framebuffer")
         )
         raw.append(Instruction("init_text_screen", args=(address,)))
-        raw.append(Instruction("clear_text_framebuffer", args=(address,)))
     result = startup.values
     startup.values += 1
     raw.append(

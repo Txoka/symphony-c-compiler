@@ -11,7 +11,7 @@ class Target:
     persistent_size: int = 0
     load_address: int = 0
     pic: bool = False
-    include_framebuffer: bool = False
+    assume_zeroed_ram: bool = False
     isa: str = "symphony"
 
     def validate(self):

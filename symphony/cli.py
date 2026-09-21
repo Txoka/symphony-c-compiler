@@ -32,6 +32,11 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
     )
     p.add_argument("--pic", action="store_true")
     p.add_argument(
+        "--assume-zeroed-ram",
+        action="store_true",
+        help="omit BSS startup clearing; requires the loader/platform to zero RAM",
+    )
+    p.add_argument(
         "--target", choices=("dynphony", "symphony"), default=default_target
     )
     p.add_argument("--load-address", type=number, default=0)
@@ -44,11 +49,6 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
     p.add_argument(
         "--persistent-save", type=Path,
         help="save persistent memory after emulation",
-    )
-    p.add_argument(
-        "--include-framebuffer",
-        action="store_true",
-        help="serialize the text framebuffer as zero bytes instead of clearing reserved RAM at startup",
     )
     p.add_argument("--emit-ir", type=Path)
     p.add_argument("--map", type=Path)
@@ -77,7 +77,7 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
             persistent_size=args.persistent_size,
             load_address=args.load_address,
             pic=args.pic,
-            include_framebuffer=args.include_framebuffer,
+            assume_zeroed_ram=args.assume_zeroed_ram,
             isa=args.target,
         )
         sources = [(str(path), path.read_text()) for path in args.source]
