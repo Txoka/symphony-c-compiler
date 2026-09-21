@@ -18,6 +18,7 @@ OPTIMIZATIONS = {
     "comparison_zero_test_fusion": True,
     "paired_divmod": True,
     "alias_aware_divmod_pairing": True,
+    "expensive_expression_cse": True,
     "dead_value_elimination": True,
     "cfg_simplification": True,
     "readonly_parameter_promotion": True,

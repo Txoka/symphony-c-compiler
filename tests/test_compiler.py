@@ -1099,6 +1099,26 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(optimized_result[2], baseline_result[2])
         self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
 
+    def test_expensive_expression_cse_avoids_repeated_multiply(self):
+        source = (ROOT / "examples" / "common_subexpression.c").read_text()
+        old = OPTIMIZATIONS["expensive_expression_cse"]
+        try:
+            OPTIMIZATIONS["expensive_expression_cse"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["expensive_expression_cse"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["expensive_expression_cse"] = old
+
+        def execute(result, value):
+            machine = Machine(result.image.binary, inputs=(value,))
+            return machine.run(result.image.symbols["_halt"]), machine.steps
+
+        for value in (0, 7, 65537):
+            self.assertEqual(execute(optimized, value)[0], execute(baseline, value)[0])
+        self.assertLess(execute(optimized, 65537)[1], execute(baseline, 65537)[1])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

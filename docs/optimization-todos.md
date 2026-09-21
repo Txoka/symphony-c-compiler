@@ -47,8 +47,11 @@ preserving the full suite after each atomic change:
    allocation; compute block liveness/live intervals or interference; make
    loop-depth/use-frequency spill decisions; keep loop-carried pointers,
    bounds, and invariant results in callee-saved registers across calls.
-2. [ ] **Conservative value numbering/CSE.** Reuse repeated arithmetic,
-   address formation, and loads whose memory version is proven unchanged.
+2. [x] **Conservative expensive-expression CSE (initial form).** Reuse
+   dominated repeated multiply/divide/remainder expressions. On `primes`,
+   this removes the second `i * i`, reducing 2,140 to 2,064 bytes and
+   2,418,382 to 2,413,144 steps. Cheap expression, address, and load CSE
+   remain below because indiscriminate reuse increases register pressure.
 3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
    work with pointer induction, pointer-limit exits, trip-count facts, and
    proven bulk-fill/copy idioms. Keep growth-oriented unrolling opt-in.
@@ -92,6 +95,11 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   bases and address increments rather than recomputing `base + index`.
   This is the most visible instruction-level difference in GCC's
   `insertion_sort`, sieve, and numeric-array loops.
+- [ ] **Extend conservative value numbering.** Expensive pure arithmetic is
+  implemented. Add pressure-aware reuse for cheap arithmetic and address
+  formation, then loads keyed by a conservative memory version. A naïve
+  all-expression implementation regressed `dynamic_sensor_report`, so these
+  extensions require allocation-aware profitability.
 - [ ] **Bulk memory idioms.** Recognize proven non-overlapping fixed-size or
   counted byte fill/copy loops and choose a size/cycle-costed inline
   byte/word loop or runtime `memset`/`memcpy` call.  Preserve aliasing,
@@ -153,11 +161,13 @@ Remaining work, in dependency and payoff order:
 3. [ ] Identify natural loops, induction variables, and proven constant trip counts.
    Use these facts for loop-invariant code motion and bounded evaluation first;
    retain code-growing unrolling behind its explicit option.
-4. [ ] Recognize matching quotient/remainder expressions with identical proven-pure
-   operands and lower them to a paired `divmod` runtime call. Preserve signed
-   C semantics and reject intervening mutation, volatile access, and calls.
-5. [ ] Add local value numbering, then global value numbering, using conservative
-   alias invalidation for loads. This removes repeated arithmetic and address work.
+4. [x] Recognize matching unsigned quotient/remainder expressions with identical
+   operands and lower them to a paired runtime call across pure instructions and
+   stores proven not to alias those operands. Signed pairing and a native
+   two-result IR/ABI form remain follow-up work.
+5. [ ] Extend the implemented dominator-based value numbering beyond expensive
+   arithmetic, using pressure-aware profitability for cheap/address expressions
+   and conservative alias invalidation for loads.
 6. [ ] Add block liveness and interference-based register/stack-slot reuse, followed
    by loop-depth spill costs and better caller-saved allocation.
 7. [ ] Add the small post-allocation peephole pass and iterate it with branch/call

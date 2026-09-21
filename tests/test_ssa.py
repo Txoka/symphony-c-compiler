@@ -27,6 +27,7 @@ from symphony.middle.ssa import (
     simplify_algebra,
     fuse_comparison_branches,
     fuse_comparison_zero_tests,
+    eliminate_common_expressions,
     reduce_strength,
     promote_readonly_parameters,
     eliminate_tail_calls,
@@ -583,6 +584,34 @@ class OptimizationTests(unittest.TestCase):
         verify(function)
         operations = [item.extra for item in function.blocks[0].instructions if item.op == "binary"]
         self.assertEqual(operations, ["<<", ">>"])
+
+    def test_value_numbering_reuses_dominating_commutative_expression(self):
+        function = FunctionIR(
+            "value_numbering",
+            [],
+            [],
+            [
+                BasicBlock("entry", [
+                    Instruction("param", 0, (), INT, "left"),
+                    Instruction("param", 1, (), INT, "right"),
+                    Instruction("binary", 2, (0, 1), INT, "*"),
+                    Instruction("branch_if", None, (0,), INT, (True, "yes")),
+                ]),
+                BasicBlock("no", [
+                    Instruction("binary", 3, (1, 0), INT, "*"),
+                    Instruction("return", None, (3,), INT),
+                ]),
+                BasicBlock("yes", [Instruction("return", None, (2,), INT)]),
+            ],
+            4,
+        )
+        verify(function)
+        self.assertTrue(eliminate_common_expressions(function))
+        verify(function)
+        self.assertEqual(
+            function.blocks[1].instructions[0],
+            Instruction("copy", 3, (2,), INT),
+        )
 
     def test_comparison_branch_fusion_preserves_ssa_and_removes_temporary(self):
         function = FunctionIR(
