@@ -25,6 +25,7 @@ class Backend:
         self.private_id = 0
         self.needs_stack_overflow = False
         self.bss_clear_unroll = None
+        self.bss_start_live = None
         self.select_bss_sections()
 
     def unique(self):
@@ -133,7 +134,10 @@ class Backend:
             return
         size = self.bss_size(globals_)
         a = self.a
-        a.address(1, "@bss.start")
+        # Clear backward so r1 finishes at BSS start. A following consumer of
+        # the first BSS symbol can reuse that address without rematerializing
+        # it (notably a device configured to point at a BSS-backed buffer).
+        a.address(1, "@bss.end")
         words = size // 4
         unroll = self.bss_clear_unroll
         if unroll:
@@ -142,15 +146,15 @@ class Backend:
             loop = self.unique()
             a.label(loop)
             for _ in range(unroll):
+                a.emit(isa.alu("sub", 1, 1, 4, True))
                 a.emit(isa.store(4, 1, 0))
-                a.emit(isa.alu("add", 1, 1, 4, True))
             a.emit(isa.alu("sub", 2, 2, 1, True))
             a.emit(isa.alu("cmp", 15, 2, 0))
             a.branch("jne", loop)
         for _ in range(words):
+            a.emit(isa.alu("sub", 1, 1, 4, True))
             a.emit(isa.store(4, 1, 0))
-            if _ + 1 != words:
-                a.emit(isa.alu("add", 1, 1, 4, True))
+        self.bss_start_live = globals_[0].symbol.key
 
     def emit_relocations(self):
         """Lower the startup IR operation that rebases static pointers."""
@@ -797,6 +801,7 @@ class Backend:
     def function(self, f):
         a = self.a
         a.label(f.name)
+        self.bss_start_live = None
         instructions = f.instructions
         for instruction in instructions:
             if instruction.op == "init_pic":
@@ -809,6 +814,10 @@ class Backend:
                 self.emit_zero_bss()
             elif instruction.op == "relocate_globals":
                 self.emit_relocations()
+                if self.target.pic and any(
+                    global_.relocations for global_ in self.module.globals
+                ):
+                    self.bss_start_live = None
             else:
                 break
         leaf_start = len(a.code)
@@ -942,6 +951,19 @@ class Backend:
                 result_register = self.register_values.get(i.dst, 1)
                 a.emit(isa.cheap_constant(result_register, i.extra))
             elif op == "global_addr":
+                next_ = (
+                    instructions[instruction_index + 1]
+                    if instruction_index + 1 < len(instructions) else None
+                )
+                if (
+                    self.bss_start_live == i.extra
+                    and next_ is not None
+                    and next_.op == "init_text_screen"
+                    and i.dst in next_.args
+                ):
+                    self.register_values[i.dst] = 1
+                    self.bss_start_live = None
+                    continue
                 if i.dst in self.rematerialized:
                     continue
                 result_register = self.register_values.get(i.dst, 1)
