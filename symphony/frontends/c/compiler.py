@@ -75,7 +75,7 @@ def compatible_types(a, b, seen=None):
                 for x, y in zip(a.params, b.params)
             )
         )
-    if a.kind == "struct":
+    if a.kind in ("struct", "union"):
         return (
             a.record.tag == b.record.tag
             and a.size == b.size

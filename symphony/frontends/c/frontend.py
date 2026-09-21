@@ -112,6 +112,15 @@ class Frontend:
         self.locals = []
         self.serial = 0
         self.loop_depth = 0
+        self.break_depth = 0
+        self.switch_depth = 0
+        self.switch_types = []
+        self.switch_vlas = []
+        self.scope_serial = 0
+        self.scope_ids = [0]
+        self.scope_vlas = [False]
+        self.labels = {}
+        self.gotos = []
         self.return_type = VOID
         self.namespace = namespace
 
@@ -129,6 +138,41 @@ class Frontend:
             storage,
             name if storage in ("global", "function") else f"{name}.{self.serial}",
         )
+
+    def push_scope(self):
+        self.scopes.append({})
+        self.typedefs.append({})
+        self.records.append({})
+        self.enum_tags.append({})
+        self.scope_serial += 1
+        self.scope_ids.append(self.scope_serial)
+        self.scope_vlas.append(False)
+        return self.scope_serial
+
+    def pop_scope(self):
+        self.enum_tags.pop()
+        self.records.pop()
+        self.typedefs.pop()
+        self.scopes.pop()
+        self.scope_ids.pop()
+        self.scope_vlas.pop()
+
+    def check_jump_into_vla(self, source, kind):
+        target_vlas = frozenset(
+            scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+        )
+        if not target_vlas <= self.switch_vlas[-1]:
+            self.fail(source, f"switch {kind} enters the scope of a variably modified object")
+
+    def resolve_gotos(self):
+        for node, name, source_scopes, source_vlas in self.gotos:
+            target = self.labels.get(name)
+            if target is None:
+                self.fail(node, f"undefined label {name}")
+            target_scopes, target_vlas = target
+            if not target_vlas <= source_vlas:
+                self.fail(node, f"goto {name} enters the scope of a variably modified object")
+            node.value = (name, source_scopes, target_scopes)
 
     def lookup(self, source):
         for scope in reversed(self.scopes):
@@ -210,16 +254,17 @@ class Frontend:
                     if isinstance(p, c.EllipsisParam):
                         self.fail(p, "variadic functions are unsupported")
                     pt = self.typename(p).decay()
-                    if pt.kind == "struct":
+                    if pt.kind in ("struct", "union"):
                         self.fail(p, "aggregate parameters are not yet supported")
                     params.append(pt)
                 if params == [VOID]:
                     params = []
             result = self.typename(t.type)
-            if result.kind in ("array", "function", "struct"):
+            if result.kind in ("array", "function", "union"):
                 self.fail(t, "invalid function return type")
             return Type("function", 0, False, result, params=tuple(params))
-        if isinstance(t, c.Struct):
+        if isinstance(t, (c.Struct, c.Union)):
+            kind = "union" if isinstance(t, c.Union) else "struct"
             tag = t.name or ""
             record = self.records[-1].get(tag) if tag and t.decls is not None else None
             if tag and t.decls is None:
@@ -229,13 +274,17 @@ class Frontend:
                         break
             if t.decls is None:
                 if record is None:
-                    record = Record(tag)
+                    record = Record(tag, kind)
                     self.records[-1][tag] = record
-                return Type("struct", 0, False, record=record)
+                if record.kind != kind:
+                    self.fail(t, f"{tag} was previously declared as a {record.kind}")
+                return Type(kind, 0, False, record=record)
             if record is None or (record.complete and not tag):
-                record = Record(tag)
+                record = Record(tag, kind)
                 if tag:
                     self.records[-1][tag] = record
+            elif record.kind != kind:
+                self.fail(t, f"{tag} was previously declared as a {record.kind}")
             elif record.complete:
                 self.fail(t, f"redefinition of struct {tag}")
             members = []
@@ -252,16 +301,16 @@ class Frontend:
                 member_type = self.typename(declaration)
                 if member_type.kind in ("void", "function") or not member_type.size:
                     self.fail(declaration, "structure member requires a complete object type")
-                offset = align_up(offset, member_type.align)
+                offset = 0 if kind == "union" else align_up(offset, member_type.align)
                 members.append((declaration.name, member_type, offset))
                 names.add(declaration.name)
-                offset += member_type.size
+                offset = max(offset, member_type.size) if kind == "union" else offset + member_type.size
                 alignment = max(alignment, member_type.align)
             record.members = tuple(members)
             record.alignment = alignment
             record.size = align_up(offset, alignment)
             record.complete = True
-            return Type("struct", 0, False, record=record)
+            return Type(kind, 0, False, record=record)
         if isinstance(t, c.Enum):
             tag = t.name or ""
             if t.values is None:
@@ -560,12 +609,12 @@ class Frontend:
             base = self.expr(s.name)
             if s.type == "->":
                 address = self.value(base)
-                if address.type.kind != "pointer" or address.type.base.kind != "struct":
+                if address.type.kind != "pointer" or address.type.base.kind not in ("struct", "union"):
                     self.fail(s, "-> requires a pointer to structure")
                 structure = address.type.base
             else:
-                if base.type.kind != "struct" or not base.lvalue:
-                    self.fail(s, ". requires a structure lvalue")
+                if base.type.kind not in ("struct", "union") or not base.lvalue:
+                    self.fail(s, ". requires a structure or union lvalue")
                 structure = base.type
                 address = self.node(s, "address", pointer(structure), [base])
             member = next(
@@ -640,6 +689,12 @@ class Frontend:
             a, b = self.expr(s.lvalue), self.expr(s.rvalue)
             self.modifiable(s, a)
             if s.op == "=":
+                if a.type.kind in ("struct", "union"):
+                    if a.type != b.type:
+                        self.fail(s, f"cannot convert {b.type} to {a.type}")
+                    if not b.lvalue:
+                        self.fail(s, "aggregate assignment requires an aggregate lvalue")
+                    return self.node(s, "aggregate_assign", a.type, [a, b])
                 b = self.convert(s, b, a.type)
             else:
                 # Keep the lvalue as a single node; lower its address only once.
@@ -662,6 +717,8 @@ class Frontend:
             if len(args) != len(ft.params):
                 self.fail(s, f"expected {len(ft.params)} arguments, got {len(args)}")
             values = [self.convert(s, self.expr(a), t) for a, t in zip(args, ft.params)]
+            if ft.base.kind == "struct":
+                return self.node(s, "aggregate_call", ft.base, [fn] + values, lvalue=True)
             return self.node(s, "call", ft.base, [fn] + values)
         if isinstance(s, c.ExprList):
             values = [self.value(self.expr(a)) for a in s.exprs]
@@ -707,6 +764,102 @@ class Frontend:
             self.fail(declarator.dim, "variable array bound requires an integer")
         return self.cast(bound, UINT)
 
+    @staticmethod
+    def aggregate_type(t):
+        return t.kind in ("array", "struct", "union")
+
+    def designated_member(self, source, t, designators):
+        """Resolve a C designator sequence to an aggregate subobject.
+
+        The returned index is the first direct member/subscript selected.  It
+        lets a following undesignated initializer resume at the next direct
+        subobject, as required by C's aggregate-initializer rules.
+        """
+        offset = 0
+        direct_index = None
+        for designator in designators:
+            if isinstance(designator, c.ID) and t.kind in ("struct", "union"):
+                found = next(
+                    (
+                        (index, member_type, member_offset)
+                        for index, (name, member_type, member_offset) in enumerate(t.record.members)
+                        if name == designator.name
+                    ),
+                    None,
+                )
+                if found is None:
+                    self.fail(designator, f"{t.kind} has no member {designator.name}")
+                index, t, member_offset = found
+                direct_index = index if direct_index is None else direct_index
+                offset += member_offset
+            elif isinstance(designator, c.Constant) and t.kind == "array":
+                index = self.const_int(designator)
+                if not 0 <= index < t.count:
+                    self.fail(designator, "array designator is outside the array")
+                direct_index = index if direct_index is None else direct_index
+                offset += index * t.base.size
+                t = t.base
+            else:
+                self.fail(designator, "invalid initializer designator")
+        if direct_index is None:
+            self.fail(source, "empty initializer designator")
+        return direct_index, t, offset
+
+    def consume_initializer(self, source, t, expressions, position):
+        """Consume one possibly brace-elided aggregate initializer."""
+        if position >= len(expressions):
+            return [], position
+        expression = expressions[position]
+        if not self.aggregate_type(t) or isinstance(expression, c.InitList):
+            return self.initializer(source, t, expression), position + 1
+        if t.kind == "array" and isinstance(expression, c.Constant) and expression.type == "string":
+            return self.initializer(source, t, expression), position + 1
+        if t.kind == "union":
+            _, member_type, member_offset = t.record.members[0]
+            entries, position = self.consume_initializer(
+                source, member_type, expressions, position
+            )
+            return [
+                (member_offset + offset, type_, node) for offset, type_, node in entries
+            ], position
+        return self.consume_aggregate(source, t, expressions, position)
+
+    def consume_aggregate(self, source, t, expressions, position=0):
+        """Flatten one struct/array initializer, accepting omitted inner braces."""
+        members = (
+            [(member_type, offset) for _, member_type, offset in t.record.members]
+            if t.kind == "struct"
+            else [(t.base, index * t.base.size) for index in range(t.count)]
+        )
+        out = []
+        member_index = 0
+        while position < len(expressions):
+            expression = expressions[position]
+            if isinstance(expression, c.NamedInitializer):
+                member_index, member_type, member_offset = self.designated_member(
+                    source, t, expression.name
+                )
+                entries = self.initializer(source, member_type, expression.expr)
+                position += 1
+            else:
+                if member_index >= len(members):
+                    break
+                member_type, member_offset = members[member_index]
+                entries, position = self.consume_initializer(
+                    source, member_type, expressions, position
+                )
+            out.extend(
+                (member_offset + offset, type_, node) for offset, type_, node in entries
+            )
+            member_index += 1
+        return out, position
+
+    def aggregate_initializer(self, source, t, expressions):
+        out, position = self.consume_aggregate(source, t, expressions)
+        if position != len(expressions):
+            self.fail(source, "too many aggregate initializers")
+        return out
+
     def initializer(self, s, t, init):
         """Flatten aggregate initializers to typed scalar entries at byte offsets."""
         if t.kind == "array":
@@ -724,31 +877,29 @@ class Frontend:
                 ]
             if not isinstance(init, c.InitList):
                 self.fail(s, "array requires a brace or string initializer")
-            if len(init.exprs) > t.count:
-                self.fail(s, "too many array initializers")
-            out = []
-            for i, e in enumerate(init.exprs):
-                out.extend(
-                    (i * t.base.size + off, typ, n)
-                    for off, typ, n in self.initializer(s, t.base, e)
-                )
-            return out
-        if t.kind == "struct":
+            return self.aggregate_initializer(s, t, init.exprs)
+        if t.kind in ("struct", "union"):
             if not isinstance(init, c.InitList):
-                self.fail(s, "structure requires a brace initializer")
-            if len(init.exprs) > len(t.record.members):
-                self.fail(s, "too many structure initializers")
-            out = []
-            for expression, (_, member_type, member_offset) in zip(
-                init.exprs, t.record.members
-            ):
-                out.extend(
-                    (member_offset + offset, type_, node)
-                    for offset, type_, node in self.initializer(
-                        s, member_type, expression
+                self.fail(s, f"{t.kind} requires a brace initializer")
+            if t.kind == "union":
+                if not init.exprs:
+                    return []
+                if len(init.exprs) != 1:
+                    self.fail(s, "union initializer selects exactly one member")
+                expression = init.exprs[0]
+                member_index = 0
+                if isinstance(expression, c.NamedInitializer):
+                    member_index, member_type, member_offset = self.designated_member(
+                        s, t, expression.name
                     )
-                )
-            return out
+                    expression = expression.expr
+                else:
+                    _, member_type, member_offset = t.record.members[member_index]
+                return [
+                    (member_offset + offset, type_, node)
+                    for offset, type_, node in self.initializer(s, member_type, expression)
+                ]
+            return self.aggregate_initializer(s, t, init.exprs)
         if isinstance(init, c.InitList):
             if len(init.exprs) != 1:
                 self.fail(s, "scalar initializer requires one value")
@@ -778,16 +929,10 @@ class Frontend:
         if s is None:
             return Node("block")
         if isinstance(s, c.Compound):
-            self.scopes.append({})
-            self.typedefs.append({})
-            self.records.append({})
-            self.enum_tags.append({})
+            scope_id = self.push_scope()
             body = [self.statement(x) for x in s.block_items or []]
-            self.enum_tags.pop()
-            self.records.pop()
-            self.typedefs.pop()
-            self.scopes.pop()
-            return self.node(s, "block", children=body)
+            self.pop_scope()
+            return self.node(s, "block", children=body, value=scope_id)
         if isinstance(s, c.DeclList):
             return self.node(s, "block", children=[self.statement(x) for x in s.decls])
         if isinstance(s, c.Typedef):
@@ -809,6 +954,8 @@ class Frontend:
             t = self.resolve_array(s, self.typename(s))
             t, vla_bounds = self.bind_vla_bounds(s, t) if self.variably_modified(t) else (t, [])
             dynamic_object = t.kind in ("array", "vla") and self.variably_modified(t)
+            if self.variably_modified(t):
+                self.scope_vlas[-1] = True
             if t.kind in ("void", "function") or (not t.size and not dynamic_object and t.kind != "pointer"):
                 self.fail(s, "local variable requires a complete object type")
             if s.name in self.scopes[-1]:
@@ -831,9 +978,33 @@ class Frontend:
             self.locals.append(sym)
             if dynamic_object and s.init is not None:
                 self.fail(s, "variable-length arrays cannot have initializers")
-            entries = self.initializer(s, t, s.init) if s.init else None
+            aggregate_initial = (
+                self.expr(s.init)
+                if t.kind in ("struct", "union") and s.init is not None and not isinstance(s.init, c.InitList)
+                else None
+            )
+            if aggregate_initial is not None and (
+                aggregate_initial.type != t or not aggregate_initial.lvalue
+            ):
+                self.fail(s, f"cannot convert {aggregate_initial.type} to {t}")
+            entries = self.initializer(s, t, s.init) if s.init and aggregate_initial is None else None
             size = self.runtime_size(s, t) if dynamic_object else None
-            return self.node(s, "declare", value=(sym, entries, vla_bounds, size))
+            declaration = self.node(s, "declare", value=(sym, entries, vla_bounds, size))
+            if aggregate_initial is None:
+                return declaration
+            destination = self.node(s, "var", t, value=sym, lvalue=True)
+            return self.node(
+                s,
+                "block",
+                children=[
+                    declaration,
+                    self.node(
+                        s,
+                        "expression",
+                        children=[self.node(s, "aggregate_assign", t, [destination, aggregate_initial])],
+                    ),
+                ],
+            )
         if isinstance(s, c.Return):
             if self.return_type == VOID:
                 if s.expr:
@@ -842,7 +1013,13 @@ class Frontend:
             else:
                 if not s.expr:
                     self.fail(s, "non-void function must return a value")
-                children = [self.convert(s, self.expr(s.expr), self.return_type)]
+                value = self.expr(s.expr)
+                if self.return_type.kind == "struct":
+                    if value.type != self.return_type or not value.lvalue:
+                        self.fail(s, f"cannot convert {value.type} to {self.return_type}")
+                    children = [value]
+                else:
+                    children = [self.convert(s, value, self.return_type)]
             return self.node(s, "return", children=children)
         if isinstance(s, c.If):
             return self.node(
@@ -854,12 +1031,28 @@ class Frontend:
                     self.statement(s.iffalse),
                 ],
             )
+        if isinstance(s, c.Switch):
+            condition = self.scalar(s.cond, self.expr(s.cond))
+            if not condition.type.integer:
+                self.fail(s.cond, "switch condition requires an integer")
+            condition = self.cast(condition, condition.type.promote())
+            source_vlas = frozenset(
+                scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+            )
+            self.break_depth += 1
+            self.switch_depth += 1
+            self.switch_types.append(condition.type)
+            self.switch_vlas.append(source_vlas)
+            body = self.statement(s.stmt)
+            self.switch_vlas.pop()
+            self.switch_types.pop()
+            self.switch_depth -= 1
+            self.break_depth -= 1
+            return self.node(s, "switch", children=[condition, body])
         if isinstance(s, (c.While, c.For, c.DoWhile)):
             self.loop_depth += 1
-            self.scopes.append({})
-            self.typedefs.append({})
-            self.records.append({})
-            self.enum_tags.append({})
+            self.break_depth += 1
+            scope_id = self.push_scope()
             if isinstance(s, c.For):
                 init = self.statement(s.init)
                 cond = (
@@ -869,7 +1062,7 @@ class Frontend:
                 )
                 step = self.statement(s.next)
                 body = self.statement(s.stmt)
-                n = self.node(s, "for", children=[init, cond, step, body])
+                n = self.node(s, "for", children=[init, cond, step, body], value=scope_id)
             else:
                 n = self.node(
                     s,
@@ -877,18 +1070,51 @@ class Frontend:
                     children=[
                         self.scalar(s, self.expr(s.cond)),
                         self.statement(s.stmt),
-                    ],
+                    ], value=scope_id,
                 )
-            self.enum_tags.pop()
-            self.records.pop()
-            self.typedefs.pop()
-            self.scopes.pop()
+            self.pop_scope()
             self.loop_depth -= 1
+            self.break_depth -= 1
             return n
-        if isinstance(s, (c.Break, c.Continue)):
+        if isinstance(s, c.Break):
+            if not self.break_depth:
+                self.fail(s, "break outside loop or switch")
+            return self.node(s, "break")
+        if isinstance(s, c.Continue):
             if not self.loop_depth:
-                self.fail(s, "break/continue outside loop")
-            return self.node(s, "break" if isinstance(s, c.Break) else "continue")
+                self.fail(s, "continue outside loop")
+            return self.node(s, "continue")
+        if isinstance(s, c.Case):
+            if not self.switch_depth:
+                self.fail(s, "case outside switch")
+            self.check_jump_into_vla(s, "case")
+            value = self.normalize_constant(self.const_int(s.expr), self.switch_types[-1])
+            return self.node(
+                s, "case", children=[self.statement(x) for x in s.stmts], value=value
+            )
+        if isinstance(s, c.Default):
+            if not self.switch_depth:
+                self.fail(s, "default outside switch")
+            self.check_jump_into_vla(s, "default")
+            return self.node(s, "default", children=[self.statement(x) for x in s.stmts])
+        if isinstance(s, c.Label):
+            if s.name in self.labels:
+                self.fail(s, f"duplicate label {s.name}")
+            self.labels[s.name] = (tuple(self.scope_ids), frozenset(
+                scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+            ))
+            return self.node(s, "label", children=[self.statement(s.stmt)], value=s.name)
+        if isinstance(s, c.Goto):
+            node = self.node(s, "goto")
+            self.gotos.append((
+                node,
+                s.name,
+                tuple(self.scope_ids),
+                frozenset(
+                    scope_id for scope_id, has_vla in zip(self.scope_ids, self.scope_vlas) if has_vla
+                ),
+            ))
+            return node
         if isinstance(s, c.EmptyStatement):
             return self.node(s, "block")
         return self.node(s, "expression", children=[self.expr(s)])
@@ -1028,10 +1254,9 @@ class Frontend:
         for name, item in definitions.items():
             sym = self.scopes[0][name]
             self.locals = []
-            self.scopes.append({})
-            self.typedefs.append({})
-            self.records.append({})
-            self.enum_tags.append({})
+            self.labels = {}
+            self.gotos = []
+            function_scope = self.push_scope()
             params = []
             declarations = item.decl.type.args.params if item.decl.type.args else []
             parameter_bounds = []
@@ -1048,6 +1273,8 @@ class Frontend:
                 p = self.new(d.name, t, "parameter")
                 params.append(p)
                 self.scopes[-1][d.name] = p
+                if self.variably_modified(t):
+                    self.scope_vlas[-1] = True
             self.return_type = sym.type.base
             body = self.node(
                 item.body,
@@ -1056,12 +1283,11 @@ class Frontend:
                     [self.node(item.body, "vla_bounds", value=parameter_bounds)]
                     if parameter_bounds else []
                 ) + [self.statement(x) for x in item.body.block_items or []],
+                value=function_scope,
             )
+            self.resolve_gotos()
             self.functions.append(Function(sym, params, self.locals, body))
-            self.enum_tags.pop()
-            self.records.pop()
-            self.typedefs.pop()
-            self.scopes.pop()
+            self.pop_scope()
         main = self.scopes[0].get("main")
         if require_main:
             if not main or "main" not in definitions:

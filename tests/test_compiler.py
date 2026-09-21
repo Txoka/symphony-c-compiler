@@ -152,6 +152,75 @@ class ExecutionTests(unittest.TestCase):
         run("int main(void){int i=0; for(;;) { if(++i==5) break; } return i;}", 5)
         run("int main(void){int i=0; do {i++; continue;} while(i<3); return i;}", 3)
 
+    def test_switch_fallthrough_and_loop_breaks(self):
+        run(
+            """int main(void) {
+                int total = 0;
+                for (int i = 0; i < 3; i++) {
+                    switch (i) {
+                    case 0: total += 1; break;
+                    case 1: total += 10;
+                    case 2: total += 100; break;
+                    default: return -1;
+                    }
+                    total += 1000;
+                }
+                return total;
+            }""",
+            3211,
+        )
+
+    def test_switch_promotions_nested_dispatch_and_no_default(self):
+        run(
+            """int main(void) {
+                signed char selector = -1;
+                int result = 0;
+                switch (selector) {
+                case -1:
+                    switch (2) {
+                    case 2: result = 40; break;
+                    default: result = -100;
+                    }
+                    result += 2;
+                    break;
+                default: return -1;
+                }
+                switch (9) { case 1: return -2; }
+                return result;
+            }""",
+            42,
+        )
+
+    def test_goto_forward_backward_and_vla_scope_exit(self):
+        run(
+            """int main(void) {
+                int value = 0;
+                goto ready;
+                value = -1;
+            ready:
+                value += 2;
+            again:
+                value += 10;
+                if (value < 42) goto again;
+                return value;
+            }""",
+            42,
+        )
+        # The run helper also asserts that the stack pointer returns to zero.
+        run(
+            """int main(void) {
+                int count = 3;
+                {
+                    int values[count];
+                    values[0] = 9;
+                    goto done;
+                }
+            done:
+                return 42;
+            }""",
+            42,
+        )
+
     def test_short_circuit_and_conditional(self):
         run(
             """int main(void){int x=0; int a=0 && ++x; int b=1 || ++x;
@@ -196,6 +265,84 @@ class ExecutionTests(unittest.TestCase):
         run("int main(void){int a[2]={3,4}; int *p=a; *p+++=2; return a[0]*10+*p;}", 54)
         run('int main(void){char s[6]="Hi"; return s[0]+s[1]+s[2]+s[5];}', 177)
         run("int main(void){int a=0; return sizeof(a++)+a;}", 4)
+
+    def test_unions_designated_and_brace_elided_initializers(self):
+        run(
+            """struct Triple { int pair[2]; int tail; };
+            union Word { int value; unsigned char bytes[4]; };
+            int main(void) {
+                struct Triple source = { 4, 7, 9 };
+                struct Triple copy = { .tail = 1, .pair = { [1] = 2, [0] = 3 } };
+                int sparse[5] = { [3] = 8, [1] = 6 };
+                union Word encoded = { .bytes = { 0, 0, 0, 5 } };
+                union Word duplicate = { .value = 0 };
+                copy = source;
+                duplicate = encoded;
+                return copy.pair[0] + copy.pair[1] + copy.tail
+                    + sparse[1] + sparse[3] + duplicate.value;
+            }""",
+            39,
+        )
+
+    def test_union_local_initialized_from_union_lvalue(self):
+        run(
+            """union U { int a; unsigned char bytes[4]; };
+            int main(void) {
+                union U u1; u1.a = 5;
+                union U u2 = u1;
+                return u2.a;
+            }""",
+            5,
+        )
+
+    def test_switch_case_dedup_normalizes_to_promoted_type(self):
+        # unsigned char promotes to int, so -1 and 255 are distinct case
+        # values here (unlike if x's own type were used for normalization).
+        run(
+            """int main(void) {
+                unsigned char x = 255;
+                switch (x) {
+                case -1: return 1;
+                case 255: return 2;
+                default: return 3;
+                }
+            }""",
+            2,
+        )
+
+    def test_union_layout_static_initialization_and_assignment(self):
+        run(
+            """union Packet { unsigned int word; unsigned char bytes[4]; };
+            static union Packet encoded = { .bytes = { 1, 2, 3, 4 } };
+            int main(void) {
+                union Packet copy = { 0 };
+                copy = encoded;
+                return sizeof(copy) + copy.bytes[0] + copy.bytes[3]
+                    + (copy.word == 0x01020304u);
+            }""",
+            10,
+        )
+
+    def test_structure_returns_use_caller_owned_result_storage(self):
+        run(
+            """struct Pair { int left; int right; };
+            struct Pair make_pair(int value) {
+                struct Pair result = { value, value + 1 };
+                return result;
+            }
+            struct Pair twice(int value) { return make_pair(value + value); }
+            int main(void) {
+                struct Pair (*factory)(int) = make_pair;
+                struct Pair first = twice(20);
+                struct Pair second = factory(7);
+                return first.left + first.right + second.left + second.right;
+            }""",
+            96,
+        )
+
+    def test_c_aggregate_compat_example(self):
+        source = (ROOT / "examples/c_aggregate_compat.c").read_text()
+        run(source, 41)
 
     def test_memory_runtime(self):
         result, _ = run(
@@ -805,7 +952,29 @@ class DiagnosticTests(unittest.TestCase):
             ("void main(void){}", "entry point"),
             ("int main(void){return __dyn_mul(1,2);}", "reserved"),
             ("int main(void){return 1.25;}", "floating"),
-            ("int main(void){switch(1){case 1:return 1;}return 0;}", "unsupported"),
+            ("int main(void){switch(1){case 1:return 0;case 1:return 1;}}", "duplicate case"),
+            ("int main(void){switch(1){default:return 0;default:return 1;}}", "duplicate default"),
+            ("int main(void){int a[2]={[2]=1};return 0;}", "outside the array"),
+            ("int main(void){union U{int a;int b;};union U u={1,2};return 0;}", "exactly one"),
+            ("int main(void){goto missing;return 0;}", "undefined label"),
+            ("int main(void){x:return 0;x:return 1;}", "duplicate label"),
+            (
+                "int main(void){goto inside;{int n=2;int values[n];inside:return 0;}}",
+                "enters the scope",
+            ),
+            (
+                "int main(void){switch(1){int n=4;int values[n];case 1:return values[0];}return 0;}",
+                "enters the scope",
+            ),
+            (
+                "int main(void){switch(1){int n=4;int values[n];default:return values[0];}return 0;}",
+                "enters the scope",
+            ),
+            (
+                "int main(void){unsigned int x=0;"
+                "switch(x){case -1:return 1;case 4294967295u:return 2;default:return 0;}}",
+                "duplicate case",
+            ),
         ]
         for source, message in cases:
             with self.subTest(source=source):
