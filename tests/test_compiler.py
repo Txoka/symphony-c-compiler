@@ -406,16 +406,6 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(tiny_global.section, "data")
         self.assertLess(tiny.image.symbols[tiny_global.symbol.key], len(tiny.image.binary))
 
-        always = compile_source(
-            "static unsigned char byte; int main(void) { output((unsigned int)&byte); return byte; }",
-            target=Target(bss_mode="always"),
-        )
-        always_global = next(global_ for global_ in always.ir.globals if global_.symbol.name == "byte")
-        self.assertEqual(always_global.section, "bss")
-        self.assertGreaterEqual(
-            always.image.symbols[always_global.symbol.key], len(always.image.binary)
-        )
-
         never = compile_source(source, target=Target(bss_mode="never"))
         never_zeroes = next(global_ for global_ in never.ir.globals if global_.symbol.name == "zeroes")
         self.assertEqual(never_zeroes.section, "data")
@@ -829,6 +819,7 @@ class DiagnosticTests(unittest.TestCase):
             Target(load_address=-1),
             Target(ram_size=4),
             Target(bss_mode="invalid"),
+            Target(bss_mode="always"),
         ]:
             with self.subTest(target=target), self.assertRaises(CompileError):
                 compile_source("int main(void){return 0;}", target=target)

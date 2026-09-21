@@ -33,9 +33,9 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
     p.add_argument("--pic", action="store_true")
     p.add_argument(
         "--bss",
-        choices=("auto", "always", "never", "assume-zeroed"),
+        choices=("auto", "never", "assume-zeroed"),
         default="auto",
-        help="place zero static storage in BSS automatically, always, never, or assume RAM is zeroed",
+        help="place zero static storage in BSS automatically, never, or assume RAM is zeroed",
     )
     p.add_argument(
         "--target", choices=("dynphony", "symphony"), default=default_target

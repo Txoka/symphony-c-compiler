@@ -90,11 +90,8 @@ class Backend:
         candidates = [g for g in self.module.globals if g.section == "zero"]
         if not candidates:
             return
-        if self.target.bss_mode in ("always", "assume-zeroed"):
+        if self.target.bss_mode == "assume-zeroed":
             section = "bss"
-            size = self.bss_size(candidates)
-            loops = [unroll for unroll, _ in self.clear_plans(size) if unroll]
-            self.bss_clear_unroll = max(loops, default=None)
         elif self.target.bss_mode == "never":
             section = "data"
         else:

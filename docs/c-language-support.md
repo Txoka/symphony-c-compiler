@@ -224,8 +224,8 @@ contains selected all-zero, non-relocatable mutable objects, including
 zero-initialized globals and static locals. RODATA and DATA are serialized in
 the raw image; BSS has virtual addresses after it and is zeroed at startup.
 `--bss=auto` (the default) selects BSS only when its word-clear code is smaller
-than serializing the zero bytes. `--bss=always` and `--bss=never` force either
-layout; `--bss=assume-zeroed` uses BSS without emitting startup clears. The raw
+than serializing the zero bytes. `--bss=never` serializes those bytes instead;
+`--bss=assume-zeroed` uses BSS without emitting startup clears. The raw
 image has no hardware read-only mapping yet, so RODATA is an organizational
 distinction rather than write protection.
 
