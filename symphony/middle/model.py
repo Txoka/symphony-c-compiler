@@ -172,7 +172,7 @@ class Global:
     symbol: Symbol
     data: bytearray
     relocations: list[tuple[int, str, int]] = field(default_factory=list)
-    section: str = "data"  # rodata, data, or bss
+    section: str = "data"  # rodata, data, zero candidate, or bss
 
 
 @dataclass

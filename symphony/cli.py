@@ -32,9 +32,10 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
     )
     p.add_argument("--pic", action="store_true")
     p.add_argument(
-        "--assume-zeroed-ram",
-        action="store_true",
-        help="omit BSS startup clearing; requires the loader/platform to zero RAM",
+        "--bss",
+        choices=("auto", "always", "never", "assume-zeroed"),
+        default="auto",
+        help="place zero static storage in BSS automatically, always, never, or assume RAM is zeroed",
     )
     p.add_argument(
         "--target", choices=("dynphony", "symphony"), default=default_target
@@ -77,7 +78,7 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
             persistent_size=args.persistent_size,
             load_address=args.load_address,
             pic=args.pic,
-            assume_zeroed_ram=args.assume_zeroed_ram,
+            bss_mode=args.bss,
             isa=args.target,
         )
         sources = [(str(path), path.read_text()) for path in args.source]

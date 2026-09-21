@@ -553,7 +553,7 @@ def lower(program):
     raw = [
         Instruction("init_pic"),
         Instruction("init_stack"),
-        *([Instruction("zero_bss")] if any(g.section == "bss" for g in program.globals) else []),
+        *([Instruction("zero_bss")] if any(g.section == "zero" for g in program.globals) else []),
         Instruction("relocate_globals"),
     ]
     if any(g.symbol.key == "__dyn_printf_framebuffer" for g in program.globals):

@@ -209,7 +209,7 @@ The text framebuffer is allocated in BSS only when a direct call to `printf`,
 placed immediately after the serialized image without increasing the binary by
 3,840 bytes. Startup clears the complete BSS range, selects ASCII 8 mode, and
 points the screen at the framebuffer while leaving color and font settings
-unchanged. `--assume-zeroed-ram` omits that clear when the loader/platform
+unchanged. `--bss=assume-zeroed` omits that clear when the loader/platform
 guarantees zero-filled RAM. Newlines
 advance to the next 96-character row. Output past row 40 is discarded;
 scrolling can be implemented by application code that rewrites the buffer and
@@ -220,11 +220,14 @@ calls `screen_cursor`.
 After whole-program optimization removes unused globals, static objects are
 laid out in three logical sections. RODATA contains string literals and const
 objects; DATA contains initialized mutable objects and address relocations; BSS
-contains all-zero, non-relocatable mutable objects, including zero-initialized
-globals and static locals. RODATA and DATA are serialized in the raw image;
-BSS has virtual addresses after it and is zeroed at startup. The raw image has
-no hardware read-only mapping yet, so RODATA is an organizational distinction
-rather than write protection.
+contains selected all-zero, non-relocatable mutable objects, including
+zero-initialized globals and static locals. RODATA and DATA are serialized in
+the raw image; BSS has virtual addresses after it and is zeroed at startup.
+`--bss=auto` (the default) selects BSS only when its word-clear code is smaller
+than serializing the zero bytes. `--bss=always` and `--bss=never` force either
+layout; `--bss=assume-zeroed` uses BSS without emitting startup clears. The raw
+image has no hardware read-only mapping yet, so RODATA is an organizational
+distinction rather than write protection.
 
 ## Other target facilities
 

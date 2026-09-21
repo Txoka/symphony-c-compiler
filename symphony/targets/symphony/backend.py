@@ -24,6 +24,7 @@ class Backend:
         self.frames = {}
         self.private_id = 0
         self.needs_stack_overflow = False
+        self.select_bss_sections()
 
     def unique(self):
         self.private_id += 1
@@ -31,6 +32,58 @@ class Backend:
 
     def bss_globals(self):
         return [global_ for global_ in self.module.globals if global_.section == "bss"]
+
+    def bss_size(self, globals_=None):
+        size = 0
+        for global_ in self.bss_globals() if globals_ is None else globals_:
+            size = align_up(size, global_.symbol.type.align)
+            size += len(global_.data)
+        # The heap begins after BSS, so final alignment padding is available
+        # to the clear routine. This permits word-only clearing.
+        return align_up(size, 4)
+
+    def instruction_size(self, data):
+        if not self.target.fixed_instruction_width:
+            return len(data)
+        # Every instruction emitted here occupies one Symphony slot; the
+        # encodings passed to this helper never contain multiple instructions.
+        return 4
+
+    def clear_code_size(self, size):
+        """Conservative serialized size of a word-only BSS clear sequence."""
+        words = size // 4
+        if not words:
+            return 0
+        address = 12 + (4 if self.target.pic else 0)
+        store = self.instruction_size(isa.store(4, 1, 0))
+        add = self.instruction_size(isa.alu("add", 1, 1, 4, True))
+        if words < 16:
+            return address + words * store + (words - 1) * add
+        groups, tail = divmod(words, 8)
+        counter = len(isa.cheap_constant(2, groups))
+        body = 8 * (store + add)
+        control = (
+            self.instruction_size(isa.alu("sub", 2, 2, 1, True))
+            + self.instruction_size(isa.alu("cmp", 15, 2, 0))
+            + (16 if self.target.fixed_instruction_width else 15)
+        )
+        tail_code = tail * store + max(tail - 1, 0) * add
+        return address + counter + body + control + tail_code
+
+    def select_bss_sections(self):
+        candidates = [g for g in self.module.globals if g.section == "zero"]
+        if not candidates:
+            return
+        if self.target.bss_mode in ("always", "assume-zeroed"):
+            section = "bss"
+        elif self.target.bss_mode == "never":
+            section = "data"
+        else:
+            bss_size = self.bss_size(candidates)
+            data_size = sum(len(global_.data) for global_ in candidates)
+            section = "bss" if data_size > self.clear_code_size(bss_size) else "data"
+        for global_ in candidates:
+            global_.section = section
 
     def needs_heap_start(self):
         return any(
@@ -46,17 +99,14 @@ class Backend:
     def emit_zero_bss(self):
         """Clear the virtual BSS range with wide stores and exact-size tails."""
         globals_ = self.bss_globals()
-        if not globals_ or self.target.assume_zeroed_ram:
+        if not globals_ or self.target.bss_mode == "assume-zeroed":
             return
-        size = 0
-        for global_ in globals_:
-            size = align_up(size, global_.symbol.type.align)
-            size += len(global_.data)
+        size = self.bss_size(globals_)
         a = self.a
         a.address(1, "@bss.start")
-        words, tail = divmod(size, 4)
-        groups, words = divmod(words, 8)
-        if groups:
+        words = size // 4
+        if words >= 16:
+            groups, words = divmod(words, 8)
             a.emit(isa.cheap_constant(2, groups))
             loop = self.unique()
             a.label(loop)
@@ -68,13 +118,8 @@ class Backend:
             a.branch("jne", loop)
         for _ in range(words):
             a.emit(isa.store(4, 1, 0))
-            a.emit(isa.alu("add", 1, 1, 4, True))
-        if tail >= 2:
-            a.emit(isa.store(2, 1, 0))
-            a.emit(isa.alu("add", 1, 1, 2, True))
-            tail -= 2
-        if tail:
-            a.emit(isa.store(1, 1, 0))
+            if _ + 1 != words:
+                a.emit(isa.alu("add", 1, 1, 4, True))
 
     def emit_relocations(self):
         """Lower the startup IR operation that rebases static pointers."""
@@ -1204,7 +1249,7 @@ class Backend:
         bss = self.bss_globals()
         if bss:
             virtual_end = align_up(
-                virtual_end, max(g.symbol.type.align for g in bss)
+                virtual_end, max(4, max(g.symbol.type.align for g in bss))
             )
             a.labels["@bss.start"] = virtual_end
         for g in bss:
@@ -1212,6 +1257,7 @@ class Backend:
             a.labels[g.symbol.key] = virtual_end
             virtual_end += len(g.data)
         if bss:
+            virtual_end = align_up(virtual_end, 4)
             a.labels["@bss.end"] = virtual_end
         if self.needs_heap_start():
             a.labels["__dyn_heap_start"] = virtual_end

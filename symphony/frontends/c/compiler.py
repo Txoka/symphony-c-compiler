@@ -30,15 +30,15 @@ def readonly_object(type_):
 def assign_static_sections(program):
     """Classify live-independent static storage before IR lowering.
 
-    BSS contains only all-zero, non-relocatable mutable objects.  Pointer and
-    function-address initializers stay in DATA because fixed images patch their
-    serialized slots directly and PIC images relocate them during startup.
+    All-zero, non-relocatable mutable objects are BSS candidates.  The backend
+    chooses BSS or serialized DATA after dead-global pruning, using the target
+    BSS policy. Pointer and function-address initializers always stay in DATA.
     """
     for global_ in program.globals:
         if global_.section == "rodata" or readonly_object(global_.symbol.type):
             global_.section = "rodata"
         elif not global_.relocations and not any(global_.data):
-            global_.section = "bss"
+            global_.section = "zero"
         else:
             global_.section = "data"
 

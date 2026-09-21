@@ -367,7 +367,7 @@ class ExecutionTests(unittest.TestCase):
     def test_static_storage_sections_and_bss_startup_zeroing(self):
         source = """int initialized = 9;
             const int read_only = 4;
-            int zeroes[17];
+            int zeroes[256];
             static unsigned char bytes[3];
             int main(void) {
                 static unsigned short local_zero;
@@ -376,7 +376,7 @@ class ExecutionTests(unittest.TestCase):
                 output((unsigned int)&zeroes);
                 output((unsigned int)&bytes);
                 output((unsigned int)&local_zero);
-                return initialized + read_only + zeroes[16] + bytes[2] + local_zero;
+                return initialized + read_only + zeroes[255] + bytes[2] + local_zero;
             }"""
         result, _ = run(source, 13)
         globals_ = {global_.symbol.name: global_ for global_ in result.ir.globals}
@@ -393,11 +393,32 @@ class ExecutionTests(unittest.TestCase):
                 result.image.symbols[globals_[name].symbol.key], len(result.image.binary)
             )
 
-        assumed = compile_source(source, target=Target(assume_zeroed_ram=True))
+        assumed = compile_source(source, target=Target(bss_mode="assume-zeroed"))
         self.assertLess(len(assumed.image.binary), len(result.image.binary))
         self.assertGreaterEqual(
             assumed.image.symbols["zeroes"], len(assumed.image.binary)
         )
+
+        tiny = compile_source(
+            "static unsigned char byte; int main(void) { output((unsigned int)&byte); return byte; }"
+        )
+        tiny_global = next(global_ for global_ in tiny.ir.globals if global_.symbol.name == "byte")
+        self.assertEqual(tiny_global.section, "data")
+        self.assertLess(tiny.image.symbols[tiny_global.symbol.key], len(tiny.image.binary))
+
+        always = compile_source(
+            "static unsigned char byte; int main(void) { output((unsigned int)&byte); return byte; }",
+            target=Target(bss_mode="always"),
+        )
+        always_global = next(global_ for global_ in always.ir.globals if global_.symbol.name == "byte")
+        self.assertEqual(always_global.section, "bss")
+        self.assertGreaterEqual(
+            always.image.symbols[always_global.symbol.key], len(always.image.binary)
+        )
+
+        never = compile_source(source, target=Target(bss_mode="never"))
+        never_zeroes = next(global_ for global_ in never.ir.globals if global_.symbol.name == "zeroes")
+        self.assertEqual(never_zeroes.section, "data")
 
     def test_big_endian_and_unaligned(self):
         run(
@@ -807,6 +828,7 @@ class DiagnosticTests(unittest.TestCase):
             Target(persistent_size=13),
             Target(load_address=-1),
             Target(ram_size=4),
+            Target(bss_mode="invalid"),
         ]:
             with self.subTest(target=target), self.assertRaises(CompileError):
                 compile_source("int main(void){return 0;}", target=target)
@@ -1256,7 +1278,7 @@ class EncodingTests(unittest.TestCase):
                 "-o",
                 str(path / "demo.bin"),
                 "--pic",
-                "--assume-zeroed-ram",
+                "--bss=assume-zeroed",
                 "--run",
                 "--run-address",
                 "0x12345",
@@ -1275,7 +1297,8 @@ class EncodingTests(unittest.TestCase):
                 json.loads((path / "map.json").read_text())["target"]["pic"]
             )
             self.assertTrue(
-                json.loads((path / "map.json").read_text())["target"]["assume_zeroed_ram"]
+                json.loads((path / "map.json").read_text())["target"]["bss_mode"]
+                == "assume-zeroed"
             )
             self.assertEqual(
                 json.loads((path / "map.json").read_text())["target"]["isa"],

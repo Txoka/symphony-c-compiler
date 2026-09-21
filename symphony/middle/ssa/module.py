@@ -52,7 +52,7 @@ def remove_unused_stack_initialization(module):
     instructions = [item for block in entry.blocks for item in block.instructions]
     if not any(item.op == "init_stack" for item in instructions):
         return False
-    stack_free = {"init_pic", "init_stack", "relocate_globals", "const", "global_addr", "copy", "cast", "unary", "binary", "intrinsic", "halt", "label"}
+    stack_free = {"init_pic", "init_stack", "zero_bss", "relocate_globals", "const", "global_addr", "copy", "cast", "unary", "binary", "intrinsic", "halt", "label"}
     if any(item.op not in stack_free for item in instructions):
         return False
     if any(item.op == "binary" and item.extra in ("*", "/", "%") for item in instructions):
