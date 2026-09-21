@@ -26,6 +26,7 @@ OPTIMIZATIONS = {
     "immutable_global_folding": True,
     "unused_stack_initialization_removal": True,
     "single_call_inlining": True,
+    "loop_pressure_aware_inlining": True,
 }
 
 

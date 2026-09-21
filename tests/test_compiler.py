@@ -1055,6 +1055,21 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
         self.assertLess(execute(optimized, 123456789)[1], execute(unoptimized, 123456789)[1])
 
+    def test_loop_pressure_guard_keeps_loop_helper_out_of_outer_loop(self):
+        source = (ROOT / "examples" / "loop_helper_inlining.c").read_text()
+        old = OPTIMIZATIONS["loop_pressure_aware_inlining"]
+        try:
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = False
+            inlined = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = old
+        guarded = _compile_source(source, target=Target())
+        self.assertNotIn("helper", inlined.image.symbols)
+        self.assertIn("helper", guarded.image.symbols)
+        for result in (inlined, guarded):
+            machine = Machine(result.image.binary)
+            self.assertEqual(machine.run(result.image.symbols["_halt"]), 316)
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

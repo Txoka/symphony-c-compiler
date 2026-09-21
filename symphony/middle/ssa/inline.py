@@ -25,7 +25,10 @@ from collections import defaultdict, deque
 
 from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import prune_unreachable_blocks
+from ..analysis.cfg import build_cfg
+from ..analysis.dominance import build_dominator_tree, find_natural_loops
 from ..model import pointer
+from .optimizations import enabled
 
 
 def _observable_addresses(module):
@@ -113,6 +116,7 @@ def _select_candidates(module):
             and all(item.op in ("param", "const", "copy", "cast", "direct_call", "direct_tailcall", "return") for item in body)
         )
         caller = call_list[0][0] if call_list else None
+        call_block = call_list[0][1] if call_list else None
         if (
             function.name != "_start"
             and function.name not in observable
@@ -126,9 +130,27 @@ def _select_candidates(module):
                 for block in function.blocks
                 for instruction in block.instructions
             )
+            and not _loop_pressure_risk(caller, call_block, function)
         ):
             candidates[function.name] = function
     return candidates
+
+
+def _loop_pressure_risk(caller, call_block, callee):
+    """Keep a loop helper out of an already-live caller loop.
+
+    The allocator has only seven volatile registers.  Cloning an inner loop
+    into an outer loop merges both live working sets and can create more spills
+    than the call it removes.  This is deliberately conservative until the
+    allocator exposes a numeric pressure estimate.
+    """
+    if not enabled("loop_pressure_aware_inlining"):
+        return False
+    callee_loops = find_natural_loops(build_dominator_tree(build_cfg(callee)))
+    if not callee_loops:
+        return False
+    caller_loops = find_natural_loops(build_dominator_tree(build_cfg(caller)))
+    return any(call_block in loop.blocks for loop in caller_loops)
 
 
 def _clone_callee(callee, caller, call_instruction, inline_id):
