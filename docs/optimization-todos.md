@@ -43,30 +43,43 @@ loop quality, not another local constant-folding rule.
 Implement the following in this order, measuring native termination steps and
 preserving the full suite after each atomic change:
 
-1. [ ] **SSA liveness and allocation.** Retain SSA value identity through
+1. [ ] **General CFG-aware loop transformation framework (next priority).**
+   Generalize the completed natural-loop discovery, bounded region evaluator,
+   and linear known-trip unroller into one reusable loop plan. Normalize or
+   explicitly model preheaders, latches, multiple backedges/`continue` edges,
+   internal conditional blocks, `break` edges, and multiple exits. Reconstruct
+   every live-out value with dedicated exit phis (LCSSA-style), including the
+   zero-trip path, before cloning, evaluating, or rewriting a loop. Preserve
+   exact side-effect order. Feed the shared trip-count and exit model to both
+   constant evaluation and retained-effect unrolling; keep exact final-image
+   no-growth comparison as the default and the existing speed-over-size option
+   as an independent policy. Use `insertion_sort`'s conditional loop and the
+   numeric examples as the first real-program targets.
+2. [ ] **SSA liveness and allocation.** Retain SSA value identity through
    allocation; compute block liveness/live intervals or interference; make
    loop-depth/use-frequency spill decisions; keep loop-carried pointers,
    bounds, and invariant results in callee-saved registers across calls.
-2. [x] **Conservative expensive-expression CSE (initial form).** Reuse
+3. [x] **Conservative expensive-expression CSE (initial form).** Reuse
    dominated repeated multiply/divide/remainder expressions. On `primes`,
    this removes the second `i * i`, reducing 2,140 to 2,064 bytes and
    2,418,382 to 2,413,144 steps. Cheap expression, address, and load CSE
    remain below because indiscriminate reuse increases register pressure.
-3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
-   work with pointer induction, pointer-limit exits, trip-count facts, and
+4. [ ] **Stronger loop optimization.** On top of item 1, extend existing
+   LICM/basic induction work with pointer induction, pointer-limit exits, and
+   stronger trip-count facts, plus
    proven bulk-fill/copy idioms. Use proven trip counts to fully unroll only
    when a target-cost estimate predicts no final code growth; run this after
    invariant hoisting and CFG simplification so bounds and loop bodies are in
    canonical form. Keep growth-oriented unrolling separately opt-in.
-4. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
+5. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
    followed by `/` across pure instructions and stores proven to target a
    different local object. The focused regression falls from 684 to 596 bytes
    and 5,610 to 2,793 reference-emulator steps. On `primes`, pairing reduces
    2,372 to 2,140 bytes and 4,113,385 to 2,418,382 steps.
-5. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
+6. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
    redundant spills/reloads, and needless address materializations; iterate
    with branch/call relaxation.
-6. [ ] **Costed interprocedural specialization.** Consider constant-argument
+7. [ ] **Costed interprocedural specialization.** Consider constant-argument
    specialization and multi-site inlining only under an explicit size/cycle
    profitability policy, after the preceding foundations expose their gains.
 
@@ -93,6 +106,13 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   only when the alternate incoming value and all uses preserve Boolean
   semantics.  `insertion_sort.c` currently exposes this form; the existing
   local comparison-branch fusion cannot cross that phi.
+- [ ] **General CFG-aware loop transformation and live-out reconstruction
+  (highest remaining priority).** The initial evaluator and unroller only
+  cover restricted canonical regions. Add the shared loop plan described in
+  priority item 1 before broadening either pass, so internal branches,
+  multiple `continue`/backedge edges, `break`, multiple exits, and values used
+  after the loop are handled by one proved mechanism rather than pass-specific
+  matchers.
 - [ ] **Pointer induction and loop-address CSE.** Give an indexed loop a
   derived advancing pointer and, where valid, a pointer end bound.  Reuse
   bases and address increments rather than recomputing `base + index`.
@@ -124,8 +144,8 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   rejects stores, calls, intrinsics, unknown memory, multiple exits, and
   values escaping the loop outside header phis. This folds `demo.c`'s inline
   four-element array sum, reducing the current image from 1,632 bytes/3,812
-  steps to 1,479/3,741. General known-trip unrolling with retained effects and
-  a target cost guard remains the next loop transformation.
+  steps to 1,479/3,741. Its next extension is the general CFG-aware loop plan
+  above, including multiple exits and complete live-out reconstruction.
 - [x] **Recursive associative reduction to accumulator loop.** A one-parameter
   reduction using integer `+`, `*`, `|`, `^`, or `&`, the matching identity,
   one recursive call, and a pure parameter-derived element expression now
@@ -202,14 +222,19 @@ one-shot phases.
 
 Remaining work, in dependency and payoff order:
 
-1. [ ] Add a bounded IR evaluator for side-effect-free calls and loops with known
-   inputs. Give it explicit instruction, recursion-depth, and memory limits; reject
-   device operations, volatile access, unknown calls, undefined operations, and
-   writes outside private evaluator state. Model immutable global bytes and private
-   local storage in the evaluator, then feed successful results back into the
-   ordinary fixed point. Together with the completed global passes, this should collapse the
-   constant demo to `mov r1, 146` plus halt.
-2. [ ] Add general dead-storage and dead-allocation elimination. Remove unused
+1. [ ] Build the general CFG-aware loop plan and exit-value reconstruction
+   described above. The initial natural-loop discovery, scalar constant-call
+   evaluator, constant loop-region evaluator, trip-count analysis, and linear
+   retained-effect unroller are complete foundations, not the general loop
+   transformation. First extend them to conditional multi-block bodies,
+   multiple backedges/continues, breaks, multiple exits, and escaping values;
+   retain the existing pass toggles and no-code-growth policy toggle.
+2. [ ] Extend bounded evaluation with private local memory and nested pure calls.
+   Keep explicit instruction, recursion-depth, iteration, and memory limits;
+   reject device operations, volatile access, unknown calls, undefined operations,
+   and writes outside private evaluator state. Immutable global-byte reads and
+   scalar call/loop evaluation are already implemented.
+3. [ ] Add general dead-storage and dead-allocation elimination. Remove unused
    fixed local storage, VLA `stack_alloc` operations, and other allocation-like
    setup when the object cannot be accessed or escape and the operation itself is
    not observable. Preserve required initialization, bound evaluation, cleanup,
@@ -217,21 +242,22 @@ Remaining work, in dependency and payoff order:
    side-effectful evaluation from removable storage setup where necessary. Add
    regression tests for unused locals, arrays, VLAs, temporaries, side-effectful
    bounds/initializers, and binary-layout changes.
-3. [ ] Identify natural loops, induction variables, and proven constant trip counts.
-   Use these facts for loop-invariant code motion and bounded evaluation first;
-   retain code-growing unrolling behind its explicit option.
-4. [x] Recognize matching unsigned quotient/remainder expressions with identical
+4. [x] Identify natural loops and initial induction variables/proven constant
+   trip counts, and use them for bounded evaluation and restricted full
+   unrolling. General CFG coverage and stronger induction/pointer facts remain
+   in items 1 and the benchmark priorities above.
+5. [x] Recognize matching unsigned quotient/remainder expressions with identical
    operands and lower them to a paired runtime call across pure instructions and
    stores proven not to alias those operands. Signed pairing and a native
    two-result IR/ABI form remain follow-up work.
-5. [ ] Extend the implemented dominator-based value numbering beyond expensive
+6. [ ] Extend the implemented dominator-based value numbering beyond expensive
    arithmetic, using pressure-aware profitability for cheap/address expressions
    and conservative alias invalidation for loads.
-6. [ ] Add block liveness and interference-based register/stack-slot reuse, followed
+7. [ ] Add block liveness and interference-based register/stack-slot reuse, followed
    by loop-depth spill costs and better caller-saved allocation.
-7. [ ] Add the small post-allocation peephole pass and iterate it with branch/call
+8. [ ] Add the small post-allocation peephole pass and iterate it with branch/call
    relaxation. It should only remove artifacts requiring physical-register knowledge.
-8. [ ] Add non-tail recursive fallthrough-call layout for a recursive function
+9. [ ] Add non-tail recursive fallthrough-call layout for a recursive function
    with exactly one external direct caller. Split the caller around that site,
    pre-push its known continuation, place the recursive function next, and let
    the first entry fall through while recursive entries keep calling the stable
@@ -245,12 +271,12 @@ Remaining work, in dependency and payoff order:
    arguments, nested non-tail recursion, caller continuation execution, `sp`
    restoration, stable recursive entry labels, branch-distance thresholds, and
    a deliberately unprofitable layout that must remain unchanged.
-9. [ ] Add flag liveness and profile/cost-guided block ordering after the preceding
+10. [ ] Add flag liveness and profile/cost-guided block ordering after the preceding
     CFG and register foundations are stable.
-10. [ ] Extend singleton function-pointer recognition through immutable global loads.
+11. [ ] Extend singleton function-pointer recognition through immutable global loads.
     Local single-target pointers already reduce to direct calls after copy propagation.
     Keep guarded multi-target devirtualization deferred because it can grow code.
-11. [x] Implement the memory runtime, heap allocation, overflow-safe VLA sizing,
+12. [x] Implement the memory runtime, heap allocation, overflow-safe VLA sizing,
     and bidirectional heap/stack collision checks independently of optimizer correctness.
 
 ## Deferred and optional work
