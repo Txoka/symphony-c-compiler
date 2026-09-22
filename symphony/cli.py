@@ -59,7 +59,12 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
     p.add_argument(
         "--run-address", type=number, help="relocate a PIC image for emulator execution"
     )
-    p.add_argument("--max-steps", type=int, default=5_000_000)
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=1_000_000_000,
+        help="maximum emulator instructions before reporting a limit (default: 1,000,000,000)",
+    )
     p.add_argument(
         "--hz-meter",
         action="store_true",
