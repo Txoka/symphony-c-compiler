@@ -1119,6 +1119,63 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(execute(optimized, 65537)[1], execute(baseline, 65537)[1])
         self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
 
+    def test_self_reduction_loop_improves_demo(self):
+        source = (ROOT / "examples" / "demo.c").read_text()
+        old = OPTIMIZATIONS["self_reduction_loop_lowering"]
+        try:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+            text = bytes(machine.memory[framebuffer:framebuffer + 11])
+            return returned, text, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(optimized_result[:2], baseline_result[:2])
+        self.assertEqual(optimized_result[0], 146)
+        self.assertEqual(optimized_result[1], b"Result: 146")
+        self.assertLess(optimized_result[2], baseline_result[2])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
+
+    def test_self_reduction_requires_multiplicative_identity(self):
+        result = _compile_source(
+            "int f(int n){if(n<2)return 2;return n*f(n-1);}"
+            "int main(void){return f(3);}",
+            target=Target(),
+        )
+        machine = Machine(result.image.binary)
+        self.assertEqual(machine.run(result.image.symbols["_halt"]), 12)
+
+    def test_self_reduction_loop_matches_recursive_results(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int f(int n){if(n<2)return 1;return n*f(n-1);}"
+            "int main(void){return f((int)input());}"
+        )
+        old = OPTIMIZATIONS["self_reduction_loop_lowering"]
+        try:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = False
+            recursive = _compile_source(source, target=Target())
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = True
+            looped = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = old
+
+        def execute(result, value):
+            machine = Machine(result.image.binary, inputs=(value,))
+            return machine.run(result.image.symbols["_halt"])
+
+        for value in (-4, 0, 1, 2, 5, 10):
+            self.assertEqual(execute(looped, value), execute(recursive, value))
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

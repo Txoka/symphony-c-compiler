@@ -54,7 +54,10 @@ preserving the full suite after each atomic change:
    remain below because indiscriminate reuse increases register pressure.
 3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
    work with pointer induction, pointer-limit exits, trip-count facts, and
-   proven bulk-fill/copy idioms. Keep growth-oriented unrolling opt-in.
+   proven bulk-fill/copy idioms. Use proven trip counts to fully unroll only
+   when a target-cost estimate predicts no final code growth; run this after
+   invariant hoisting and CFG simplification so bounds and loop bodies are in
+   canonical form. Keep growth-oriented unrolling separately opt-in.
 4. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
    followed by `/` across pure instructions and stores proven to target a
    different local object. The focused regression falls from 684 to 596 bytes
@@ -95,6 +98,27 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   bases and address increments rather than recomputing `base + index`.
   This is the most visible instruction-level difference in GCC's
   `insertion_sort`, sieve, and numeric-array loops.
+- [ ] **Known-trip-count analysis and costed full unrolling.** Derive trip
+  counts for canonical induction phis with constant initial value, step, and
+  bound. For very small counts, compare the target cost of duplicated bodies
+  with the removed phi updates, comparisons, and back edges, and unroll only
+  when final code is predicted not to grow. `demo.c`'s four-element sum is the
+  first real regression target. Preserve zero-trip behavior, `break` and
+  `continue`, side-effect order, signed-overflow rules, and code-size wins from
+  later branch/call relaxation.
+- [x] **Recursive multiplication reduction to accumulator loop (initial
+  form).** The exact one-parameter `1` versus
+  `current * recurse(step(current))` shape now becomes an accumulator phi plus
+  backedge. This reduces `demo.c` from 1,964 to 1,852 bytes and 4,357 to 4,209
+  steps. Extend it only with proven identities and safe associative integer
+  semantics, retaining source evaluation order and rejecting escaping frame
+  addresses, multiple recursive calls, or observable work after the combine.
+  Keep this distinct from ordinary tail-recursion lowering.
+- [ ] **Bounded constant-call evaluation after loop canonicalization.** Once a
+  recursive reduction or small loop is represented canonically, evaluate calls
+  with constant arguments within explicit instruction/recursion limits. This
+  should allow `factorial(5)` to become `120`, matching GCC `-O2`, without a
+  factorial-specific fold.
 - [ ] **Extend conservative value numbering.** Expensive pure arithmetic is
   implemented. Add pressure-aware reuse for cheap arithmetic and address
   formation, then loads keyed by a conservative memory version. A naïve
@@ -124,6 +148,9 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   `render.c`; this is a toolchain-image policy difference, not code size or
   an optimization regression in scc.  Keep scc's compact BSS-clear strategy
   as the baseline unless a loader/BSS contract is introduced deliberately.
+  Also report startup separately for text-screen programs: `demo.c` spends
+  2,288 instructions clearing its compact 3,840-byte framebuffer BSS, whereas
+  the current GCC image serializes those zero bytes and starts at `main`.
 
 GCC is not uniformly better: scc's single-site inlining and self-tail-loop
 lowering make `towers_of_hanoi.c` substantially smaller and faster.  Preserve

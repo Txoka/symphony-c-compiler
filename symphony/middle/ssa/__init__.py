@@ -18,7 +18,11 @@ from .value_numbering import eliminate_common_expressions
 from .strength import reduce_strength
 from .calls import identify_direct_calls
 from .parameters import promote_readonly_parameters
-from .tail import eliminate_tail_calls, lower_self_tail_calls_to_loops
+from .tail import (
+    eliminate_tail_calls,
+    lower_self_reductions_to_loops,
+    lower_self_tail_calls_to_loops,
+)
 from .module import remove_unreachable_symbols, remove_unreachable_functions, fold_immutable_global_loads, remove_unused_stack_initialization
 
 __all__ = [
@@ -43,6 +47,7 @@ __all__ = [
     "identify_direct_calls",
     "promote_readonly_parameters",
     "eliminate_tail_calls",
+    "lower_self_reductions_to_loops",
     "lower_self_tail_calls_to_loops",
     "remove_unreachable_symbols",
     "remove_unreachable_functions",

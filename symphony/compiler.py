@@ -25,6 +25,7 @@ from .middle.ssa import (
     identify_direct_calls,
     promote_readonly_parameters,
     eliminate_tail_calls,
+    lower_self_reductions_to_loops,
     lower_self_tail_calls_to_loops,
     remove_unreachable_symbols,
     fold_immutable_global_loads,
@@ -81,6 +82,9 @@ promote_readonly_parameters = _optional_optimization(
 )
 eliminate_tail_calls = _optional_optimization(
     "tail_call_elimination", eliminate_tail_calls
+)
+lower_self_reductions_to_loops = _optional_optimization(
+    "self_reduction_loop_lowering", lower_self_reductions_to_loops
 )
 lower_self_tail_calls_to_loops = _optional_optimization(
     "self_tail_loop_lowering", lower_self_tail_calls_to_loops
@@ -156,6 +160,14 @@ class Compiler:
             pair_unsigned_divmod(function)
             verify(function)
             fuse_comparison_branches(function)
+            verify(function)
+            remove_dead_values(function)
+            verify(function)
+            simplify_control_flow(function)
+            verify(function)
+            lower_self_reductions_to_loops(function)
+            verify(function)
+            propagate_global_copies(function)
             verify(function)
             remove_dead_values(function)
             verify(function)
