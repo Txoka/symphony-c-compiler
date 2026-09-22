@@ -463,6 +463,10 @@ class Assembler:
         if mnem == "screen":
             _, value = operands
             return len(isa.screen(0, Register.ZR, False)) if self._is_register(value) else len(isa.screen(0, 0, True))
+        if mnem == "persistent_load":
+            return len(isa.persistent_load(Register.ZR, Register.ZR))
+        if mnem == "persistent_store":
+            return len(isa.persistent_store(Register.ZR, Register.ZR))
         if mnem == "link_return":
             return len(isa.link_return())
         if mnem == "link_call":
@@ -621,6 +625,18 @@ class Assembler:
                 if imm < 0:
                     imm &= 0xFFFF
                 return self._enc(isa.screen(sr, imm, True))
+
+        if mnem == "persistent_load":
+            d, address = operands
+            return self._enc(isa.persistent_load(
+                parse_register_operand(d), parse_register_operand(address)
+            ))
+
+        if mnem == "persistent_store":
+            address, value = operands
+            return self._enc(isa.persistent_store(
+                parse_register_operand(address), parse_register_operand(value)
+            ))
 
         if mnem == "counter":
             (d,) = operands
