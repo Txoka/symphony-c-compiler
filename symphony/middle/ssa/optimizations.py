@@ -29,6 +29,7 @@ OPTIMIZATIONS = {
     "tail_call_elimination": True,
     "self_reduction_loop_lowering": True,
     "bounded_constant_call_evaluation": True,
+    "bounded_constant_call_instruction_limit": 1024,
     "constant_loop_evaluation": True,
     "known_trip_full_unrolling": True,
     "unroll_no_code_growth": True,

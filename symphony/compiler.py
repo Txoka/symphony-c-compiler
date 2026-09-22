@@ -252,7 +252,12 @@ class Compiler:
         # Evaluate small pure calls while arithmetic is still represented as
         # scalar SSA; legalization below would otherwise turn it into runtime
         # calls that deliberately stop the evaluator.
-        if evaluate_constant_calls(ir):
+        if evaluate_constant_calls(
+            ir,
+            instruction_limit=optimization_enabled(
+                "bounded_constant_call_instruction_limit"
+            ),
+        ):
             for function in ir.functions:
                 sparse_conditional_constant_propagation(function)
                 verify(function)

@@ -111,6 +111,8 @@ all nested direct calls share the caller's instruction budget, recursive cycles
 and observable operations reject evaluation, and folding runs before call-graph
 cleanup and inlining. Consequently, removing a constant tower can make another
 callee single-use and immediately expose it to the existing bottom-up inliner.
+The default budget is independently configurable through
+`bounded_constant_call_instruction_limit` in the optimization settings registry.
 
 ## GCC differential review (2026-09)
 

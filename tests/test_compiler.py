@@ -1284,6 +1284,29 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(len(folded.image.binary), len(unfolded.image.binary))
         self.assertLess(measurements[1], measurements[0])
 
+    def test_bounded_constant_call_budget_is_configurable(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int leaf(int x){return x+1;}"
+            "int middle(int x){return leaf(x)+2;}"
+            "int runtime(int x){return leaf(x)+4;}"
+            "int main(void){return middle(5)+runtime(input());}"
+        )
+        key = "bounded_constant_call_instruction_limit"
+        old = OPTIMIZATIONS[key]
+        try:
+            OPTIMIZATIONS[key] = 1
+            limited = _compile_source(source, target=Target())
+            OPTIMIZATIONS[key] = 1024
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS[key] = old
+
+        for result in (limited, evaluated):
+            machine = Machine(result.image.binary, inputs=(10,))
+            self.assertEqual(machine.run(result.image.symbols["_halt"]), 23)
+        self.assertGreater(len(limited.image.binary), len(evaluated.image.binary))
+
     def test_constant_loop_evaluation_improves_demo_array_sum(self):
         source = (ROOT / "examples" / "demo.c").read_text()
         old = OPTIMIZATIONS["constant_loop_evaluation"]
