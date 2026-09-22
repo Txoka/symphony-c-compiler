@@ -1,0 +1,27 @@
+name: Compiler investigation
+description: Track a question that needs machine-code or design research before implementation.
+title: "[research] "
+labels: ["type: research"]
+body:
+  - type: textarea
+    attributes:
+      label: Question
+      description: State the decision this investigation must enable.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Existing evidence
+      description: Link relevant reports and include current IR, machine-code, size, and instruction observations.
+  - type: textarea
+    attributes:
+      label: Experiments
+      description: List controlled comparisons, toggles, workloads, and correctness checks.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Deliverable
+      description: Define the report, decision, or implementation-ready plan expected from this issue.
+    validations:
+      required: true

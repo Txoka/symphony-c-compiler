@@ -1,0 +1,41 @@
+name: Optimization proposal
+description: Propose a measurable compiler optimization or profitability improvement.
+title: "[optimization] "
+labels: ["type: optimization"]
+body:
+  - type: textarea
+    attributes:
+      label: Opportunity
+      description: Describe the missed optimization and the relevant IR or machine-instruction pattern.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Evidence and baseline
+      description: Include current size/instructions, GCC comparison if relevant, inputs, output, and affected programs.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed transformation
+      description: Explain legality, profitability, pass ordering, and expected target-code effect.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Toggle or slider
+      description: Name the independent setting and document its default behavior.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Validation plan
+      description: Include focused regression, both ISA suites, both self-host suites, stage identity, all examples, and before/GCC measurements.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Acceptance criteria
+      description: State the measurable improvement and permitted tradeoffs.
+    validations:
+      required: true

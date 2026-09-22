@@ -1,0 +1,31 @@
+name: Compiler bug
+description: Report incorrect code, a crash, or a toolchain failure.
+title: "[bug] "
+labels: ["type: bug"]
+body:
+  - type: textarea
+    attributes:
+      label: Summary
+      description: What failed, and what should have happened?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproducer
+      description: Include the smallest source, command, target, and inputs that reproduce it.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Actual result
+      description: Include diagnostics, return value, output, image bytes, or instruction count as relevant.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Configuration
+      description: Commit, ISA, BSS/PIC settings, optimization toggles, Python version, and GCC version if applicable.
+  - type: textarea
+    attributes:
+      label: Regression coverage
+      description: Describe the focused test that should fail before the fix and pass afterward.

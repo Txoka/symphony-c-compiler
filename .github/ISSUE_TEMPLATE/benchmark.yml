@@ -1,0 +1,37 @@
+name: Benchmark or performance regression
+description: Add a workload, improve measurement, or report a measured regression.
+title: "[benchmark] "
+labels: ["area: benchmarking"]
+body:
+  - type: dropdown
+    attributes:
+      label: Kind
+      options:
+        - New benchmark or metric
+        - Benchmark infrastructure
+        - Performance regression
+        - GCC differential
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Workload and metric
+      description: Specify inputs, warm-up, measurement window, size accounting, and why the metric represents useful work.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Current measurements
+      description: Include commit, settings, bytes, instructions, output/return value, and GCC figures where applicable.
+  - type: textarea
+    attributes:
+      label: Reproduction command
+      description: Provide a deterministic local command or script invocation.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Acceptance criteria
+      description: Define correctness checks, determinism requirements, and expected report format.
+    validations:
+      required: true
