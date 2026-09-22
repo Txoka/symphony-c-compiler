@@ -120,7 +120,12 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
                         "persistent input size must equal --persistent-size"
                     )
                 m.persistent[:] = persistent
-            halt = result.image.symbols["_halt"] + (address if args.pic else 0)
+            halt_offset = result.image.symbols.get("_halt")
+            halt = (
+                halt_offset + (address if args.pic else 0)
+                if halt_offset is not None
+                else None
+            )
             native_is_available = native_available(args.target == "symphony")
             if args.engine == "native" and not native_is_available:
                 raise CompileError(
@@ -176,8 +181,9 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
                     print(flush=True)
                 if args.persistent_save:
                     args.persistent_save.write_bytes(m.persistent)
+            outcome = "main returned" if halt is not None else "execution stopped"
             print(
-                f"main returned {signed(value)} (r1=0x{value:08x}); "
+                f"{outcome} {signed(value)} (r1=0x{value:08x}); "
                 f"{m.steps} instructions; {engine} engine"
             )
         elif args.persistent_load or args.persistent_save:

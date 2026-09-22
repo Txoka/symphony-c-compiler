@@ -2131,6 +2131,27 @@ class EncodingTests(unittest.TestCase):
             )
             self.assertIn("function _start", (path / "demo.ir").read_text())
 
+            nonreturning = path / "nonreturning.c"
+            nonreturning.write_text("int main(void) { while (1) {} }\n")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "symphony",
+                    str(nonreturning),
+                    "-o",
+                    str(path / "nonreturning.bin"),
+                    "--run",
+                    "--engine",
+                    "python",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("execution stopped", result.stdout)
+
             for command, expected in (("scc", "symphony"), ("dcc", "dynphony")):
                 target_map = path / f"{command}.json"
                 script = (
