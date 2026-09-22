@@ -140,8 +140,13 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   bytes/95 steps to 48/21. Statically decidable `break` paths may select among
   multiple exits and reconstruct live-out values from the executed path; the
   focused break/live-out regression falls from 96 bytes/68 steps to 48/21.
-  Data-dependent conditional CFG cloning and general multi-path LCSSA-style
-  exit reconstruction remain.
+  For header-controlled loops whose trip count is independent of body choices,
+  data-dependent internal CFG arms are cloned with fresh SSA values and join
+  phis. The focused three-trip conditional loop keeps both runtime paths and
+  falls from 89 to 55 steps when the speed-over-size policy is selected
+  (92 to 140 bytes); the default no-growth policy correctly retains the loop.
+  General data-dependent break exits and multi-path LCSSA-style exit
+  reconstruction remain.
 - [x] **Bounded constant loop-region evaluation (initial form).** Fully known,
   side-effect-free natural loops are interpreted independently of their
   surrounding function, including reads from closed-world immutable globals.

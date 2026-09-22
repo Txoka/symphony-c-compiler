@@ -70,6 +70,13 @@ def _unroll_one(function, iteration_limit):
             cfg, loop, phis, preheader, definitions, def_block, iteration_limit
         )
         if trace_result is None:
+            plan = _fixed_trip_plan(
+                cfg, loop, phis, preheader, definitions, def_block, iteration_limit
+            )
+            if plan is not None and _clone_loop_cfg(
+                function, cfg, loop, phis, preheader, plan, definitions
+            ):
+                return True
             continue
         traces, exit_trace, exit_source, exit_label = trace_result
 
@@ -189,6 +196,285 @@ def _unroll_one(function, iteration_limit):
         function.blocks = surviving
         return True
     return False
+
+
+def _fixed_trip_plan(cfg, loop, phis, preheader, definitions, def_block, limit):
+    """Prove a header-controlled trip count without choosing body predicates."""
+    latches = {source for source, _ in loop.back_edges}
+    incoming = {}
+    for phi in phis:
+        sources = dict(phi.extra)
+        updates = {sources.get(latch) for latch in latches}
+        if None in updates or len(updates) != 1:
+            return None
+        incoming[phi.dst] = (sources[preheader], updates.pop())
+
+    cache = {}
+
+    def static(value, visiting=None):
+        if value in cache:
+            return cache[value]
+        visiting = set() if visiting is None else visiting
+        if value in visiting or def_block.get(value) in loop.blocks:
+            return UNKNOWN
+        visiting.add(value)
+        item = definitions.get(value)
+        result = _evaluate_item(item, lambda arg: static(arg, visiting))
+        cache[value] = result
+        return result
+
+    values = {}
+    for phi in phis:
+        initial, _ = incoming[phi.dst]
+        value = static(initial)
+        values[phi.dst] = value
+
+    def evaluate(value, visiting=None):
+        if value in values:
+            return values[value]
+        visiting = set() if visiting is None else visiting
+        if value in visiting:
+            return UNKNOWN
+        visiting.add(value)
+        item = definitions.get(value)
+        return _evaluate_item(item, lambda arg: evaluate(arg, visiting))
+
+    header = cfg.by_label[loop.header]
+    condition = header.terminator()
+    if condition is None or condition.op not in ("branch_if", "cbranch_if"):
+        return None
+    explicit = cfg.label_blocks.get(condition.extra[1], condition.extra[1])
+    alternatives = [value for value in header.successors if value != explicit]
+    if len(alternatives) != 1:
+        return None
+
+    body_entry = None
+    for count in range(limit + 1):
+        for item in header.instructions:
+            if item.op in ("label", "phi") or item is condition:
+                continue
+            result = _evaluate_item(item, evaluate)
+            if item.dst is None:
+                return None
+            values[item.dst] = result
+        if condition.op == "branch_if":
+            value = evaluate(condition.args[0])
+            if value is UNKNOWN:
+                return None
+            taken = bool(value) == condition.extra[0]
+        else:
+            left, right = (evaluate(value) for value in condition.args)
+            if UNKNOWN in (left, right):
+                return None
+            result = _safe_binary(condition.extra[0], left, right, condition.type)
+            if result is None:
+                return None
+            taken = bool(result)
+        chosen = explicit if taken else alternatives[0]
+        if chosen not in loop.blocks:
+            return count, body_entry, chosen
+        if body_entry is None:
+            body_entry = chosen
+        elif body_entry != chosen:
+            return None
+        if count == limit:
+            return None
+        updates = {}
+        for phi in phis:
+            result = evaluate(incoming[phi.dst][1])
+            updates[phi.dst] = result
+        values.update(updates)
+    return None
+
+
+def _evaluate_item(item, operand):
+    if item is None:
+        return UNKNOWN
+    if item.op == "const":
+        return _normalize(item.extra, item.type)
+    if item.op in ("copy", "cast"):
+        value = operand(item.args[0])
+        return UNKNOWN if value is UNKNOWN else _normalize(value, item.type)
+    if item.op == "unary":
+        value = operand(item.args[0])
+        folded = None if value is UNKNOWN else _fold_unary(item.extra, value, item.type)
+        return UNKNOWN if folded is None else folded
+    if item.op == "binary":
+        left, right = (operand(value) for value in item.args)
+        if UNKNOWN in (left, right):
+            return UNKNOWN
+        folded = _safe_binary(item.extra, left, right, item.type)
+        return UNKNOWN if folded is None else folded
+    return UNKNOWN
+
+
+def _clone_loop_cfg(function, cfg, loop, phis, preheader, plan, definitions):
+    trip_count, body_entry, normal_exit = plan
+    if trip_count == 0:
+        return False
+    if any(
+        successor != normal_exit
+        for label in loop.blocks
+        for successor in cfg.by_label[label].successors
+        if successor not in loop.blocks
+    ):
+        return False
+    ordered = [block for block in cfg.blocks if block.label in loop.blocks]
+    label_map = {
+        (iteration, block.label): f"{block.label}.unroll{iteration}"
+        for iteration in range(trip_count)
+        for block in ordered
+    }
+    value_maps = []
+    current = {phi.dst: dict(phi.extra)[preheader] for phi in phis}
+    latch_inputs = {
+        phi.dst: next(iter({dict(phi.extra)[source] for source, _ in loop.back_edges}))
+        for phi in phis
+    }
+    for _ in range(trip_count):
+        mapping = dict(current)
+        for block in ordered:
+            for item in block.instructions:
+                if item.dst is None or (block.label == loop.header and item.op == "phi"):
+                    continue
+                mapping[item.dst] = function.values
+                function.values += 1
+        value_maps.append(mapping)
+        current = {
+            phi.dst: mapping.get(latch_inputs[phi.dst], latch_inputs[phi.dst])
+            for phi in phis
+        }
+
+    edge_source = {}
+    clones = []
+
+    for iteration in range(trip_count):
+        for block in ordered:
+            terminator = block.terminator()
+            explicit = None
+            if terminator is not None and terminator.op in ("branch_if", "cbranch_if"):
+                explicit = cfg.label_blocks.get(terminator.extra[1], terminator.extra[1])
+            for successor in block.successors:
+                source = label_map[(iteration, block.label)]
+                if explicit is not None and successor != explicit:
+                    source = f"{source}.fallthrough"
+                edge_source[(iteration, block.label, successor)] = source
+
+    def target(iteration, successor):
+        if successor == loop.header:
+            return (
+                label_map[(iteration + 1, loop.header)]
+                if iteration + 1 < trip_count else normal_exit
+            )
+        if successor in loop.blocks:
+            return label_map[(iteration, successor)]
+        return successor
+
+    for iteration in range(trip_count):
+        mapping = value_maps[iteration]
+        for block in ordered:
+            clone_label = label_map[(iteration, block.label)]
+            items = [Instruction("label", extra=clone_label)]
+            for item in block.instructions:
+                if item.op == "label" or item is block.terminator():
+                    continue
+                if block.label == loop.header and item.op == "phi":
+                    continue
+                if item.op == "phi":
+                    extra = tuple(
+                        (
+                            edge_source.get((iteration, source, block.label),
+                                            label_map[(iteration, source)]),
+                            mapping.get(value, value),
+                        )
+                        for source, value in item.extra
+                    )
+                    items.append(Instruction("phi", mapping[item.dst], (), item.type, extra))
+                    continue
+                items.append(Instruction(
+                    item.op, mapping.get(item.dst, item.dst),
+                    tuple(mapping.get(value, value) for value in item.args),
+                    item.type, item.extra,
+                ))
+            terminator = block.terminator()
+            if block.label == loop.header:
+                successor = body_entry
+                items.append(Instruction("jump", extra=target(iteration, successor)))
+                edge_source[(iteration, block.label, successor)] = clone_label
+            elif terminator is not None and terminator.op == "jump":
+                successor = cfg.label_blocks.get(terminator.extra, terminator.extra)
+                items.append(Instruction("jump", extra=target(iteration, successor)))
+                edge_source[(iteration, block.label, successor)] = clone_label
+            elif terminator is not None and terminator.op in ("branch_if", "cbranch_if"):
+                explicit = cfg.label_blocks.get(terminator.extra[1], terminator.extra[1])
+                fallthrough = next(value for value in block.successors if value != explicit)
+                extra = (terminator.extra[0], target(iteration, explicit))
+                items.append(Instruction(
+                    terminator.op, None,
+                    tuple(mapping.get(value, value) for value in terminator.args),
+                    terminator.type, extra,
+                ))
+                trampoline = f"{clone_label}.fallthrough"
+                edge_source[(iteration, block.label, explicit)] = clone_label
+                edge_source[(iteration, block.label, fallthrough)] = trampoline
+                clones.append(BasicBlock(clone_label, items))
+                clones.append(BasicBlock(
+                    trampoline, [
+                        Instruction("label", extra=trampoline),
+                        Instruction("jump", extra=target(iteration, fallthrough)),
+                    ]
+                ))
+                continue
+            else:
+                if len(block.successors) != 1:
+                    return False
+                successor = block.successors[0]
+                items.append(Instruction("jump", extra=target(iteration, successor)))
+                edge_source[(iteration, block.label, successor)] = clone_label
+            clones.append(BasicBlock(clone_label, items))
+
+    preheader_block = cfg.by_label[preheader]
+    terminator = preheader_block.terminator()
+    if terminator is not None:
+        if terminator.op != "jump":
+            return False
+        terminator.extra = label_map[(0, loop.header)]
+    elif cfg.index_of(loop.header) != cfg.index_of(preheader) + 1:
+        return False
+
+    surviving = []
+    insertion = cfg.index_of(loop.header)
+    for index, block in enumerate(function.blocks):
+        if index == insertion:
+            surviving.extend(clones)
+        if block.label in loop.blocks:
+            continue
+        items = []
+        for item in block.instructions:
+            if item.op != "phi":
+                items.append(Instruction(
+                    item.op, item.dst,
+                    tuple(current.get(value, value) for value in item.args),
+                    item.type, item.extra,
+                ))
+                continue
+            extra = [(source, value) for source, value in item.extra if source not in loop.blocks]
+            for source, value in item.extra:
+                if source not in loop.blocks:
+                    continue
+                for iteration in range(trip_count):
+                    actual = edge_source.get((iteration, source, block.label))
+                    if actual is not None:
+                        extra.append((actual, value_maps[iteration].get(value, value)))
+                if source == loop.header and block.label == normal_exit:
+                    for latch, _ in loop.back_edges:
+                        actual = edge_source.get((trip_count - 1, latch, loop.header))
+                        if actual is not None:
+                            extra.append((actual, current.get(value, value)))
+            items.append(Instruction("phi", item.dst, (), item.type, tuple(extra)))
+        surviving.append(BasicBlock(block.label, items))
+    function.blocks = surviving
+    return True
 
 
 def _iteration_traces(cfg, loop, phis, preheader, definitions, def_block, limit):

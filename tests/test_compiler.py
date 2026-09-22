@@ -1415,6 +1415,37 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(execute(unrolled)[2], execute(looped)[2])
         self.assertLess(len(unrolled.image.binary), len(looped.image.binary))
 
+    def test_known_trip_unrolling_clones_data_dependent_cfg(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int x=0;for(int i=0;i<3;i++){"
+            "if(input())x+=i+1;else x+=2;output(x);}return x;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            guarded = _compile_source(source, target=Target())
+            OPTIMIZATIONS["unroll_no_code_growth"] = False
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result, inputs):
+            machine = Machine(result.image.binary, inputs=inputs)
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        for inputs in ((1, 0, 1), (0, 1, 0)):
+            self.assertEqual(execute(unrolled, inputs)[:2], execute(looped, inputs)[:2])
+        self.assertEqual(execute(unrolled, (1, 0, 1))[:2], (6, [1, 3, 6]))
+        self.assertEqual(len(guarded.image.binary), len(looped.image.binary))
+        self.assertLess(execute(unrolled, (1, 0, 1))[2], execute(looped, (1, 0, 1))[2])
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)
