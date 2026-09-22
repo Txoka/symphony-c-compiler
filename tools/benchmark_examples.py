@@ -27,6 +27,7 @@ from toolchain import Toolchain, ToolchainNotBuilt
 # Inputs are deliberately modest, deterministic terminating workloads.  They
 # are part of the result's provenance, not an attempt to represent every use.
 CASES = {
+    "anonymous_aggregate_members.c": (),
     "arena_allocator.c": (),
     "bigprime.c": (),
     "branch_merge.c": (1,),
