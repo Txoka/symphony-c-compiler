@@ -320,6 +320,10 @@ SYMPHONY_GCC_PREFIX=/path/to/gcc-cache/build-stage1 \
 The generated [example benchmark table](docs/example-benchmarks.md) compares
 the current checkout only with GCC `-Os` and `-O2`; it uses final target binary
 size and native-emulator instruction steps with documented deterministic inputs.
+Both size columns exclude zero-fill storage: dyncc defaults to
+`--bss=assume-zeroed` in this harness, and the GCC measurement counts only its
+loadable text and data rather than the linker's emulator-only trailing BSS
+reservation. This also keeps BSS startup clearing out of the step counts.
 
 ## Project structure
 
