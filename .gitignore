@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 .venv/
 .cache/
+.claude/
 build/
 dist/
 *.bin
