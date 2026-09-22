@@ -1062,21 +1062,33 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
         self.assertLess(execute(optimized, 123456789)[1], execute(unoptimized, 123456789)[1])
 
-    def test_loop_pressure_guard_keeps_loop_helper_out_of_outer_loop(self):
+    def test_loop_pressure_guard_uses_live_at_call_and_configurable_budget(self):
         source = (ROOT / "examples" / "loop_helper_inlining.c").read_text()
         old = OPTIMIZATIONS["loop_pressure_aware_inlining"]
+        old_budget = OPTIMIZATIONS["inlining_register_budget"]
         try:
-            OPTIMIZATIONS["loop_pressure_aware_inlining"] = False
-            inlined = _compile_source(source, target=Target())
             OPTIMIZATIONS["loop_pressure_aware_inlining"] = True
+            OPTIMIZATIONS["inlining_register_budget"] = old_budget
+            live_costed = _compile_source(source, target=Target())
+            OPTIMIZATIONS["inlining_register_budget"] = 1
             guarded = _compile_source(source, target=Target())
         finally:
             OPTIMIZATIONS["loop_pressure_aware_inlining"] = old
-        self.assertNotIn("helper", inlined.image.symbols)
+            OPTIMIZATIONS["inlining_register_budget"] = old_budget
+        self.assertNotIn("helper", live_costed.image.symbols)
         self.assertIn("helper", guarded.image.symbols)
-        for result in (inlined, guarded):
+        for result in (live_costed, guarded):
             machine = Machine(result.image.binary)
             self.assertEqual(machine.run(result.image.symbols["_halt"]), 316)
+
+    def test_loop_fixed_point_has_a_configurable_hard_limit(self):
+        old = OPTIMIZATIONS["loop_fixed_point_iteration_limit"]
+        try:
+            OPTIMIZATIONS["loop_fixed_point_iteration_limit"] = 0
+            with self.assertRaisesRegex(RuntimeError, "did not converge"):
+                _compile_source("int main(void) { return 0; }", target=Target())
+        finally:
+            OPTIMIZATIONS["loop_fixed_point_iteration_limit"] = old
 
     def test_alias_aware_divmod_improves_primes(self):
         source = (ROOT / "examples" / "primes.c").read_text()
@@ -1504,13 +1516,18 @@ class EncodingTests(unittest.TestCase):
             "for(int i=0;i<n;i++){total+=values[i];output(total);}return total;}"
         )
         old = OPTIMIZATIONS["pointer_limit_loops"]
+        old_budget = OPTIMIZATIONS["loop_register_budget"]
         try:
+            # Isolate pointer-limit lowering from the independently tested
+            # scaled-induction pressure policy that supplies its cursor.
+            OPTIMIZATIONS["loop_register_budget"] = 64
             OPTIMIZATIONS["pointer_limit_loops"] = False
             indexed = _compile_source(source, target=Target())
             OPTIMIZATIONS["pointer_limit_loops"] = True
             pointer_limited = _compile_source(source, target=Target())
         finally:
             OPTIMIZATIONS["pointer_limit_loops"] = old
+            OPTIMIZATIONS["loop_register_budget"] = old_budget
 
         def execute(result):
             machine = Machine(result.image.binary, inputs=(4,))

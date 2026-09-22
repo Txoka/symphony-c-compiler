@@ -48,6 +48,7 @@ def pair_unsigned_divmod(function):
         instructions = block.instructions
         removed = set()
         inserted = {}
+        block_changed = False
         for index, modulo in enumerate(instructions):
             if (
                 modulo.op != "binary"
@@ -96,8 +97,9 @@ def pair_unsigned_divmod(function):
                     ]
                     removed.add(id(later))
                     changed = True
+                    block_changed = True
                     break
-        if changed:
+        if block_changed:
             rewritten = []
             for instruction in instructions:
                 if id(instruction) in removed:

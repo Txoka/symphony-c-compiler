@@ -27,6 +27,7 @@ from ..ir import BasicBlock, Instruction
 from ..analysis.cfg import prune_unreachable_blocks
 from ..analysis.cfg import build_cfg
 from ..analysis.dominance import build_dominator_tree, find_natural_loops
+from ..analysis.profitability import live_values_before, peak_live_values
 from ..model import pointer
 from .optimizations import enabled
 
@@ -152,22 +153,17 @@ def _loop_pressure_risk(caller, call_block, callee):
     caller_loops = find_natural_loops(build_dominator_tree(build_cfg(caller)))
     if not any(call_block in loop.blocks for loop in caller_loops):
         return False
-    # Count the loop's actual SSA working set, rather than treating every
-    # loop helper as expensive.  Seven is the volatile register budget.
-    loop_values = {
-        item.dst
-        for loop in callee_loops
-        for block in loop.blocks
-        for item in build_cfg(callee).by_label[block].instructions
-        if item.dst is not None
-    }
-    caller_values = {
-        item.dst
-        for block in caller.blocks
-        for item in block.instructions
-        if item.dst is not None
-    }
-    return len(loop_values) + len(caller_values) > 7
+    call = next(
+        item
+        for item in build_cfg(caller).by_label[call_block].instructions
+        if item.op in ("direct_call", "direct_tailcall")
+        and item.extra == callee.name
+    )
+    caller_live = live_values_before(caller, call_block, call)
+    return (
+        len(caller_live) + peak_live_values(callee)
+        > enabled("inlining_register_budget")
+    )
 
 
 def _clone_callee(callee, caller, call_instruction, inline_id):

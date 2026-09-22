@@ -26,38 +26,72 @@ from toolchain import Toolchain, ToolchainNotBuilt
 CASES = {
     "arena_allocator.c": (),
     "bigprime.c": (),
+    "branch_merge.c": (1,),
     "c_aggregate_compat.c": (),
+    "common_subexpression.c": (123456789,),
+    "comparison_zero_test.c": (7, 3),
     "constant_folding.c": (),
     "demo.c": (),
+    "divmod_pair.c": (123456789,),
     "dynamic_sensor_report.c": (8, 4, -2, 4, 9, 0, -2, 7, 1),
+    "hypercube.c": (),
     "insertion_sort.c": (15, 3, 9, 0, 14, 2, 8, 1, 13, 4, 12, 5, 11, 6, 10, 7),
     "interprocedural_constant_folding.c": (),
+    "loop_helper_inlining.c": (),
     "pi.c": (),
     "primes.c": (),
+    "render.c": (),
     "towers_of_hanoi.c": (2, 0, 2, 1),
 }
 
+# Interactive renderers deliberately have no terminating path. Benchmark a
+# deterministic prefix rather than misreporting their expected nontermination
+# as a failure. Other examples must still reach their halt normally.
+CONTINUOUS_CASES = {"hypercube.c", "render.c"}
+CONTINUOUS_STEPS = 10_000_000
 
-def run_current(source, inputs, max_steps):
+
+def validate_cases():
+    """Require every maintained example to have explicit benchmark inputs."""
+    examples = {path.name for path in (ROOT / "examples").glob("*.c")}
+    configured = set(CASES)
+    if examples != configured:
+        missing = ", ".join(sorted(examples - configured)) or "none"
+        stale = ", ".join(sorted(configured - examples)) or "none"
+        raise RuntimeError(
+            f"benchmark cases are incomplete (missing: {missing}; stale: {stale})"
+        )
+
+
+def _run(machine, halt, max_steps, continuous):
+    try:
+        if native_available(True):
+            native_run(machine, halt, max_steps)
+        else:
+            machine.run(halt, max_steps=max_steps)
+    except RuntimeError as exc:
+        if not continuous or "execution limit exceeded" not in str(exc):
+            raise
+
+
+def run_current(source, inputs, max_steps, continuous=False):
     # Compare program execution, not dyncc's optional standalone BSS clearing
     # loop.  GCC's raw-image linker likewise leaves .bss zero-filled by the
     # loader/emulator, so assume-zeroed is the equivalent dyncc configuration.
     result = compile_source(
         source,
         target=Target(
-            isa="symphony", ram_size=1 << 20, bss_mode="assume-zeroed"
+            isa="symphony", ram_size=1 << 24, bss_mode="assume-zeroed"
         ),
     )
-    machine = Machine(result.image.binary, ram_size=1 << 20, inputs=inputs, symphony=True)
-    halt = result.image.symbols["_halt"]
-    if native_available(True):
-        native_run(machine, halt, max_steps)
-    else:
-        machine.run(halt, max_steps=max_steps)
+    machine = Machine(result.image.binary, ram_size=1 << 24, inputs=inputs, symphony=True)
+    halt = result.image.symbols.get("_halt", 0xffffffff)
+    limit = min(max_steps, CONTINUOUS_STEPS) if continuous else max_steps
+    _run(machine, halt, limit, continuous)
     return len(result.image.binary), machine.steps
 
 
-def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp):
+def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp, continuous=False):
     objects = [toolchain.compile_and_assemble(source, tmp, name=name, optimize=optimize)]
     objects += toolchain.full_runtime_objects(tmp, optimize=optimize)
     load_size = sum(len(obj.text) + len(obj.data) for obj in objects)
@@ -70,10 +104,8 @@ def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp):
     # the normal 16 MiB target RAM layout rather than dyncc's 1 MiB default.
     machine.regs[14] = 0x800000
     machine.regs[13] = 0xfffff0
-    if native_available(True):
-        native_run(machine, 0xfffff0, max_steps)
-    else:
-        machine.run(halt_address=0xfffff0, max_steps=max_steps)
+    limit = min(max_steps, CONTINUOUS_STEPS) if continuous else max_steps
+    _run(machine, 0xfffff0, limit, continuous)
     # The GCC linker materializes virtual .bss as trailing zero bytes so the
     # emulator reserves its addresses.  Those bytes are not part of a load
     # image and dyncc's assume-zeroed mode does not serialize them either.
@@ -85,6 +117,7 @@ def cell(value):
 
 
 def main():
+    validate_cases()
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "docs" / "example-benchmarks.md")
     parser.add_argument("--max-steps", type=int, default=2_000_000_000)
@@ -108,11 +141,12 @@ def main():
             if not path.is_file():
                 raise RuntimeError(f"benchmark source is missing: {path}")
             source = path.read_text()
+            continuous = name in CONTINUOUS_CASES
             values = []
             for label, runner in (
-                ("SSA", lambda: run_current(source, inputs, args.max_steps)),
-                ("GCC -Os", lambda: run_gcc(toolchain, source, path.stem + "_os", inputs, "-Os", args.max_steps, tmp)),
-                ("GCC -O2", lambda: run_gcc(toolchain, source, path.stem + "_o2", inputs, "-O2", args.max_steps, tmp)),
+                ("SSA", lambda: run_current(source, inputs, args.max_steps, continuous)),
+                ("GCC -Os", lambda: run_gcc(toolchain, source, path.stem + "_os", inputs, "-Os", args.max_steps, tmp, continuous)),
+                ("GCC -O2", lambda: run_gcc(toolchain, source, path.stem + "_o2", inputs, "-O2", args.max_steps, tmp, continuous)),
             ):
                 try:
                     values.append(runner())
@@ -124,7 +158,7 @@ def main():
     lines = [
         "# Example compiler benchmarks",
         "",
-        "Generated by `tools/benchmark_examples.py`. Sizes are serialized Symphony load-image bytes; steps are emulator instructions from entry to the termination loop. Static zero storage is treated as loader-zeroed BSS (`--bss=assume-zeroed` for dyncc), so startup clearing is excluded from both size and runtime. GCC uses the real same-ISA Symphony GCC toolchain at `SYMPHONY_GCC_PREFIX`.",
+        "Generated by `tools/benchmark_examples.py`. Sizes are serialized Symphony load-image bytes; steps are emulator instructions from entry to the termination loop. The intentionally continuous `hypercube.c` and `render.c` demos instead report a fixed 10,000,000-instruction sample. Static zero storage is treated as loader-zeroed BSS (`--bss=assume-zeroed` for dyncc), so startup clearing is excluded from both size and runtime. GCC uses the real same-ISA Symphony GCC toolchain at `SYMPHONY_GCC_PREFIX`.",
         "",
         "| Example | Inputs | SSA bytes | SSA steps | GCC -Os bytes | GCC -Os steps | GCC -O2 bytes | GCC -O2 steps |",
         "|---|---|---:|---:|---:|---:|---:|---:|",

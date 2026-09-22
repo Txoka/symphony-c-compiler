@@ -12,6 +12,7 @@ from .cfg import (
 from .profitability import (
     LoopTransformationCost,
     exact_trip_count,
+    live_values_before,
     peak_live_values,
     profitable,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "split_edge",
     "LoopTransformationCost",
     "exact_trip_count",
+    "live_values_before",
     "peak_live_values",
     "profitable",
 ]

@@ -133,7 +133,8 @@ def _optimize_loops_to_fixed_point(function):
     if not optimization_enabled("loop_optimization_fixed_point"):
         return False
     changed_any = False
-    while True:
+    iteration_limit = optimization_enabled("loop_fixed_point_iteration_limit")
+    for _iteration in range(iteration_limit):
         changed = False
         # Scalar cleanup first exposes canonical loop bounds and recurrences.
         changed |= sparse_conditional_constant_propagation(function)
@@ -153,6 +154,10 @@ def _optimize_loops_to_fixed_point(function):
         changed_any |= changed
         if not changed:
             return changed_any
+    raise RuntimeError(
+        "loop optimization fixed point did not converge within "
+        f"{iteration_limit} iterations"
+    )
 
 
 @dataclass

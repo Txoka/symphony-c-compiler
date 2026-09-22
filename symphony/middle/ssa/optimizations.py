@@ -72,6 +72,11 @@ OPTIMIZATIONS = {
     # changes the function. Individual pass toggles above still apply inside it.
     "loop_optimization_fixed_point": True,
 
+    # Numeric safety bound for the loop optimization fixed point. Exhausting
+    # it is a compiler error rather than silently emitting partially optimized
+    # code. Must be a positive integer.
+    "loop_fixed_point_iteration_limit": 64,
+
     # Perform the same conservative exact-address memory forwarding outside loops.
     "straight_line_memory_forwarding": True,
 
@@ -153,10 +158,14 @@ OPTIMIZATIONS = {
     # eligible trivial runtime forwarding wrappers.
     "single_call_inlining": True,
 
-    # Add a conservative seven-value pressure guard to single-call inlining when
-    # a loop-containing callee is called from a loop. False disables only this
-    # guard, not inlining. Experimental until true live-at-call pressure is used.
+    # Guard single-call inlining of a loop callee inside a caller loop using
+    # caller-live-at-call plus callee peak-live pressure. False disables only
+    # this guard, not inlining.
     "loop_pressure_aware_inlining": False,
+
+    # Numeric slider: maximum combined caller-live-at-call and callee peak-live
+    # values accepted by loop_pressure_aware_inlining. Must be positive.
+    "inlining_register_budget": 7,
 }
 
 

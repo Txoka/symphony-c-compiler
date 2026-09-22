@@ -61,6 +61,7 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
         definitions = {}
         def_block = {}
         constants = {}
+        pressure_peak = None
         for block in cfg.blocks:
             for instruction in block.instructions:
                 if instruction.dst is not None:
@@ -211,6 +212,8 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
                             if constant_bounded and not enabled("loop_profitability"):
                                 continue
                             if enabled("loop_profitability"):
+                                if pressure_peak is None:
+                                    pressure_peak = peak_live_values(function)
                                 trip_count = None
                                 if constant_bounded:
                                     steps = {
@@ -264,7 +267,7 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
                                     pressure=1,
                                     pressure_each=max(
                                         0,
-                                        peak_live_values(function) + 1
+                                        pressure_peak + 1
                                         - enabled("loop_register_budget"),
                                     ),
                                 )
@@ -390,6 +393,16 @@ def convert_pointer_limit_loops(function):
         for item in block.instructions
         if item.dst is not None
     }
+    uses = {}
+    for block in cfg.blocks:
+        for item in block.instructions:
+            operands = (
+                (value for _, value in item.extra if value is not None)
+                if item.op == "phi"
+                else item.args
+            )
+            for value in operands:
+                uses.setdefault(value, []).append(item)
 
     for loop in sorted(find_natural_loops(dominators), key=lambda item: len(item.blocks)):
         header = cfg.by_label[loop.header]
@@ -400,6 +413,10 @@ def convert_pointer_limit_loops(function):
         predicate = condition
         if condition.op == "branch_if":
             predicate = definitions.get(condition.args[0])
+            if predicate is not None and uses.get(predicate.dst) != [condition]:
+                # Rewriting a shared Boolean definition would silently change
+                # the type and meaning observed by its other consumers.
+                continue
         predicate_operator = (
             predicate.extra[0] if predicate is not None and predicate.op == "cbranch_if"
             else predicate.extra if predicate is not None else None
@@ -413,6 +430,8 @@ def convert_pointer_limit_loops(function):
         preheader = outside[0]
         phis = [item for item in header.instructions if item.op == "phi"]
         for index_phi in phis:
+            if not index_phi.type.integer:
+                continue
             if index_phi.dst not in predicate.args:
                 continue
             bound = predicate.args[1] if predicate.args[0] == index_phi.dst else predicate.args[0]
@@ -421,6 +440,21 @@ def convert_pointer_limit_loops(function):
             index_operands = dict(index_phi.extra)
             entry_index = index_operands.get(preheader)
             if entry_index is None:
+                continue
+            entry_definition = definitions.get(entry_index)
+            if (
+                entry_definition is not None
+                and entry_definition.op == "binary"
+                and entry_definition.extra == "+"
+                and any(
+                    definitions.get(value) is not None
+                    and definitions[value].type.kind == "pointer"
+                    for value in entry_definition.args
+                )
+            ):
+                # This is already an address recurrence. Treating it as the
+                # scalar index on a later fixed-point iteration can convert a
+                # second cursor against the first cursor's pointer limit.
                 continue
             for pointer_phi in phis:
                 if pointer_phi is index_phi:

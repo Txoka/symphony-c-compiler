@@ -85,8 +85,8 @@ def exact_trip_count(
     return None
 
 
-def peak_live_values(function):
-    """Estimate peak simultaneously live non-rematerialized SSA values."""
+def _liveness(function):
+    """Compute phi-edge-aware liveness, excluding rematerialized addresses."""
     cfg = build_cfg(function)
     rematerialized = {
         item.dst
@@ -96,9 +96,20 @@ def peak_live_values(function):
     }
     uses = {block.label: set() for block in cfg.blocks}
     definitions = {block.label: set() for block in cfg.blocks}
+    phi_definitions = {block.label: set() for block in cfg.blocks}
+    edge_uses = {}
     for block in cfg.blocks:
         seen = set()
         for item in block.instructions:
+            if item.op == "phi":
+                if item.dst is not None and item.dst not in rematerialized:
+                    seen.add(item.dst)
+                    definitions[block.label].add(item.dst)
+                    phi_definitions[block.label].add(item.dst)
+                for predecessor, value in item.extra:
+                    if isinstance(value, int) and value not in rematerialized:
+                        edge_uses.setdefault((predecessor, block.label), set()).add(value)
+                continue
             uses[block.label].update(
                 value for value in item.args
                 if isinstance(value, int)
@@ -114,26 +125,55 @@ def peak_live_values(function):
     while changed:
         changed = False
         for block in reversed(cfg.blocks):
-            outgoing = set().union(*(live_in[label] for label in block.successors))
+            outgoing = set().union(*(
+                (live_in[label] - phi_definitions[label])
+                | edge_uses.get((block.label, label), set())
+                for label in block.successors
+            ))
             incoming = uses[block.label] | (outgoing - definitions[block.label])
             if outgoing != live_out[block.label] or incoming != live_in[block.label]:
                 live_out[block.label], live_in[block.label] = outgoing, incoming
                 changed = True
+    return cfg, rematerialized, live_out
+
+
+def _live_before(item, live_after, rematerialized):
+    live = set(live_after)
+    if item.dst is not None:
+        live.discard(item.dst)
+    if item.op != "phi":
+        live.update(
+            value for value in item.args
+            if isinstance(value, int) and value not in rematerialized
+        )
+    return live
+
+
+def peak_live_values(function):
+    """Estimate peak simultaneously live non-rematerialized SSA values."""
+    cfg, rematerialized, live_out = _liveness(function)
     peak = 0
     for block in cfg.blocks:
         live = set(live_out[block.label])
         peak = max(peak, len(live))
         for item in reversed(block.instructions):
-            if item.dst is not None:
-                live.discard(item.dst)
-            live.update(
-                value for value in item.args
-                if isinstance(value, int) and value not in rematerialized
-            )
+            live = _live_before(item, live, rematerialized)
             peak = max(peak, len(live))
     return peak
 
 
+def live_values_before(function, block_label, target):
+    """Return non-rematerialized SSA values live immediately before ``target``."""
+    cfg, rematerialized, live_out = _liveness(function)
+    live = set(live_out[block_label])
+    for item in reversed(cfg.by_label[block_label].instructions):
+        live = _live_before(item, live, rematerialized)
+        if item is target:
+            return live
+    raise ValueError("target instruction is not in the requested block")
+
+
 __all__ = [
-    "LoopTransformationCost", "exact_trip_count", "peak_live_values", "profitable"
+    "LoopTransformationCost", "exact_trip_count", "live_values_before",
+    "peak_live_values", "profitable"
 ]

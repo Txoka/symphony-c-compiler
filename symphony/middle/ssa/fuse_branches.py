@@ -16,7 +16,12 @@ def fuse_comparison_zero_tests(function):
                 definitions[instruction.dst] = instruction
             if instruction.op == "const" and instruction.dst is not None:
                 constants[instruction.dst] = instruction.extra
-            for value in instruction.args:
+            operands = (
+                (value for _, value in instruction.extra if value is not None)
+                if instruction.op == "phi"
+                else instruction.args
+            )
+            for value in operands:
                 uses.setdefault(value, []).append(instruction)
 
     removed = set()

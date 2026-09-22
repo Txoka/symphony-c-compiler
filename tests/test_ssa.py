@@ -6,6 +6,7 @@ body into a caller and rebuild SSA once).
 """
 
 import unittest
+from unittest.mock import patch
 
 from symphony.frontends.c import CFrontend
 from symphony.middle.lowering import lower_intrinsics
@@ -15,6 +16,7 @@ from symphony.middle.model import INT, UINT
 from symphony.middle.analysis.profitability import (
     LoopTransformationCost,
     exact_trip_count,
+    peak_live_values,
     profitable,
 )
 from symphony.middle.ssa import (
@@ -25,6 +27,8 @@ from symphony.middle.ssa import (
     inline_single_call_functions,
     simplify_control_flow,
     reduce_induction_strength,
+    reduce_scaled_induction_strength,
+    convert_pointer_limit_loops,
     sparse_conditional_constant_propagation,
     hoist_loop_invariants,
     eliminate_redundant_loop_memory,
@@ -37,7 +41,9 @@ from symphony.middle.ssa import (
     promote_readonly_parameters,
     eliminate_tail_calls,
     lower_self_tail_calls_to_loops,
+    pair_unsigned_divmod,
 )
+from symphony.middle.ssa.optimizations import OPTIMIZATIONS
 from symphony.middle.ssa.destruct import _sequentialize
 from symphony.middle.ssa.allocate import copy_coalescing_groups, interference_graph
 from symphony.middle.ssa.verify import SSAVerificationError
@@ -75,6 +81,25 @@ class RoundTripTests(unittest.TestCase):
         self.assertGreater(nested.estimated_saving(8, 4),
                            shallow.estimated_saving(8, 4))
         self.assertFalse(profitable(pressured, depth_weight=4))
+
+    def test_peak_liveness_counts_phi_edge_operands(self):
+        function = FunctionIR(
+            "phi_pressure", [], [], [
+                BasicBlock("entry", [
+                    Instruction("param", 0, (), INT, "left"),
+                    Instruction("param", 1, (), INT, "right"),
+                    Instruction("param", 2, (), INT, "condition"),
+                    Instruction("branch_if", None, (2,), INT, (True, "join")),
+                ]),
+                BasicBlock("other", [Instruction("jump", extra="join")]),
+                BasicBlock("join", [
+                    Instruction("phi", 3, (), INT, (("entry", 0), ("other", 1))),
+                    Instruction("return", None, (3,), INT),
+                ]),
+            ], 4,
+        )
+        verify(function)
+        self.assertGreaterEqual(peak_live_values(function), 2)
 
     def test_hoisting_preserves_existing_block_objects(self):
         ir = _build(
@@ -685,6 +710,117 @@ class OptimizationTests(unittest.TestCase):
         entry = function.blocks[0].instructions
         self.assertEqual(entry[-1], Instruction("cbranch_if", args=(0, 1), type=INT, extra=(">", "yes")))
         self.assertFalse(any(item.dst in (2, 4) for item in entry))
+
+    def test_comparison_zero_test_keeps_comparison_used_by_phi(self):
+        function = FunctionIR(
+            "shared_zero_test", [], [], [
+                BasicBlock("entry", [
+                    Instruction("param", 0, (), INT, "left"),
+                    Instruction("param", 1, (), INT, "right"),
+                    Instruction("binary", 2, (0, 1), INT, ">"),
+                    Instruction("const", 3, (), INT, 0),
+                    Instruction("binary", 4, (2, 3), INT, "!="),
+                    Instruction("branch_if", None, (4,), INT, (True, "yes")),
+                ]),
+                BasicBlock("no", [Instruction("return", None, (0,), INT)]),
+                BasicBlock("yes", [
+                    Instruction("phi", 5, (), INT, (("entry", 2),)),
+                    Instruction("return", None, (5,), INT),
+                ]),
+            ], 6,
+        )
+        verify(function)
+        self.assertFalse(fuse_comparison_zero_tests(function))
+        verify(function)
+        self.assertTrue(any(
+            item.dst == 2
+            for block in function.blocks for item in block.instructions
+        ))
+
+    def test_pointer_limit_does_not_retype_a_shared_comparison(self):
+        ir = _build("""
+            #include <symphony.h>
+            int values[4] = {2, 4, 6, 8};
+            int main(void) {
+                int n = input(), total = 0;
+                for (int i = 0; i < n; i++) {
+                    total += values[i];
+                    output(total);
+                }
+                return total;
+            }
+        """)
+        function = next(item for item in ir.functions if item.name == "main")
+        sparse_conditional_constant_propagation(function)
+        propagate_global_copies(function)
+        simplify_algebra(function)
+        hoist_loop_invariants(function)
+        reduce_induction_strength(function)
+        self.assertTrue(reduce_scaled_induction_strength(function))
+        header = next(
+            block for block in function.blocks
+            if block.terminator() is not None and block.terminator().op == "branch_if"
+        )
+        comparison = next(
+            item for item in header.instructions
+            if item.dst == header.terminator().args[0]
+        )
+        copy = Instruction("copy", function.values, (comparison.dst,), INT)
+        function.values += 1
+        header.instructions.insert(-1, copy)
+        verify(function)
+        self.assertFalse(convert_pointer_limit_loops(function))
+        self.assertEqual(comparison.type, INT)
+        verify(function)
+
+    def test_scaled_induction_computes_pressure_once_per_ir_revision(self):
+        ir = _build("""
+            #include <symphony.h>
+            int left[100], right[100];
+            int sum(void) {
+                int total = 0;
+                for (int i = 0; i < 100; i++) {
+                    total += left[i] + right[i];
+                    output(total);
+                }
+                return total;
+            }
+            int main(void) { return sum(); }
+        """)
+        function = next(item for item in ir.functions if item.name == "sum")
+        sparse_conditional_constant_propagation(function)
+        propagate_global_copies(function)
+        simplify_algebra(function)
+        hoist_loop_invariants(function)
+        old = OPTIMIZATIONS["loop_register_budget"]
+        try:
+            OPTIMIZATIONS["loop_register_budget"] = 0
+            with patch(
+                "symphony.middle.ssa.induction.peak_live_values",
+                wraps=peak_live_values,
+            ) as pressure:
+                self.assertFalse(reduce_scaled_induction_strength(function))
+                self.assertEqual(pressure.call_count, 1)
+        finally:
+            OPTIMIZATIONS["loop_register_budget"] = old
+
+    def test_divmod_rewrite_does_not_rebuild_unchanged_later_blocks(self):
+        later = [Instruction("return", None, (0,), UINT)]
+        function = FunctionIR(
+            "divmod_blocks", [], [], [
+                BasicBlock("entry", [
+                    Instruction("param", 0, (), UINT, "value"),
+                    Instruction("param", 1, (), UINT, "divisor"),
+                    Instruction("binary", 2, (0, 1), UINT, "%"),
+                    Instruction("binary", 3, (0, 1), UINT, "/"),
+                    Instruction("binary", 4, (2, 3), UINT, "+"),
+                    Instruction("return", None, (4,), UINT),
+                ]),
+                BasicBlock("later", later),
+            ], 5,
+        )
+        self.assertTrue(pair_unsigned_divmod(function))
+        self.assertIs(function.blocks[1].instructions, later)
 
     def test_algebra_simplifies_unknown_ssa_values_without_losing_validity(self):
         function = FunctionIR(
