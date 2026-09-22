@@ -114,6 +114,15 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   first real regression target. Preserve zero-trip behavior, `break` and
   `continue`, side-effect order, signed-overflow rules, and code-size wins from
   later branch/call relaxation.
+- [x] **Bounded constant loop-region evaluation (initial form).** Fully known,
+  side-effect-free natural loops are interpreted independently of their
+  surrounding function, including reads from closed-world immutable globals.
+  The pass is limited to eight iterations and 1,024 SSA instructions and
+  rejects stores, calls, intrinsics, unknown memory, multiple exits, and
+  values escaping the loop outside header phis. This folds `demo.c`'s inline
+  four-element array sum, reducing the current image from 1,632 bytes/3,812
+  steps to 1,479/3,741. General known-trip unrolling with retained effects and
+  a target cost guard remains the next loop transformation.
 - [x] **Recursive associative reduction to accumulator loop.** A one-parameter
   reduction using integer `+`, `*`, `|`, `^`, or `&`, the matching identity,
   one recursive call, and a pure parameter-derived element expression now

@@ -23,6 +23,7 @@ from .middle.ssa import (
     pair_unsigned_divmod,
     eliminate_common_expressions,
     evaluate_constant_calls,
+    evaluate_constant_loops,
     reduce_strength,
     identify_direct_calls,
     promote_readonly_parameters,
@@ -93,6 +94,9 @@ lower_self_reductions_to_loops = _optional_optimization(
 )
 evaluate_constant_calls = _optional_optimization(
     "bounded_constant_call_evaluation", evaluate_constant_calls
+)
+evaluate_constant_loops = _optional_optimization(
+    "constant_loop_evaluation", evaluate_constant_loops
 )
 lower_self_tail_calls_to_loops = _optional_optimization(
     "self_tail_loop_lowering", lower_self_tail_calls_to_loops
@@ -188,6 +192,19 @@ class Compiler:
         for function in ir.functions:
             promote_readonly_parameters(function)
             verify(function)
+        # Make immutable pointer initializers visible before region evaluation,
+        # allowing constant loops over closed-world global arrays to collapse.
+        fold_immutable_global_loads(ir)
+        if evaluate_constant_loops(ir):
+            for function in ir.functions:
+                sparse_conditional_constant_propagation(function)
+                verify(function)
+                propagate_global_copies(function)
+                verify(function)
+                remove_dead_values(function)
+                verify(function)
+                simplify_control_flow(function)
+                verify(function)
         # Evaluate small pure calls while arithmetic is still represented as
         # scalar SSA; legalization below would otherwise turn it into runtime
         # calls that deliberately stop the evaluator.

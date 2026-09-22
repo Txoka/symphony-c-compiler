@@ -63,6 +63,39 @@ def remove_unused_stack_initialization(module):
 
 def fold_immutable_global_loads(module):
     """Fold integer loads from closed-world, provably unmodified globals."""
+    globals_, unsafe, facts = analyze_immutable_globals(module)
+
+    changed = False
+    for function, addresses in facts:
+        blocks = []
+        for block in function.blocks:
+            items = []
+            for instruction in block.instructions:
+                replacement = None
+                if instruction.op == "load" and instruction.type.integer and instruction.args[0] in addresses:
+                    symbol, offset = addresses[instruction.args[0]]
+                    global_ = globals_[symbol]
+                    if symbol not in unsafe and 0 <= offset and offset + instruction.type.size <= len(global_.data):
+                        raw = int.from_bytes(global_.data[offset:offset + instruction.type.size], "big", signed=False)
+                        if instruction.type.signed:
+                            sign = 1 << (instruction.type.size * 8 - 1)
+                            raw = (raw ^ sign) - sign
+                        replacement = type(instruction)("const", instruction.dst, (), instruction.type, raw)
+                elif instruction.op == "load" and instruction.type.kind == "pointer" and instruction.args[0] in addresses:
+                    symbol, offset = addresses[instruction.args[0]]
+                    global_ = globals_[symbol]
+                    relocation = next(((target, addend) for at, target, addend in global_.relocations if at == offset), None)
+                    if symbol not in unsafe and relocation is not None and relocation[1] == 0:
+                        replacement = type(instruction)("global_addr", instruction.dst, (), instruction.type, relocation[0])
+                items.append(replacement or instruction)
+                changed |= replacement is not None
+            blocks.append(BasicBlock(block.label, items))
+        function.blocks = blocks
+    return changed
+
+
+def analyze_immutable_globals(module):
+    """Return global-address facts and the closed-world unsafe symbol set."""
     globals_ = {global_.symbol.key: global_ for global_ in module.globals}
     unsafe = set()
     facts = []
@@ -101,30 +134,4 @@ def fold_immutable_global_loads(module):
                     unsafe.update(argument_origins)
         facts.append((function, addresses))
 
-    changed = False
-    for function, addresses in facts:
-        blocks = []
-        for block in function.blocks:
-            items = []
-            for instruction in block.instructions:
-                replacement = None
-                if instruction.op == "load" and instruction.type.integer and instruction.args[0] in addresses:
-                    symbol, offset = addresses[instruction.args[0]]
-                    global_ = globals_[symbol]
-                    if symbol not in unsafe and 0 <= offset and offset + instruction.type.size <= len(global_.data):
-                        raw = int.from_bytes(global_.data[offset:offset + instruction.type.size], "big", signed=False)
-                        if instruction.type.signed:
-                            sign = 1 << (instruction.type.size * 8 - 1)
-                            raw = (raw ^ sign) - sign
-                        replacement = type(instruction)("const", instruction.dst, (), instruction.type, raw)
-                elif instruction.op == "load" and instruction.type.kind == "pointer" and instruction.args[0] in addresses:
-                    symbol, offset = addresses[instruction.args[0]]
-                    global_ = globals_[symbol]
-                    relocation = next(((target, addend) for at, target, addend in global_.relocations if at == offset), None)
-                    if symbol not in unsafe and relocation is not None and relocation[1] == 0:
-                        replacement = type(instruction)("global_addr", instruction.dst, (), instruction.type, relocation[0])
-                items.append(replacement or instruction)
-                changed |= replacement is not None
-            blocks.append(BasicBlock(block.label, items))
-        function.blocks = blocks
-    return changed
+    return globals_, unsafe, facts

@@ -1235,6 +1235,16 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(execute(evaluated)[1], execute(runtime_loop)[1])
         self.assertLess(len(evaluated.image.binary), len(runtime_loop.image.binary))
 
+        inline = _compile_source(
+            "int main(void){int acc=1;"
+            "for(int i=5;i>2;i--)acc*=i;return acc;}",
+            target=Target(),
+        )
+        returned, steps = execute(inline)
+        self.assertEqual(returned, 60)
+        self.assertEqual(steps, 1)
+        self.assertEqual(len(inline.image.binary), 8)
+
     def test_bounded_constant_call_rejects_observable_function(self):
         result = _compile_source(
             "#include <symphony.h>\n"
@@ -1245,6 +1255,41 @@ class EncodingTests(unittest.TestCase):
         machine = Machine(result.image.binary)
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 5)
         self.assertEqual(machine.outputs, [4])
+
+    def test_constant_loop_evaluation_improves_demo_array_sum(self):
+        source = (ROOT / "examples" / "demo.c").read_text()
+        old = OPTIMIZATIONS["constant_loop_evaluation"]
+        try:
+            OPTIMIZATIONS["constant_loop_evaluation"] = False
+            runtime_loop = _compile_source(source, target=Target())
+            OPTIMIZATIONS["constant_loop_evaluation"] = True
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["constant_loop_evaluation"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+            text = bytes(machine.memory[framebuffer:framebuffer + 11])
+            return returned, text, machine.steps
+
+        baseline = execute(runtime_loop)
+        optimized = execute(evaluated)
+        self.assertEqual(optimized[:2], baseline[:2])
+        self.assertEqual(optimized[:2], (146, b"Result: 146"))
+        self.assertLess(optimized[2], baseline[2])
+        self.assertLess(len(evaluated.image.binary), len(runtime_loop.image.binary))
+
+        mutable = _compile_source(
+            "#include <symphony.h>\n"
+            "int values[2]={1,2};int main(void){values[input()]=9;"
+            "int total=0;for(int i=0;i<2;i++)total+=values[i];return total;}",
+            target=Target(),
+        )
+        for index in (0, 1):
+            machine = Machine(mutable.image.binary, inputs=(index,))
+            self.assertEqual(machine.run(mutable.image.symbols["_halt"]), 11 if index == 0 else 10)
 
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)

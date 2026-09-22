@@ -1,7 +1,9 @@
 """Bounded evaluation of side-effect-free SSA calls with constant arguments."""
 
 from ..analysis.cfg import build_cfg
+from ..analysis.dominance import build_dominator_tree, find_natural_loops
 from ..ir import BasicBlock, Instruction
+from .module import analyze_immutable_globals
 from .sccp import _fold_binary, _fold_unary, _normalize
 
 
@@ -49,6 +51,286 @@ def evaluate_constant_calls(module, instruction_limit=1024):
             rewritten.append(BasicBlock(block.label, items))
         caller.blocks = rewritten
     return changed
+
+
+def evaluate_constant_loops(module, iteration_limit=8, instruction_limit=1024):
+    """Collapse fully evaluable natural-loop regions inside larger functions."""
+    globals_, unsafe, _ = analyze_immutable_globals(module)
+    immutable = {name: value for name, value in globals_.items() if name not in unsafe}
+    changed = False
+    for function in module.functions:
+        while _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
+            changed = True
+    return changed
+
+
+def _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
+    cfg = build_cfg(function)
+    loops = sorted(
+        find_natural_loops(build_dominator_tree(cfg)), key=lambda loop: len(loop.blocks)
+    )
+    definitions = {
+        item.dst: item
+        for block in cfg.blocks
+        for item in block.instructions
+        if item.dst is not None
+    }
+    def_block = {
+        item.dst: block.label
+        for block in cfg.blocks
+        for item in block.instructions
+        if item.dst is not None
+    }
+
+    for loop in loops:
+        header = cfg.by_label[loop.header]
+        outside = [value for value in header.predecessors if value not in loop.blocks]
+        exits = {
+            successor
+            for label in loop.blocks
+            for successor in cfg.by_label[label].successors
+            if successor not in loop.blocks
+        }
+        if len(outside) != 1 or len(exits) != 1:
+            continue
+        preheader, exit_label = outside[0], next(iter(exits))
+        if header.label not in cfg.by_label[preheader].successors:
+            continue
+        if len(cfg.by_label[preheader].successors) != 1:
+            continue
+        phis = [item for item in header.instructions if item.op == "phi"]
+        if not phis or any(
+            set(source for source, _ in phi.extra) != set(header.predecessors)
+            for phi in phis
+        ):
+            continue
+        # Values defined in the body are not available on the loop's exit
+        # edge; only header phis may carry results into surrounding code.
+        loop_definitions = {
+            item.dst
+            for label in loop.blocks
+            for item in cfg.by_label[label].instructions
+            if item.dst is not None
+        }
+        non_phi = loop_definitions - {phi.dst for phi in phis}
+        if any(
+            value in non_phi
+            for block in cfg.blocks
+            if block.label not in loop.blocks
+            for item in block.instructions
+            for value in item.args
+        ):
+            continue
+
+        static_cache = {}
+
+        def static_value(value, visiting=None):
+            if value in static_cache:
+                return static_cache[value]
+            visiting = set() if visiting is None else visiting
+            if value in visiting or def_block.get(value) in loop.blocks:
+                return None
+            visiting.add(value)
+            item = definitions.get(value)
+            result = None
+            if item is not None and item.op == "const":
+                result = _normalize(item.extra, item.type)
+            elif item is not None and item.op == "global_addr" and item.extra in immutable:
+                result = ("global", item.extra, 0)
+            elif item is not None and item.op in ("copy", "cast"):
+                result = static_value(item.args[0], visiting)
+                if result is not None and item.type.integer and isinstance(result, int):
+                    result = _normalize(result, item.type)
+            elif item is not None and item.op == "binary":
+                left = static_value(item.args[0], set(visiting))
+                right = static_value(item.args[1], set(visiting))
+                result = _region_binary(item.extra, left, right, item.type)
+            static_cache[value] = result
+            return result
+
+        values = {
+            value: result
+            for value in definitions
+            if def_block.get(value) not in loop.blocks
+            if (result := static_value(value)) is not None
+        }
+        for phi in phis:
+            incoming = dict(phi.extra).get(preheader)
+            value = static_value(incoming) if incoming is not None else None
+            if value is None:
+                break
+            values[incoming] = value
+            values[phi.dst] = value
+        else:
+            result = _run_loop_region(
+                cfg, loop, values, immutable, iteration_limit, instruction_limit
+            )
+            if result is None:
+                continue
+            exit_source, final_values = result
+            if exit_source != header.label:
+                continue
+            if any(not isinstance(final_values.get(phi.dst), int) for phi in phis):
+                continue
+
+            preheader_block = cfg.by_label[preheader]
+            if preheader_block.terminator() is not None:
+                terminator = preheader_block.instructions[-1]
+                if terminator.op != "jump" or cfg.label_blocks.get(
+                    terminator.extra, terminator.extra
+                ) != header.label:
+                    continue
+                preheader_block.instructions.pop()
+            preheader_block.instructions.extend(
+                Instruction("const", phi.dst, (), phi.type, final_values[phi.dst])
+                for phi in phis
+            )
+            preheader_block.instructions.append(Instruction("jump", extra=exit_label))
+
+            surviving = []
+            for block in function.blocks:
+                if block.label in loop.blocks:
+                    continue
+                items = []
+                for item in block.instructions:
+                    if item.op == "phi":
+                        extra = tuple(
+                            (preheader if source in loop.blocks else source, value)
+                            for source, value in item.extra
+                        )
+                        item = Instruction("phi", item.dst, (), item.type, extra)
+                    items.append(item)
+                surviving.append(BasicBlock(block.label, items))
+            function.blocks = surviving
+            return True
+    return False
+
+
+def _run_loop_region(cfg, loop, initial, immutable, iteration_limit, instruction_limit):
+    values = dict(initial)
+    label = loop.header
+    predecessor = next(
+        value for value in cfg.by_label[loop.header].predecessors if value not in loop.blocks
+    )
+    header_visits = 0
+    steps = 0
+    while steps < instruction_limit:
+        block = cfg.by_label[label]
+        if label == loop.header:
+            header_visits += 1
+            if header_visits > iteration_limit + 1:
+                return None
+        incoming_values = {}
+        for item in block.instructions:
+            if item.op != "phi":
+                continue
+            incoming = dict(item.extra).get(predecessor)
+            if incoming is None or incoming not in values:
+                return None
+            incoming_values[item.dst] = values[incoming]
+        values.update(incoming_values)
+        transferred = False
+        for item in block.instructions:
+            if item.op in ("label", "phi"):
+                continue
+            steps += 1
+            if steps > instruction_limit:
+                return None
+            if item.op == "const":
+                values[item.dst] = _normalize(item.extra, item.type)
+            elif item.op == "global_addr" and item.extra in immutable:
+                values[item.dst] = ("global", item.extra, 0)
+            elif item.op in ("copy", "cast"):
+                if item.args[0] not in values:
+                    return None
+                value = values[item.args[0]]
+                values[item.dst] = (
+                    _normalize(value, item.type)
+                    if isinstance(value, int) and item.type.integer
+                    else value
+                )
+            elif item.op == "unary":
+                value = values.get(item.args[0])
+                if not isinstance(value, int):
+                    return None
+                result = _fold_unary(item.extra, value, item.type)
+                if result is None:
+                    return None
+                values[item.dst] = result
+            elif item.op == "binary":
+                if any(value not in values for value in item.args):
+                    return None
+                result = _region_binary(
+                    item.extra, values[item.args[0]], values[item.args[1]], item.type
+                )
+                if result is None:
+                    return None
+                values[item.dst] = result
+            elif item.op == "load":
+                pointer = values.get(item.args[0])
+                if not (
+                    isinstance(pointer, tuple)
+                    and len(pointer) == 3
+                    and pointer[0] == "global"
+                    and pointer[1] in immutable
+                ):
+                    return None
+                global_ = immutable[pointer[1]]
+                offset = pointer[2]
+                if not 0 <= offset <= len(global_.data) - item.type.size:
+                    return None
+                raw = int.from_bytes(
+                    global_.data[offset:offset + item.type.size], "big", signed=False
+                )
+                values[item.dst] = _normalize(raw, item.type)
+            elif item.op == "jump":
+                next_label = cfg.label_blocks.get(item.extra, item.extra)
+                predecessor, label = label, next_label
+                transferred = True
+                break
+            elif item.op in ("branch_if", "cbranch_if"):
+                if item.op == "branch_if":
+                    condition = values.get(item.args[0])
+                    if not isinstance(condition, int):
+                        return None
+                    take_target = bool(condition) == item.extra[0]
+                else:
+                    left, right = (values.get(value) for value in item.args)
+                    result = _region_binary(item.extra[0], left, right, item.type)
+                    if result is None:
+                        return None
+                    take_target = bool(result)
+                target = cfg.label_blocks.get(item.extra[1], item.extra[1])
+                alternatives = [value for value in block.successors if value != target]
+                if not take_target and len(alternatives) != 1:
+                    return None
+                next_label = target if take_target else alternatives[0]
+                if next_label not in loop.blocks:
+                    return label, values
+                predecessor, label = label, next_label
+                transferred = True
+                break
+            else:
+                return None
+        if transferred:
+            continue
+        if len(block.successors) != 1:
+            return None
+        next_label = block.successors[0]
+        if next_label not in loop.blocks:
+            return label, values
+        predecessor, label = label, next_label
+    return None
+
+
+def _region_binary(operator, left, right, type_):
+    if isinstance(left, tuple) and isinstance(right, int) and operator in ("+", "-"):
+        return left[0], left[1], left[2] + (right if operator == "+" else -right)
+    if isinstance(right, tuple) and isinstance(left, int) and operator == "+":
+        return right[0], right[1], right[2] + left
+    if not isinstance(left, int) or not isinstance(right, int):
+        return None
+    return _safe_binary(operator, left, right, type_)
 
 
 def _evaluate(function, arguments, instruction_limit):
@@ -185,4 +467,4 @@ def _safe_binary(operator, left, right, type_):
     return _fold_binary(operator, left, right, type_)
 
 
-__all__ = ["evaluate_constant_calls"]
+__all__ = ["evaluate_constant_calls", "evaluate_constant_loops"]

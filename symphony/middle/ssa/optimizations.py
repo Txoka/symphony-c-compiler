@@ -26,6 +26,7 @@ OPTIMIZATIONS = {
     "tail_call_elimination": True,
     "self_reduction_loop_lowering": True,
     "bounded_constant_call_evaluation": True,
+    "constant_loop_evaluation": True,
     "self_tail_loop_lowering": True,
     "unreachable_symbol_elimination": True,
     "immutable_global_folding": True,
