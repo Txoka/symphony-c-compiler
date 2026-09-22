@@ -1,5 +1,6 @@
 """Language/frontend-independent pipeline orchestration and public C shortcut."""
 
+from copy import deepcopy
 from dataclasses import dataclass
 from .frontends.c import CFrontend
 from .frontends.protocol import SourceFrontend
@@ -24,6 +25,7 @@ from .middle.ssa import (
     eliminate_common_expressions,
     evaluate_constant_calls,
     evaluate_constant_loops,
+    unroll_known_trip_loops,
     reduce_strength,
     identify_direct_calls,
     promote_readonly_parameters,
@@ -97,6 +99,9 @@ evaluate_constant_calls = _optional_optimization(
 )
 evaluate_constant_loops = _optional_optimization(
     "constant_loop_evaluation", evaluate_constant_loops
+)
+unroll_known_trip_loops = _optional_optimization(
+    "known_trip_full_unrolling", unroll_known_trip_loops
 )
 lower_self_tail_calls_to_loops = _optional_optimization(
     "self_tail_loop_lowering", lower_self_tail_calls_to_loops
@@ -270,18 +275,38 @@ class Compiler:
             simplify_control_flow(function)
             verify(function)
         remove_unreachable_symbols(ir)
-        remove_unused_stack_initialization(ir)
-        for function in ir.functions:
-            remove_dead_values(function)
-            verify(function)
-            simplify_control_flow(function)
-            verify(function)
-            destruct(function)
+
+        candidate = deepcopy(ir)
+        unrolled = False
+        for function in candidate.functions:
+            unrolled |= unroll_known_trip_loops(function)
+        if unrolled:
+            for function in candidate.functions:
+                sparse_conditional_constant_propagation(function)
+                verify(function)
+                propagate_global_copies(function)
+                verify(function)
+                remove_dead_values(function)
+                verify(function)
+                simplify_control_flow(function)
+                verify(function)
+            remove_unreachable_symbols(candidate)
+            candidate_image = _finalize_module(candidate, self.target)
+            if not optimization_enabled("unroll_no_code_growth"):
+                ir, image = candidate, candidate_image
+            else:
+                baseline_image = _finalize_module(ir, self.target)
+                if len(candidate_image.binary) <= len(baseline_image.binary):
+                    ir, image = candidate, candidate_image
+                else:
+                    image = baseline_image
+        else:
+            image = _finalize_module(ir, self.target)
         return Compilation(
             frontend.parsed,
             frontend.typed,
             ir,
-            generate(ir, self.target),
+            image,
         )
 
 
@@ -293,3 +318,14 @@ def compile_sources(sources, target=None, include_dirs=(), defines=()):
     """Compile ``[(filename, source), ...]`` as one linked C program."""
     frontend = CFrontend(include_dirs=include_dirs, defines=defines)
     return Compiler(frontend, target).compile_project(sources)
+
+
+def _finalize_module(module, target):
+    remove_unused_stack_initialization(module)
+    for function in module.functions:
+        remove_dead_values(function)
+        verify(function)
+        simplify_control_flow(function)
+        verify(function)
+        destruct(function)
+    return generate(module, target)

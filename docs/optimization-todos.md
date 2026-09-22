@@ -106,14 +106,17 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   and also improves `demo`, `bigprime`, `c_aggregate_compat`, `pi`, `primes`,
   and `dynamic_sensor_report`. Cross-block and backedge memory facts remain a
   future MemorySSA/alias-analysis extension.
-- [ ] **Known-trip-count analysis and costed full unrolling.** Derive trip
-  counts for canonical induction phis with constant initial value, step, and
-  bound. For very small counts, compare the target cost of duplicated bodies
-  with the removed phi updates, comparisons, and back edges, and unroll only
-  when final code is predicted not to grow. `demo.c`'s four-element sum is the
-  first real regression target. Preserve zero-trip behavior, `break` and
-  `continue`, side-effect order, signed-overflow rules, and code-size wins from
-  later branch/call relaxation.
+- [x] **Known-trip-count analysis and bounded full unrolling (linear initial
+  form).** Canonical single-backedge linear loops of at most four iterations
+  are cloned with SSA value remapping and retained side-effect order. The
+  default `unroll_no_code_growth` policy generates both complete target images
+  and keeps the unrolled form only when its final binary is no larger; setting
+  it false enables bounded speed-over-size experiments independently of the
+  `known_trip_full_unrolling` pass toggle. A two-iteration input/output loop
+  falls from 60 bytes/29 steps to 48/11. On `primes`, the guarded form reduces
+  2,032 bytes/2,397,784 steps to 2,008/2,388,532. Add internal conditional,
+  `break`, and multiple-continue support only with explicit exit-value
+  reconstruction.
 - [x] **Bounded constant loop-region evaluation (initial form).** Fully known,
   side-effect-free natural loops are interpreted independently of their
   surrounding function, including reads from closed-world immutable globals.

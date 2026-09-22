@@ -1291,6 +1291,46 @@ class EncodingTests(unittest.TestCase):
             machine = Machine(mutable.image.binary, inputs=(index,))
             self.assertEqual(machine.run(mutable.image.symbols["_halt"]), 11 if index == 0 else 10)
 
+    def test_known_trip_unrolling_obeys_final_code_growth_policy(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){for(int i=0;i<2;i++)output(input()+i);return 7;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(10, 20, 30))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(unrolled)[:2], execute(looped)[:2])
+        self.assertEqual(execute(unrolled)[:2], (7, [10, 21]))
+        self.assertLess(execute(unrolled)[2], execute(looped)[2])
+        self.assertLess(len(unrolled.image.binary), len(looped.image.binary))
+
+        speed_source = source.replace("i<2", "i<3")
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            guarded = _compile_source(speed_source, target=Target())
+            OPTIMIZATIONS["unroll_no_code_growth"] = False
+            speed = _compile_source(speed_source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+        self.assertGreater(len(speed.image.binary), len(guarded.image.binary))
+        self.assertLess(execute(speed)[2], execute(guarded)[2])
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

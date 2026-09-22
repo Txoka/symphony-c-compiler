@@ -19,6 +19,7 @@ from .fuse_branches import fuse_comparison_branches, fuse_comparison_zero_tests
 from .divmod import pair_unsigned_divmod
 from .value_numbering import eliminate_common_expressions
 from .evaluate import evaluate_constant_calls, evaluate_constant_loops
+from .unroll import unroll_known_trip_loops
 from .strength import reduce_strength
 from .calls import identify_direct_calls
 from .parameters import promote_readonly_parameters
@@ -50,6 +51,7 @@ __all__ = [
     "eliminate_common_expressions",
     "evaluate_constant_calls",
     "evaluate_constant_loops",
+    "unroll_known_trip_loops",
     "reduce_strength",
     "identify_direct_calls",
     "promote_readonly_parameters",
