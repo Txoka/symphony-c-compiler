@@ -98,6 +98,12 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   bases and address increments rather than recomputing `base + index`.
   This is the most visible instruction-level difference in GCC's
   `insertion_sort`, sieve, and numeric-array loops.
+- [ ] **Printing-loop memory traffic.** Forward exact-address loads and stores
+  through straight-line regions using conservative memory versions, then
+  extend the profitable form across loop backedges. Calls, volatile/device
+  accesses, and possibly aliasing stores must invalidate cached values. Use
+  the formatted-output loops as real regressions, but keep the transformation
+  runtime-independent so ordinary global/local update loops benefit too.
 - [ ] **Known-trip-count analysis and costed full unrolling.** Derive trip
   counts for canonical induction phis with constant initial value, step, and
   bound. For very small counts, compare the target cost of duplicated bodies
@@ -106,14 +112,14 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   first real regression target. Preserve zero-trip behavior, `break` and
   `continue`, side-effect order, signed-overflow rules, and code-size wins from
   later branch/call relaxation.
-- [x] **Recursive multiplication reduction to accumulator loop (initial
-  form).** The exact one-parameter `1` versus
-  `current * recurse(step(current))` shape now becomes an accumulator phi plus
-  backedge. This reduces `demo.c` from 1,964 to 1,852 bytes and 4,357 to 4,209
-  steps. Extend it only with proven identities and safe associative integer
-  semantics, retaining source evaluation order and rejecting escaping frame
-  addresses, multiple recursive calls, or observable work after the combine.
-  Keep this distinct from ordinary tail-recursion lowering.
+- [x] **Recursive associative reduction to accumulator loop.** A one-parameter
+  reduction using integer `+`, `*`, `|`, `^`, or `&`, the matching identity,
+  one recursive call, and a pure parameter-derived element expression now
+  becomes an accumulator phi plus backedge. This reduces `demo.c` from 1,964
+  to 1,852 bytes and 4,357 to 4,209 steps. Extend it to multiple parameters
+  only while retaining source evaluation order and rejecting escaping frame
+  addresses, multiple recursive calls, or observable post-combine work. Keep
+  this distinct from ordinary tail-recursion lowering.
 - [ ] **Bounded constant-call evaluation after loop canonicalization.** Once a
   recursive reduction or small loop is represented canonically, evaluate calls
   with constant arguments within explicit instruction/recursion limits. This

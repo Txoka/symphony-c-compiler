@@ -4,13 +4,15 @@ from ..ir import BasicBlock, Instruction
 
 
 def lower_self_reductions_to_loops(function):
-    """Turn a simple multiplicative self reduction into an accumulator loop.
+    """Turn a simple associative self reduction into an accumulator loop.
 
-    The deliberately narrow first form recognizes one read-only parameter,
-    one recursive call, a base return of one, and ``parameter * recurse(next)``
-    returned directly. Multiplication is associative for every defined C
-    execution; signed-overflowing executions are already undefined.
+    The accepted form has one read-only parameter, one recursive call, a base
+    return equal to the operator's identity, and
+    ``pure_parameter_expression OP recurse(next)`` returned directly.  The
+    supported integer operators are associative for every defined C execution;
+    signed-overflowing executions are already undefined.
     """
+    identities = {"+": 0, "*": 1, "|": 0, "^": 0, "&": -1}
     self_calls = [
         (block, index, item)
         for block in function.blocks
@@ -25,7 +27,7 @@ def lower_self_reductions_to_loops(function):
         len(call.args) != 1
         or call_index + 2 >= len(items)
         or items[call_index + 1].op != "binary"
-        or items[call_index + 1].extra != "*"
+        or items[call_index + 1].extra not in identities
         or items[call_index + 2].op != "return"
         or items[call_index + 2].args != (items[call_index + 1].dst,)
         or call.dst not in items[call_index + 1].args
@@ -33,6 +35,8 @@ def lower_self_reductions_to_loops(function):
         return False
     combine = items[call_index + 1]
     recursive_return = items[call_index + 2]
+    if not combine.type.integer:
+        return False
     definitions = {
         item.dst: item
         for block in function.blocks
@@ -43,27 +47,32 @@ def lower_self_reductions_to_loops(function):
         combine.args[1] if combine.args[0] == call.dst else combine.args[0]
     )
 
-    def reads_parameter(value):
-        seen = set()
-        while value not in seen:
-            seen.add(value)
-            definition = definitions.get(value)
-            if definition is None:
-                return False
-            if definition.op == "param":
-                return definition.extra[1] == function.params[0].key
-            if definition.op in ("copy", "cast"):
-                value = definition.args[0]
-                continue
-            if definition.op != "load":
-                return False
+    def parameter_expression(value, seen=None):
+        seen = set() if seen is None else seen
+        if value in seen:
+            return False, False
+        seen.add(value)
+        definition = definitions.get(value)
+        if definition is None:
+            return False, False
+        if definition.op == "param":
+            return True, definition.extra[1] == function.params[0].key
+        if definition.op == "load":
             address = definitions.get(definition.args[0])
-            return (
+            valid = (
                 address is not None
                 and address.op == "local_addr"
                 and address.extra == function.params[0].key
             )
-        return False
+            return valid, valid
+        if definition.op == "const":
+            return True, False
+        if definition.op not in ("copy", "cast", "unary", "binary"):
+            return False, False
+        operands = [parameter_expression(arg, set(seen)) for arg in definition.args]
+        return all(valid for valid, _ in operands), any(
+            dependent for _, dependent in operands
+        )
 
     returns = [
         item
@@ -73,13 +82,19 @@ def lower_self_reductions_to_loops(function):
     ]
     original_base_returns = [item for item in returns if item is not recursive_return]
     if (
-        not reads_parameter(original_other)
+        not all(parameter_expression(original_other))
         or len(original_base_returns) != 1
         or len(original_base_returns[0].args) != 1
     ):
         return False
     original_base = definitions.get(original_base_returns[0].args[0])
-    if original_base is None or original_base.op != "const" or original_base.extra != 1:
+    mask = (1 << (combine.type.size * 8)) - 1
+    identity_value = identities[combine.extra] & mask
+    if (
+        original_base is None
+        or original_base.op != "const"
+        or original_base.extra & mask != identity_value
+    ):
         return False
 
     # Manufacture the ordinary ABI-entry SSA value only after the structural
@@ -123,8 +138,6 @@ def lower_self_reductions_to_loops(function):
     )
     call, combine, recursive_return = items[call_index:call_index + 3]
     other = combine.args[1] if combine.args[0] == call.dst else combine.args[0]
-    if other != parameter.dst:
-        return False
 
     definitions = {
         item.dst: item
@@ -142,7 +155,11 @@ def lower_self_reductions_to_loops(function):
     if len(base_returns) != 1 or len(base_returns[0].args) != 1:
         return False
     base_value = definitions.get(base_returns[0].args[0])
-    if base_value is None or base_value.op != "const" or base_value.extra != 1:
+    if (
+        base_value is None
+        or base_value.op != "const"
+        or base_value.extra & mask != identity_value
+    ):
         return False
 
     entry = function.blocks[0]
@@ -159,6 +176,7 @@ def lower_self_reductions_to_loops(function):
     accumulated = function.values + 3
     function.values += 4
     next_value = current if call.args[0] == parameter.dst else call.args[0]
+    reduction_value = current if other == parameter.dst else other
 
     def rewrite(item):
         args = tuple(current if value == parameter.dst else value for value in item.args)
@@ -174,7 +192,7 @@ def lower_self_reductions_to_loops(function):
         preheader_label,
         [
             parameter,
-            Instruction("const", identity, (), parameter.type, 1),
+            Instruction("const", identity, (), combine.type, base_value.extra),
             Instruction("jump", extra=entry.label),
         ],
     )
@@ -190,7 +208,11 @@ def lower_self_reductions_to_loops(function):
             if block.label == recursive_block.label and index == call_index:
                 rewritten.extend((
                     Instruction(
-                        "binary", accumulated, (accumulator, current), combine.type, "*"
+                        "binary",
+                        accumulated,
+                        (accumulator, reduction_value),
+                        combine.type,
+                        combine.extra,
                     ),
                     Instruction("jump", extra=entry.label),
                 ))

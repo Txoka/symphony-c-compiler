@@ -1154,10 +1154,10 @@ class EncodingTests(unittest.TestCase):
         machine = Machine(result.image.binary)
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 12)
 
-    def test_self_reduction_loop_matches_recursive_results(self):
+    def test_self_reduction_loop_handles_additive_parameter_expression(self):
         source = (
             "#include <symphony.h>\n"
-            "int f(int n){if(n<2)return 1;return n*f(n-1);}"
+            "int f(int n){if(n<2)return 0;return n*n+f(n-1);}"
             "int main(void){return f((int)input());}"
         )
         old = OPTIMIZATIONS["self_reduction_loop_lowering"]
