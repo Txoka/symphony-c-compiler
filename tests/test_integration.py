@@ -16,7 +16,7 @@ from symphony.emulator import Machine as _Machine, native_available, native_run
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.benchmark_examples import CASES, CONTINUOUS_CASES, validate_cases
+from symphony.benchmark_cases import CASES, CONTINUOUS_CASES, validate_cases
 
 
 TEST_ISA = os.environ.get("SYMPHONY_TEST_ISA", "symphony")
@@ -29,7 +29,7 @@ TEST_PREAMBLE = """#include <stdio.h>
 
 class RepositoryCoverageTests(unittest.TestCase):
     def test_every_example_has_an_explicit_benchmark_case(self):
-        validate_cases()
+        validate_cases(ROOT / "examples")
         self.assertEqual(
             set(CASES),
             {path.name for path in (ROOT / "examples").glob("*.c")},
@@ -37,7 +37,10 @@ class RepositoryCoverageTests(unittest.TestCase):
         self.assertEqual(CONTINUOUS_CASES, {"hypercube.c", "render.c"})
 
     def test_generated_object_files_are_ignored_and_not_committed(self):
-        self.assertIn("*.o", (ROOT / ".gitignore").read_text().splitlines())
+        gitignore = ROOT / ".gitignore"
+        if not gitignore.is_file():
+            self.skipTest("repository metadata is not included in wheel tests")
+        self.assertIn("*.o", gitignore.read_text().splitlines())
         self.assertEqual(list(ROOT.glob("*.o")), [])
 
 

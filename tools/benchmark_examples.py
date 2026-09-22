@@ -17,6 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "gcc-backend" / "symphony-gcc" / "tests")]
 
 from symphony import Target, compile_source
+from symphony.benchmark_cases import (
+    CASES,
+    CONTINUOUS_CASES,
+    CONTINUOUS_STEPS,
+    validate_cases as validate_case_inventory,
+)
 from symphony.emulator import Machine, native_available, native_run
 from symphony.project import decode_control, make_persistent_image, project_from_directory
 from selfhost.tools.bootstrap import STAGE0_SOURCES, build_stage0
@@ -24,47 +30,8 @@ from selfhost.tools.build_stages import compile_stage
 from toolchain import Toolchain, ToolchainNotBuilt
 
 
-# Inputs are deliberately modest, deterministic terminating workloads.  They
-# are part of the result's provenance, not an attempt to represent every use.
-CASES = {
-    "anonymous_aggregate_members.c": (),
-    "arena_allocator.c": (),
-    "bigprime.c": (),
-    "branch_merge.c": (1,),
-    "c_aggregate_compat.c": (),
-    "common_subexpression.c": (123456789,),
-    "comparison_zero_test.c": (7, 3),
-    "constant_folding.c": (),
-    "demo.c": (),
-    "divmod_pair.c": (123456789,),
-    "dynamic_sensor_report.c": (8, 4, -2, 4, 9, 0, -2, 7, 1),
-    "hypercube.c": (),
-    "insertion_sort.c": (15, 3, 9, 0, 14, 2, 8, 1, 13, 4, 12, 5, 11, 6, 10, 7),
-    "interprocedural_constant_folding.c": (),
-    "loop_helper_inlining.c": (),
-    "pi.c": (),
-    "primes.c": (),
-    "render.c": (),
-    "towers_of_hanoi.c": (2, 0, 2, 1),
-}
-
-# Interactive renderers deliberately have no terminating path. Benchmark a
-# deterministic prefix rather than misreporting their expected nontermination
-# as a failure. Other examples must still reach their halt normally.
-CONTINUOUS_CASES = {"hypercube.c", "render.c"}
-CONTINUOUS_STEPS = 10_000_000
-
-
 def validate_cases():
-    """Require every maintained example to have explicit benchmark inputs."""
-    examples = {path.name for path in (ROOT / "examples").glob("*.c")}
-    configured = set(CASES)
-    if examples != configured:
-        missing = ", ".join(sorted(examples - configured)) or "none"
-        stale = ", ".join(sorted(configured - examples)) or "none"
-        raise RuntimeError(
-            f"benchmark cases are incomplete (missing: {missing}; stale: {stale})"
-        )
+    validate_case_inventory(ROOT / "examples")
 
 
 def _run(machine, halt, max_steps, continuous):
