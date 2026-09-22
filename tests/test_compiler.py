@@ -1980,6 +1980,47 @@ class EncodingTests(unittest.TestCase):
                 machine = Machine(binary, 256)
                 self.assertEqual(machine.run(16), 42)
 
+    def test_costed_casted_scaled_induction_improves_long_array_loops(self):
+        source = """
+            unsigned values[402];
+            int main(void) {
+                unsigned seed = input();
+                for (unsigned i = 0; i < 402; i++) values[i] = seed + i;
+                unsigned total = 0;
+                for (unsigned i = 0; i < 402; i++) total += values[i];
+                return total;
+            }
+        """
+        keys = (
+            "representation_preserving_induction_casts",
+            "loop_profitability",
+        )
+        old = {key: OPTIMIZATIONS[key] for key in keys}
+        try:
+            for key in keys:
+                OPTIMIZATIONS[key] = False
+            baseline = compile_source(
+                source, target=Target(bss_mode="assume-zeroed")
+            )
+            for key in keys:
+                OPTIMIZATIONS[key] = True
+            optimized = compile_source(
+                source, target=Target(bss_mode="assume-zeroed")
+            )
+        finally:
+            OPTIMIZATIONS.update(old)
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=[7])
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(baseline_result[0], 83415)
+        self.assertEqual(optimized_result[0], baseline_result[0])
+        self.assertLess(optimized_result[1], baseline_result[1])
+
     def test_cli(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)

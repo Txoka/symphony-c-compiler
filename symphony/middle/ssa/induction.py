@@ -16,7 +16,14 @@ update and every use of the header phi observes the right iteration value.
 
 from ..analysis.cfg import TERMINATORS, build_cfg
 from ..analysis.dominance import build_dominator_tree, find_natural_loops
+from ..analysis.profitability import (
+    LoopTransformationCost,
+    exact_trip_count,
+    peak_live_values,
+    profitable,
+)
 from ..ir import Instruction
+from .optimizations import enabled
 
 
 def _insert_before_terminator(block, instructions):
@@ -62,7 +69,7 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
                 if instruction.op == "const":
                     constants[instruction.dst] = instruction.extra
 
-        def resolve(value):
+        def resolve(value, representation=False):
             """Look through SSA copies and representation-preserving casts."""
             seen = set()
             while value not in seen:
@@ -72,12 +79,17 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
                     break
                 source = instruction.args[0]
                 source_definition = definitions.get(source)
-                if (
-                    instruction.op == "cast"
-                    and source_definition is not None
-                    and source_definition.type != instruction.type
-                ):
-                    break
+                if instruction.op == "cast" and source_definition is not None:
+                    same_type = source_definition.type == instruction.type
+                    same_representation = (
+                        representation
+                        and enabled("representation_preserving_induction_casts")
+                        and source_definition.type.integer
+                        and instruction.type.integer
+                        and source_definition.type.size == instruction.type.size
+                    )
+                    if not (same_type or same_representation):
+                        break
                 value = source
             return value
 
@@ -148,6 +160,7 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
                             continue
                         left, right = (resolve(value) for value in instruction.args)
                         scale = None
+                        representation_cast = False
                         if right == phi.dst:
                             base = left
                         elif left == phi.dst:
@@ -173,18 +186,94 @@ def reduce_induction_strength(function, allow_scaled=False, scaled_only=False):
                             ):
                                 scale_operand = offset_left
                             else:
-                                continue
+                                offset_left, offset_right = (
+                                    resolve(value, representation=True)
+                                    for value in offset_definition.args
+                                )
+                                if offset_left == phi.dst and offset_right in constants:
+                                    scale_operand = offset_right
+                                elif (
+                                    offset_definition.extra == "*"
+                                    and offset_right == phi.dst
+                                    and offset_left in constants
+                                ):
+                                    scale_operand = offset_left
+                                else:
+                                    continue
+                                representation_cast = True
                             scale = (offset_definition.extra, scale_operand,
                                      offset_definition.type)
                         if scale is not None and not allow_scaled:
                             continue
                         if scale is None and scaled_only:
                             continue
-                        if scale is not None and constant_bounded:
-                            # Fixed small loops are better candidates for
-                            # evaluation/unrolling; extra cursor setup hurt
-                            # the bigint helpers in whole-program benchmarks.
-                            continue
+                        if scale is not None and (constant_bounded or representation_cast):
+                            if constant_bounded and not enabled("loop_profitability"):
+                                continue
+                            if enabled("loop_profitability"):
+                                trip_count = None
+                                if constant_bounded:
+                                    steps = {
+                                        constants[constant]
+                                        if operator == "+" else -constants[constant]
+                                        for operator, constant in updates.values()
+                                    }
+                                    if len(steps) != 1:
+                                        continue
+                                    predicate_operator = (
+                                        predicate.extra[0]
+                                        if predicate.op == "cbranch_if"
+                                        else predicate.extra
+                                    )
+                                    if predicate.args[1] == phi.dst:
+                                        predicate_operator = {
+                                            "<": ">", "<=": ">=", ">": "<",
+                                            ">=": "<=", "==": "==", "!=": "!=",
+                                        }.get(predicate_operator)
+                                    target = cfg.label_blocks.get(
+                                        terminator.extra[1], terminator.extra[1]
+                                    )
+                                    continue_operator = (
+                                        predicate_operator if target in loop.blocks
+                                        else {
+                                            "==": "!=", "!=": "==", "<": ">=",
+                                            "<=": ">", ">": "<=", ">=": "<",
+                                        }.get(predicate_operator)
+                                    )
+                                    other = next(
+                                        value for value in predicate.args
+                                        if value != phi.dst
+                                    )
+                                    trip_count = exact_trip_count(
+                                        constants[entry_value], next(iter(steps)),
+                                        continue_operator, constants[resolve(other)],
+                                        phi.type,
+                                        simulation_limit=enabled(
+                                            "loop_trip_count_analysis_limit"
+                                        ),
+                                    )
+                                depth = sum(
+                                    loop.blocks <= enclosing.blocks for enclosing in loops
+                                )
+                                cost = LoopTransformationCost(
+                                    trip_count=trip_count,
+                                    loop_depth=depth,
+                                    setup=2,
+                                    before_each=2,
+                                    after_each=1,
+                                    pressure=1,
+                                    pressure_each=max(
+                                        0,
+                                        peak_live_values(function) + 1
+                                        - enabled("loop_register_budget"),
+                                    ),
+                                )
+                                if not profitable(
+                                    cost,
+                                    unknown_trip_count=enabled("loop_unknown_trip_count"),
+                                    depth_weight=enabled("loop_depth_weight"),
+                                ):
+                                    continue
                         base_block = def_block.get(base)
                         if base_block is None or base_block in loop.blocks:
                             continue

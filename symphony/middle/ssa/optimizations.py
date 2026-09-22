@@ -36,6 +36,32 @@ OPTIMIZATIONS = {
     # Extend induction reduction to scaled/indexed address expressions.
     "scaled_induction_strength_reduction": True,
 
+    # Let scaled-induction matching look through integer casts that preserve
+    # all bits (same width, signedness-only change).
+    "representation_preserving_induction_casts": True,
+
+    # Apply the shared setup/steady-state/pressure profitability model to
+    # constant-bounded scaled induction instead of rejecting every such loop.
+    "loop_profitability": True,
+
+    # Numeric slider: assumed trip count when canonical analysis cannot derive
+    # an exact count. Must be a non-negative integer.
+    "loop_unknown_trip_count": 8,
+
+    # Numeric slider: multiplicative execution-frequency weight per nesting
+    # level beyond the first. Must be at least one.
+    "loop_depth_weight": 4,
+
+    # Numeric slider: maximum iterations used to prove an exact trip count by
+    # target-width recurrence simulation. Larger/uncertain loops use the
+    # unknown-trip estimate. Must be a non-negative integer.
+    "loop_trip_count_analysis_limit": 65536,
+
+    # Numeric slider: volatile/callee-saved register homes available to a leaf
+    # loop in the current backend. A proposed recurrence exceeding this budget
+    # receives a per-iteration spill penalty. Must be a positive integer.
+    "loop_register_budget": 8,
+
     # Change eligible scaled index exit tests into advancing-pointer limit tests.
     "pointer_limit_loops": True,
 

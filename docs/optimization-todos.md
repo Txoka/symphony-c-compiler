@@ -10,12 +10,18 @@ The loop milestone on this branch is complete. It provides natural-loop and
 induction analysis, LICM, exact-address loop memory cleanup, bounded scalar loop
 evaluation, guarded full unrolling, statically traced `continue`/`break` paths,
 data-dependent internal CFG cloning for header-controlled bounded loops, affine
-scaled pointer induction, and scaled pointer-limit exits. Unrolling compares the
+scaled pointer induction, and scaled pointer-limit exits. Constant-bounded
+scaled recurrences use exact target-width trip analysis plus explicit
+setup/steady-state/depth/register-pressure costs, and matching safely looks
+through same-width signedness casts. Unrolling compares the
 complete final target images and defaults to no code growth; its independent
 policy switch permits speed-over-size experiments. Scaled induction and pointer
 limits are independently toggleable and avoid fixed small loops better handled
 by evaluation/unrolling and byte-stride exits that add pressure without removing
-scaling work.
+scaling work. The costed recurrence closeout improves `bigprime` by 10.6%
+(512,181,658 to 457,901,426 steps) for 48 bytes and improves `pi` by 8,614,902
+steps while shrinking 16 bytes; insertion sort and the sensor report are
+unchanged.
 
 The loop passes now run to a local fixed point after self-tail recursion has
 been lowered.  The loop includes SCCP, copy/algebraic cleanup, dead-value and
@@ -49,8 +55,8 @@ scratch-array initialization are still real program work and remain counted.
 CFG liveness, interference, and copy coalescing are already implemented; do not
 restart that completed foundation. Improve it with loop-frequency weighting,
 more usable volatile registers, spill-slot reuse, and direct allocated-operand
-emission. Then address Boolean/short-circuit materialization, costed pointer
-recurrences, post-allocation cleanup, and runtime memory loops in the report's
+emission. Then address Boolean/short-circuit materialization, richer pointer
+recurrence reuse, post-allocation cleanup, and runtime memory loops in the report's
 measured order. Every sub-change remains independently toggleable and must run
 both ISA suites, both selfhost suites, the complete maintained example set, and
 a fresh GCC comparison.
@@ -165,6 +171,12 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   loop retains 132 bytes and falls from 124 to 121 steps. Fixed small loops
   remain available to evaluation/unrolling, and byte-stride pointer exits are
   rejected after they regressed `insertion_sort`.
+  Constant-bounded candidates are no longer rejected wholesale: a reusable
+  cost model derives exact trip counts with target-width wrap semantics, weights
+  nested loops, charges cursor setup, and rejects predicted register overflow.
+  Same-width integer signedness casts are transparent only behind their own
+  toggle. Both policy and thresholds are documented sliders in
+  `symphony/middle/ssa/optimizations.py`.
 - [x] **Printing-loop memory traffic (straight-line form).** Exact-address,
   same-type loads and stores are forwarded within blocks outside natural
   loops; calls, intrinsics, unknown stores, and differently typed accesses are

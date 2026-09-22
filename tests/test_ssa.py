@@ -11,7 +11,12 @@ from symphony.frontends.c import CFrontend
 from symphony.middle.lowering import lower_intrinsics
 from symphony.middle.analysis.cfg import prune_unreachable_blocks
 from symphony.middle.ir import BasicBlock, FunctionIR, Instruction, ModuleIR
-from symphony.middle.model import INT
+from symphony.middle.model import INT, UINT
+from symphony.middle.analysis.profitability import (
+    LoopTransformationCost,
+    exact_trip_count,
+    profitable,
+)
 from symphony.middle.ssa import (
     construct,
     verify,
@@ -53,6 +58,24 @@ def _build(source):
 
 
 class RoundTripTests(unittest.TestCase):
+    def test_exact_loop_trip_count_obeys_target_integer_semantics(self):
+        self.assertEqual(exact_trip_count(0, 1, "<", 402, UINT), 402)
+        self.assertEqual(exact_trip_count(5, -1, ">", 2, INT), 3)
+        self.assertEqual(exact_trip_count(0, 2, "!=", 1, UINT), None)
+        self.assertEqual(
+            exact_trip_count(0, 1, "<", 402, UINT, simulation_limit=32),
+            None,
+        )
+
+    def test_loop_profitability_accounts_for_depth_and_register_pressure(self):
+        shallow = LoopTransformationCost(4, 1, 2, 2, 1)
+        nested = LoopTransformationCost(4, 2, 2, 2, 1)
+        pressured = LoopTransformationCost(402, 1, 2, 2, 1, pressure_each=1)
+        self.assertTrue(profitable(shallow, depth_weight=4))
+        self.assertGreater(nested.estimated_saving(8, 4),
+                           shallow.estimated_saving(8, 4))
+        self.assertFalse(profitable(pressured, depth_weight=4))
+
     def test_hoisting_preserves_existing_block_objects(self):
         ir = _build(
             """

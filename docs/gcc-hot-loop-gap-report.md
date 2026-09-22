@@ -114,13 +114,16 @@ The sampled hot regions are four-limb `sub`, `shr1`, `copy`, `cmp`, and
 staging registers, and materializes carry/borrow comparisons as integer 0/1
 values. GCC maintains pointer cursors and uses shorter conditional-value paths.
 
-A direct experiment relaxing scaled induction's blanket constant-bound veto
-reduced the complete run from 512,181,658 to 457,901,426 steps (54,280,232,
-or 10.6%) while growing the image from 7,060 to 7,104 bytes. The other three
-programs were unchanged in that experiment. This proves the transformation is
-valuable, but the retained rule must use a real trip-count/cost decision rather
-than simply enabling every fixed-bound loop; genuinely tiny loops can still
-lose from cursor setup and register pressure.
+The retained implementation replaces scaled induction's blanket
+constant-bound veto with exact target-width trip analysis and an explicit
+setup/steady-state/loop-depth/register-pressure cost. It also sees through
+same-width signedness casts without treating narrowing or widening casts as
+transparent. `bigprime` falls from 512,181,658 to 457,901,426 steps (10.6%) for
+48 bytes, and `pi` falls from 1,805,306,952 to 1,796,692,050 steps while also
+shrinking 16 bytes. A permissive version made `pi` substantially slower by
+creating a ninth simultaneously live value in `div_small`; the retained
+eight-register pressure budget rejects that recurrence while accepting the
+profitable 402-word cursors. Insertion sort and the sensor report are unchanged.
 
 ## Prioritized implementation order
 
@@ -141,12 +144,13 @@ catch unrelated regressions.
    use cheap 0/1 constants when a Boolean value really escapes. This is expected
    to pay immediately in insertion sort, sensor merge loops, bigint carry/borrow,
    and the division helpers.
-3. **Costed address recurrences and pointer exits.** Replace the blanket
-   constant-bound veto with an actual trip-count/setup/pressure rule; retain the
-   small-loop exclusion only when justified. See through representation-safe
-   same-width signedness casts so `pi`'s 402-word loop becomes eligible. Reuse
-   one cursor for repeated load/store addresses and form end pointers once.
-   Preserve the measured `bigprime` win as the first acceptance case.
+3. **Extend costed address recurrences and pointer exits.** The shared
+   trip-count/setup/depth/pressure model and representation-safe cast matching
+   were completed during branch closeout, including the measured `bigprime`
+   and `pi` wins above. Build on that foundation by reusing one cursor for
+   repeated load/store addresses, forming end pointers once, and replacing the
+   current global peak-live proxy with candidate-local allocation costs after
+   allocator frequency work lands.
 4. **Post-allocation machine cleanup.** Iterate a physical-register peephole
    with branch/call relaxation: remove self moves, redundant move chains,
    store/reload pairs to the same spill, repeated address materialization, and
