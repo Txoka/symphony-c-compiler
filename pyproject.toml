@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cymphony"
-version = "0.17.0"
+version = "0.17.1"
 description = "A small C compiler targeting the Symphony ISA from the 'Turing Complete' game"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
