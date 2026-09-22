@@ -30,6 +30,10 @@ OPTIMIZATIONS = {
     # Move computations proven invariant and safe from loop bodies to preheaders.
     "loop_invariant_hoisting": True,
 
+    # Apply a per-loop register-pressure guard to LICM. A proposed hoist is
+    # rolled back when it raises peak liveness beyond loop_register_budget.
+    "pressure_aware_licm": True,
+
     # Replace affine expressions of a basic induction variable with derived phis.
     "induction_strength_reduction": True,
 

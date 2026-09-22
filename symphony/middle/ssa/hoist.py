@@ -18,6 +18,7 @@ conflict -- unchanged from the old pass's conservative rule.
 
 from ..analysis.cfg import build_cfg, TERMINATORS
 from ..analysis.dominance import build_dominator_tree, find_natural_loops
+from ..analysis.profitability import peak_live_values
 
 PURE = {
     "const",
@@ -41,8 +42,14 @@ MEMORY_EFFECTS = {
 }
 
 
-def hoist_loop_invariants(function):
-    """Move loop-invariant pure computations to a preheader before the header."""
+def hoist_loop_invariants(function, pressure_budget=None):
+    """Move loop-invariant computations to loop preheaders.
+
+    When ``pressure_budget`` is provided, each loop rewrite is transactional:
+    retain it unless it both raises peak liveness and leaves that peak above
+    the target register budget. This prevents an invariant saved once per
+    iteration from creating still more spill work around the loop.
+    """
     changed = False
     # Loop headers already tried and found unhoistable this call, identified by
     # the header block's first instruction (stable across block-shape-shifting
@@ -115,6 +122,13 @@ def hoist_loop_invariants(function):
             skip_headers.add(header_key)
             continue
 
+        pressure_before = (
+            peak_live_values(function) if pressure_budget is not None else None
+        )
+        original_instructions = (
+            [(block, list(block.instructions)) for block in function.blocks]
+            if pressure_budget is not None else None
+        )
         hoisted_ids = set(hoisted_ids)
         preheader = preheader_predecessors[0]
         # Keep the block graph intact.  Flattening through
@@ -141,6 +155,14 @@ def hoist_loop_invariants(function):
         if last is not None and last.op in TERMINATORS:
             insert_at -= 1
         preheader_block.instructions[insert_at:insert_at] = preamble
+        if (
+            pressure_budget is not None
+            and peak_live_values(function) > max(pressure_before, pressure_budget)
+        ):
+            for block, instructions in original_instructions:
+                block.instructions = instructions
+            skip_headers.add(header_key)
+            continue
         changed = True
         # Loop back to the top of the while: cfg/dominators/loops are rebuilt
         # fresh against the rewritten instructions before the next pick.

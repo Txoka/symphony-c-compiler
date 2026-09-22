@@ -128,6 +128,14 @@ inline_single_call_functions = _optional_optimization(
 )
 
 
+def _licm_pressure_budget():
+    return (
+        optimization_enabled("loop_register_budget")
+        if optimization_enabled("pressure_aware_licm")
+        else None
+    )
+
+
 def _optimize_loops_to_fixed_point(function):
     """Repeat mutually enabling scalar and loop simplifications."""
     if not optimization_enabled("loop_optimization_fixed_point"):
@@ -143,7 +151,10 @@ def _optimize_loops_to_fixed_point(function):
         changed |= remove_dead_values(function)
         changed |= simplify_control_flow(function)
         # Loop transforms can in turn expose constants, dead phis, and CFG.
-        changed |= hoist_loop_invariants(function)
+        changed |= hoist_loop_invariants(
+            function,
+            pressure_budget=_licm_pressure_budget(),
+        )
         changed |= reduce_induction_strength(function)
         changed |= reduce_scaled_induction_strength(function)
         changed |= convert_pointer_limit_loops(function)
@@ -206,7 +217,9 @@ class Compiler:
             verify(function)
             reduce_strength(function)
             verify(function)
-            hoist_loop_invariants(function)
+            hoist_loop_invariants(
+                function, pressure_budget=_licm_pressure_budget()
+            )
             verify(function)
             reduce_induction_strength(function)
             verify(function)
