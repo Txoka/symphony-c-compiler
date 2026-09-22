@@ -134,9 +134,11 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   it false enables bounded speed-over-size experiments independently of the
   `known_trip_full_unrolling` pass toggle. A two-iteration input/output loop
   falls from 60 bytes/29 steps to 48/11. On `primes`, the guarded form reduces
-  2,032 bytes/2,397,784 steps to 2,008/2,388,532. Add internal conditional,
-  `break`, and multiple-continue support only with explicit exit-value
-  reconstruction.
+  2,032 bytes/2,397,784 steps to 2,008/2,388,532. Statically decidable internal
+  conditionals and continue paths are now traced per iteration while retaining
+  the executed side effects; the focused conditional loop falls from 84
+  bytes/95 steps to 48/21. Data-dependent conditional CFG cloning, `break`,
+  multiple exits, and general exit-value reconstruction remain.
 - [x] **Bounded constant loop-region evaluation (initial form).** Fully known,
   side-effect-free natural loops are interpreted independently of their
   surrounding function, including reads from closed-world immutable globals.

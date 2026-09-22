@@ -1331,6 +1331,34 @@ class EncodingTests(unittest.TestCase):
         self.assertGreater(len(speed.image.binary), len(guarded.image.binary))
         self.assertLess(execute(speed)[2], execute(guarded)[2])
 
+    def test_known_trip_unrolling_traces_conditional_loop_body(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int i=0;while(i<4){i++;"
+            "if(i&1)output(input()+i);}return i;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(10, 20, 30, 40))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(looped)[:2], (4, [11, 23]))
+        self.assertEqual(execute(unrolled)[:2], execute(looped)[:2])
+        self.assertLess(execute(unrolled)[2], execute(looped)[2])
+        self.assertLess(len(unrolled.image.binary), len(looped.image.binary))
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

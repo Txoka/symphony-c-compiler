@@ -11,7 +11,7 @@ UNKNOWN = object()
 
 
 def unroll_known_trip_loops(function, iteration_limit=4):
-    """Fully unroll linear canonical loops with at most ``iteration_limit`` trips."""
+    """Fully unroll statically traced loops with at most ``iteration_limit`` trips."""
     changed = False
     while _unroll_one(function, iteration_limit):
         changed = True
@@ -37,9 +37,7 @@ def _unroll_one(function, iteration_limit):
     }
 
     for loop in loops:
-        if len(loop.back_edges) != 1:
-            continue
-        latch, header_label = next(iter(loop.back_edges))
+        header_label = loop.header
         header = cfg.by_label[header_label]
         outside = [value for value in header.predecessors if value not in loop.blocks]
         exits = {
@@ -55,18 +53,18 @@ def _unroll_one(function, iteration_limit):
         if len(preheader_block.successors) != 1 or header_label not in preheader_block.successors:
             continue
         phis = [item for item in header.instructions if item.op == "phi"]
-        header_other = [
-            item for item in header.instructions if item.op not in ("label", "phi")
-        ]
-        if (
-            not phis
-            or len(header_other) != 1
-            or header_other[0].op not in ("branch_if", "cbranch_if")
-            or any(set(source for source, _ in phi.extra) != {preheader, latch} for phi in phis)
+        if not phis or any(
+            set(source for source, _ in phi.extra) != set(header.predecessors)
+            for phi in phis
         ):
             continue
-        body = _linear_body(cfg, loop, header_label, exit_label)
-        if body is None or not body or body[-1] != latch:
+        if any(
+            item.op not in (
+                "label", "phi", "const", "copy", "cast", "unary", "binary",
+                "branch_if", "cbranch_if", "jump",
+            )
+            for item in header.instructions
+        ):
             continue
         loop_definitions = {
             item.dst
@@ -83,22 +81,30 @@ def _unroll_one(function, iteration_limit):
             for value in item.args
         ):
             continue
-        trip_count = _trip_count(
-            cfg, loop, phis, preheader, body, definitions, def_block, iteration_limit
+        traces = _iteration_traces(
+            cfg, loop, phis, preheader, definitions, def_block, iteration_limit
         )
-        if trip_count is None:
+        if traces is None:
             continue
 
         current = {phi.dst: dict(phi.extra)[preheader] for phi in phis}
         final_map = dict(current)
         expanded = []
-        for _ in range(trip_count):
+        for trace in traces:
             iteration = dict(current)
-            for label in body:
+            predecessor = header_label
+            for label in trace:
                 for item in cfg.by_label[label].instructions:
                     if item.op == "label" or item is cfg.by_label[label].terminator():
                         continue
-                    if item.op == "phi" or item.op in ("branch_if", "cbranch_if", "jump", "return"):
+                    if item.op == "phi":
+                        incoming = dict(item.extra).get(predecessor)
+                        if incoming is None:
+                            expanded = None
+                            break
+                        iteration[item.dst] = iteration.get(incoming, incoming)
+                        continue
+                    if item.op in ("branch_if", "cbranch_if", "jump", "return"):
                         expanded = None
                         break
                     args = tuple(iteration.get(value, value) for value in item.args)
@@ -112,10 +118,13 @@ def _unroll_one(function, iteration_limit):
                     )
                 if expanded is None:
                     break
+                predecessor = label
             if expanded is None:
                 break
             current = {
-                phi.dst: iteration.get(dict(phi.extra)[latch], dict(phi.extra)[latch])
+                phi.dst: iteration.get(
+                    dict(phi.extra)[trace[-1]], dict(phi.extra)[trace[-1]]
+                )
                 for phi in phis
             }
             final_map = {**iteration, **current}
@@ -156,25 +165,7 @@ def _unroll_one(function, iteration_limit):
     return False
 
 
-def _linear_body(cfg, loop, header, exit_label):
-    starts = [value for value in cfg.by_label[header].successors if value != exit_label]
-    if len(starts) != 1:
-        return None
-    result, seen = [], {header}
-    label = starts[0]
-    while label != header:
-        if label in seen or label not in loop.blocks:
-            return None
-        seen.add(label)
-        result.append(label)
-        block = cfg.by_label[label]
-        if len(block.successors) != 1:
-            return None
-        label = block.successors[0]
-    return result if seen == loop.blocks else None
-
-
-def _trip_count(cfg, loop, phis, preheader, body, definitions, def_block, limit):
+def _iteration_traces(cfg, loop, phis, preheader, definitions, def_block, limit):
     cache = {}
 
     def constant(value, visiting=None):
@@ -215,61 +206,94 @@ def _trip_count(cfg, loop, phis, preheader, body, definitions, def_block, limit)
     for phi in phis:
         incoming = dict(phi.extra)[preheader]
         values[phi.dst] = values.get(incoming, constant(incoming))
-    condition = next(
-        item for item in cfg.by_label[loop.header].instructions
-        if item.op in ("branch_if", "cbranch_if")
-    )
-    target = cfg.label_blocks.get(condition.extra[1], condition.extra[1])
-
-    for count in range(limit + 1):
-        if condition.op == "branch_if":
-            value = values.get(condition.args[0], UNKNOWN)
-            if value is UNKNOWN:
-                return None
-            take_target = bool(value) == condition.extra[0]
+    traces = []
+    predecessor, label = preheader, loop.header
+    trace = []
+    steps = 0
+    while steps < 1024:
+        block = cfg.by_label[label]
+        if label == loop.header:
+            if predecessor in loop.blocks:
+                traces.append(trace)
+                if len(traces) > limit:
+                    return None
+                trace = []
         else:
-            left, right = (values.get(value, UNKNOWN) for value in condition.args)
-            if left is UNKNOWN or right is UNKNOWN:
+            trace.append(label)
+
+        incoming_values = {}
+        for item in block.instructions:
+            if item.op != "phi":
+                continue
+            incoming = dict(item.extra).get(predecessor)
+            if incoming is None:
                 return None
-            folded = _safe_binary(condition.extra[0], left, right, condition.type)
-            if folded is None:
-                return None
-            take_target = bool(folded)
-        chosen = target if take_target else next(
-            value for value in cfg.by_label[loop.header].successors if value != target
-        )
-        if chosen not in loop.blocks:
-            return count
-        if count == limit:
-            return None
-        for label in body:
-            for item in cfg.by_label[label].instructions:
-                if item.op in ("label", "jump"):
-                    continue
-                if item.dst is None:
-                    continue
-                result = UNKNOWN
-                if item.op == "const":
-                    result = _normalize(item.extra, item.type)
-                elif item.op in ("copy", "cast"):
-                    result = values.get(item.args[0], UNKNOWN)
-                    if result is not UNKNOWN:
-                        result = _normalize(result, item.type)
-                elif item.op == "unary":
-                    operand = values.get(item.args[0], UNKNOWN)
-                    if operand is not UNKNOWN:
-                        folded = _fold_unary(item.extra, operand, item.type)
-                        result = UNKNOWN if folded is None else folded
-                elif item.op == "binary":
+            incoming_values[item.dst] = values.get(incoming, UNKNOWN)
+        values.update(incoming_values)
+
+        transferred = False
+        for item in block.instructions:
+            if item.op in ("label", "phi"):
+                continue
+            steps += 1
+            if item.op == "const":
+                values[item.dst] = _normalize(item.extra, item.type)
+            elif item.op in ("copy", "cast"):
+                result = values.get(item.args[0], UNKNOWN)
+                values[item.dst] = (
+                    _normalize(result, item.type) if result is not UNKNOWN else UNKNOWN
+                )
+            elif item.op == "unary":
+                operand = values.get(item.args[0], UNKNOWN)
+                folded = None if operand is UNKNOWN else _fold_unary(
+                    item.extra, operand, item.type
+                )
+                values[item.dst] = UNKNOWN if folded is None else folded
+            elif item.op == "binary":
+                left, right = (values.get(value, UNKNOWN) for value in item.args)
+                folded = None if UNKNOWN in (left, right) else _safe_binary(
+                    item.extra, left, right, item.type
+                )
+                values[item.dst] = UNKNOWN if folded is None else folded
+            elif item.op == "jump":
+                next_label = cfg.label_blocks.get(item.extra, item.extra)
+                predecessor, label = label, next_label
+                transferred = True
+                break
+            elif item.op in ("branch_if", "cbranch_if"):
+                if item.op == "branch_if":
+                    value = values.get(item.args[0], UNKNOWN)
+                    if value is UNKNOWN:
+                        return None
+                    take_target = bool(value) == item.extra[0]
+                else:
                     left, right = (values.get(value, UNKNOWN) for value in item.args)
-                    if left is not UNKNOWN and right is not UNKNOWN:
-                        folded = _safe_binary(item.extra, left, right, item.type)
-                        result = UNKNOWN if folded is None else folded
-                values[item.dst] = result
-        updates = {
-            phi.dst: values.get(dict(phi.extra)[body[-1]], UNKNOWN) for phi in phis
-        }
-        values.update(updates)
+                    if UNKNOWN in (left, right):
+                        return None
+                    folded = _safe_binary(item.extra[0], left, right, item.type)
+                    if folded is None:
+                        return None
+                    take_target = bool(folded)
+                target = cfg.label_blocks.get(item.extra[1], item.extra[1])
+                alternatives = [value for value in block.successors if value != target]
+                if not take_target and len(alternatives) != 1:
+                    return None
+                next_label = target if take_target else alternatives[0]
+                if next_label not in loop.blocks:
+                    return traces if not trace else None
+                predecessor, label = label, next_label
+                transferred = True
+                break
+            elif item.dst is not None:
+                values[item.dst] = UNKNOWN
+        if transferred:
+            continue
+        if len(block.successors) != 1:
+            return None
+        next_label = block.successors[0]
+        if next_label not in loop.blocks:
+            return traces if not trace else None
+        predecessor, label = label, next_label
     return None
 
 
