@@ -22,6 +22,7 @@ from .middle.ssa import (
     fuse_comparison_zero_tests,
     pair_unsigned_divmod,
     eliminate_common_expressions,
+    evaluate_constant_calls,
     reduce_strength,
     identify_direct_calls,
     promote_readonly_parameters,
@@ -89,6 +90,9 @@ eliminate_tail_calls = _optional_optimization(
 )
 lower_self_reductions_to_loops = _optional_optimization(
     "self_reduction_loop_lowering", lower_self_reductions_to_loops
+)
+evaluate_constant_calls = _optional_optimization(
+    "bounded_constant_call_evaluation", evaluate_constant_calls
 )
 lower_self_tail_calls_to_loops = _optional_optimization(
     "self_tail_loop_lowering", lower_self_tail_calls_to_loops
@@ -179,6 +183,22 @@ class Compiler:
             verify(function)
             simplify_control_flow(function)
             verify(function)
+        # Expose read-only arguments as scalar SSA inputs so the evaluator can
+        # handle ordinary pure loops as well as canonicalized recurrences.
+        for function in ir.functions:
+            promote_readonly_parameters(function)
+            verify(function)
+        # Evaluate small pure calls while arithmetic is still represented as
+        # scalar SSA; legalization below would otherwise turn it into runtime
+        # calls that deliberately stop the evaluator.
+        if evaluate_constant_calls(ir):
+            for function in ir.functions:
+                sparse_conditional_constant_propagation(function)
+                verify(function)
+                remove_dead_values(function)
+                verify(function)
+                simplify_control_flow(function)
+                verify(function)
         # Make surviving runtime arithmetic ordinary call edges after scalar
         # folding but before call-graph optimization, so wrapper helpers can
         # participate in inlining and reachability.

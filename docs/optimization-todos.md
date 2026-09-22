@@ -122,11 +122,15 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   only while retaining source evaluation order and rejecting escaping frame
   addresses, multiple recursive calls, or observable post-combine work. Keep
   this distinct from ordinary tail-recursion lowering.
-- [ ] **Bounded constant-call evaluation after loop canonicalization.** Once a
-  recursive reduction or small loop is represented canonically, evaluate calls
-  with constant arguments within explicit instruction/recursion limits. This
-  should allow `factorial(5)` to become `120`, matching GCC `-O2`, without a
-  factorial-specific fold.
+- [x] **Bounded constant-call evaluation after loop canonicalization (scalar
+  initial form).** Side-effect-free scalar SSA functions with constant
+  arguments are interpreted under a 1,024-instruction limit, including loops
+  and branches; memory, nested calls, target operations, undefined arithmetic,
+  and observable effects reject evaluation. This folds `demo.c`'s canonical
+  `factorial(5)` without naming factorial, reducing the current image from
+  1,820 bytes/4,165 steps to 1,632/3,812. A general sum-of-squares loop
+  regression falls from 216/753 to 8/1. Add bounded private memory and nested
+  pure calls only with explicit depth and memory limits.
 - [ ] **General single-recursion recurrence analysis.** Classify one-recursive-
   call functions beyond associative reductions. Affine forms such as
   `element - recurse(next)` may be lowered only with a proven equivalent state

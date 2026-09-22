@@ -25,6 +25,7 @@ OPTIMIZATIONS = {
     "readonly_parameter_promotion": True,
     "tail_call_elimination": True,
     "self_reduction_loop_lowering": True,
+    "bounded_constant_call_evaluation": True,
     "self_tail_loop_lowering": True,
     "unreachable_symbol_elimination": True,
     "immutable_global_folding": True,

@@ -1211,6 +1211,41 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(optimized_result[2], baseline_result[2])
         self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
 
+    def test_bounded_constant_call_evaluates_general_pure_loop(self):
+        source = (
+            "int sum_squares(int n){int total=0;"
+            "for(int i=0;i<n;i++)total+=i*i;return total;}"
+            "int main(void){return sum_squares(9);}"
+        )
+        old = OPTIMIZATIONS["bounded_constant_call_evaluation"]
+        try:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = False
+            runtime_loop = _compile_source(source, target=Target())
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = True
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            return machine.run(result.image.symbols["_halt"]), machine.steps
+
+        self.assertEqual(execute(runtime_loop)[0], 204)
+        self.assertEqual(execute(evaluated)[0], 204)
+        self.assertLess(execute(evaluated)[1], execute(runtime_loop)[1])
+        self.assertLess(len(evaluated.image.binary), len(runtime_loop.image.binary))
+
+    def test_bounded_constant_call_rejects_observable_function(self):
+        result = _compile_source(
+            "#include <symphony.h>\n"
+            "int noisy(int x){output(x);return x+1;}"
+            "int main(void){return noisy(4);}",
+            target=Target(),
+        )
+        machine = Machine(result.image.binary)
+        self.assertEqual(machine.run(result.image.symbols["_halt"]), 5)
+        self.assertEqual(machine.outputs, [4])
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)
@@ -1345,13 +1380,20 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 42)
 
     def test_promoted_parameters_are_permuted_safely_for_tailcalls(self):
-        result = compile_source(
-            "int pair(int a,int b){return a*100+b;} "
-            "int flip(int a,int b){return pair(b,a);} "
-            "int other(void){return pair(8,9);}"
-            "int (*keep)(int,int)=flip; "
-            "int main(void){return input()?keep(1,2):other();}"
-        )
+        old = OPTIMIZATIONS["bounded_constant_call_evaluation"]
+        try:
+            # Keep pair's second call site alive so this specifically tests
+            # tail-call argument permutation rather than constant evaluation.
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = False
+            result = compile_source(
+                "int pair(int a,int b){return a*100+b;} "
+                "int flip(int a,int b){return pair(b,a);} "
+                "int other(void){return pair(8,9);}"
+                "int (*keep)(int,int)=flip; "
+                "int main(void){return input()?keep(1,2):other();}"
+            )
+        finally:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = old
         self.assertIn("direct_tailcall", result.ir.dump())
         for value, expected in ((0, 809), (1, 201)):
             with self.subTest(input=value):
