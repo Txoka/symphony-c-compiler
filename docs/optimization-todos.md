@@ -35,13 +35,25 @@ unrolling, MemorySSA-backed cross-block forwarding, and bulk fill/copy recogniti
 
 ## Goal for the next branch
 
-Move from loop shape discovery to allocation/code-generation quality: retain SSA
-identity through allocation, compute CFG liveness and interference, weight spills
-by loop depth/use frequency, keep loop-carried cursors/bounds in callee-saved
-registers, reuse noninterfering stack slots, and then remove redundant physical
-moves/spills with a post-allocation peephole pass. Every sub-change remains
-independently toggleable and must run both ISA suites, both selfhost suites, and
-the complete before/after/fresh-GCC example benchmark.
+Create `opt/gcc-hot-loop-codegen`. Its sole optimization goal is to close the
+freshly remeasured GCC runtime gap on `bigprime.c`, `pi.c`, `insertion_sort.c`,
+and `dynamic_sensor_report.c`. Follow the evidence, priorities, experiments,
+and acceptance rules in [the hot-loop differential](gcc-hot-loop-gap-report.md).
+
+All branch measurements must use `--bss=assume-zeroed` for dyncc and exclude
+GCC's virtual/trailing BSS reservation from file size. Static BSS clear time is
+not an optimization target: explicitly serialized zeroes or a loader-zeroed
+contract are acceptable deployment choices. Runtime `memset`, `calloc`, and
+scratch-array initialization are still real program work and remain counted.
+
+CFG liveness, interference, and copy coalescing are already implemented; do not
+restart that completed foundation. Improve it with loop-frequency weighting,
+more usable volatile registers, spill-slot reuse, and direct allocated-operand
+emission. Then address Boolean/short-circuit materialization, costed pointer
+recurrences, post-allocation cleanup, and runtime memory loops in the report's
+measured order. Every sub-change remains independently toggleable and must run
+both ISA suites, both selfhost suites, the complete maintained example set, and
+a fresh GCC comparison.
 
 ## Current priorities
 
@@ -73,19 +85,20 @@ Completed foundations:
 ## Benchmark-derived performance priorities
 
 The maintained native-emulator comparison in `docs/example-benchmarks.md`
-shows that the completed SSA pipeline is consistently smaller than GCC and
-already wins several large workloads, but GCC still wins cycles in particular
-on `pi`, `primes`, `insertion_sort`, `dynamic_sensor_report`, and small
-runtime-heavy programs. The remaining gap is primarily code generation and
-loop quality, not another local constant-folding rule.
+shows that the completed SSA pipeline is usually smaller than GCC. The next
+branch deliberately prioritizes the four largest requested runtime gaps:
+`bigprime`, `pi`, `insertion_sort`, and `dynamic_sensor_report`. The current
+machine-code evidence and exact baseline are in
+`docs/gcc-hot-loop-gap-report.md`; that report supersedes older guesses here.
 
 Implement the following in this order, measuring native termination steps and
 preserving the full suite after each atomic change:
 
-1. [ ] **SSA liveness and allocation (next branch).** Retain SSA value identity through
-   allocation; compute block liveness/live intervals or interference; make
-   loop-depth/use-frequency spill decisions; keep loop-carried pointers,
-   bounds, and invariant results in callee-saved registers across calls.
+1. [ ] **Hot-loop allocation/codegen (next branch).** Existing CFG liveness,
+   interference, and copy coalescing are foundations, not missing work. Add
+   loop-depth/use-frequency costs, broader safe use of volatile registers,
+   spill-slot reuse, and direct allocated-operand emission; then remove the
+   remaining physical moves/spills with a target peephole pass.
 2. [x] **Conservative expensive-expression CSE (initial form).** Reuse
    dominated repeated multiply/divide/remainder expressions. On `primes`,
    this removes the second `i * i`, reducing 2,140 to 2,064 bytes and
@@ -204,12 +217,13 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
 - [x] **Bounded constant-call evaluation after loop canonicalization (scalar
   initial form).** Side-effect-free scalar SSA functions with constant
   arguments are interpreted under a 1,024-instruction limit, including loops
-  and branches; memory, nested calls, target operations, undefined arithmetic,
-  and observable effects reject evaluation. This folds `demo.c`'s canonical
+  and branches. Nested pure direct-call towers share the same configurable
+  instruction budget and reject recursive cycles; memory, target operations,
+  undefined arithmetic, and observable effects reject evaluation. This folds `demo.c`'s canonical
   `factorial(5)` without naming factorial, reducing the current image from
   1,820 bytes/4,165 steps to 1,632/3,812. A general sum-of-squares loop
-  regression falls from 216/753 to 8/1. Add bounded private memory and nested
-  pure calls only with explicit depth and memory limits.
+  regression falls from 216/753 to 8/1. Bounded private evaluator memory remains
+  future work.
 - [ ] **General single-recursion recurrence analysis.** Classify one-recursive-
   call functions beyond associative reductions. Affine forms such as
   `element - recurse(next)` may be lowered only with a proven equivalent state
@@ -237,19 +251,14 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   dead-storage/evaluator item for fully known local-object programs.
   GCC reduces `arena_allocator.c`'s `main` to `mov r1, 1`; scc must
   prove the local writes and copies unobservable before doing the same.
-- [ ] **SSA-aware liveness/allocation.** Retain its existing priority after
-  the loop transformations above expose durable pointer and bound values.
-  Prefer keeping those values in registers over allocating stack homes around
-  calls.
-- [ ] **Comparison measurement hygiene.** Report GCC source text, data, and
-  BSS separately from its linked raw image.  The current GCC linker serializes
-  BSS zeroes, producing 7.25 MiB for `hypercube.c` and 586 KiB for
-  `render.c`; this is a toolchain-image policy difference, not code size or
-  an optimization regression in scc.  Keep scc's compact BSS-clear strategy
-  as the baseline unless a loader/BSS contract is introduced deliberately.
-  Also report startup separately for text-screen programs: `demo.c` spends
-  2,288 instructions clearing its compact 3,840-byte framebuffer BSS, whereas
-  the current GCC image serializes those zero bytes and starts at `main`.
+- [ ] **Improve SSA-aware allocation.** CFG liveness, interference, and copy
+  coalescing are implemented. Add hot-loop weighting, more usable volatile
+  homes, spill-slot reuse, and direct allocated-operand emission as specified
+  in the next-branch differential report.
+- [x] **Comparison measurement hygiene.** The maintained harness now uses
+  loader-zeroed BSS for dyncc, counts only GCC text plus initialized data, and
+  excludes static BSS startup from step counts. Runtime zeroing requested by
+  the source remains counted.
 
 GCC is not uniformly better: scc's single-site inlining and self-tail-loop
 lowering make `towers_of_hanoi.c` substantially smaller and faster.  Preserve
@@ -276,8 +285,9 @@ Remaining work, in dependency and payoff order:
    transformation. First extend them to conditional multi-block bodies,
    multiple backedges/continues, breaks, multiple exits, and escaping values;
    retain the existing pass toggles and no-code-growth policy toggle.
-2. [ ] Extend bounded evaluation with private local memory and nested pure calls.
-   Keep explicit instruction, recursion-depth, iteration, and memory limits;
+2. [ ] Extend bounded evaluation with private local memory. Nested pure direct
+   calls already share the configurable instruction budget. Keep explicit
+   instruction, recursion-cycle, iteration, and memory limits;
    reject device operations, volatile access, unknown calls, undefined operations,
    and writes outside private evaluator state. Immutable global-byte reads and
    scalar call/loop evaluation are already implemented.
@@ -300,8 +310,9 @@ Remaining work, in dependency and payoff order:
 6. [ ] Extend the implemented dominator-based value numbering beyond expensive
    arithmetic, using pressure-aware profitability for cheap/address expressions
    and conservative alias invalidation for loads.
-7. [ ] Add block liveness and interference-based register/stack-slot reuse, followed
-   by loop-depth spill costs and better caller-saved allocation.
+7. [ ] Extend the existing block liveness/interference allocator with
+   register/stack-slot reuse, loop-depth spill costs, and broader caller-saved
+   allocation as specified in the next-branch report.
 8. [ ] Add the small post-allocation peephole pass and iterate it with branch/call
    relaxation. It should only remove artifacts requiring physical-register knowledge.
 9. [ ] Add non-tail recursive fallthrough-call layout for a recursive function
