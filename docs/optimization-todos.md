@@ -137,8 +137,11 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   2,032 bytes/2,397,784 steps to 2,008/2,388,532. Statically decidable internal
   conditionals and continue paths are now traced per iteration while retaining
   the executed side effects; the focused conditional loop falls from 84
-  bytes/95 steps to 48/21. Data-dependent conditional CFG cloning, `break`,
-  multiple exits, and general exit-value reconstruction remain.
+  bytes/95 steps to 48/21. Statically decidable `break` paths may select among
+  multiple exits and reconstruct live-out values from the executed path; the
+  focused break/live-out regression falls from 96 bytes/68 steps to 48/21.
+  Data-dependent conditional CFG cloning and general multi-path LCSSA-style
+  exit reconstruction remain.
 - [x] **Bounded constant loop-region evaluation (initial form).** Fully known,
   side-effect-free natural loops are interpreted independently of their
   surrounding function, including reads from closed-world immutable globals.

@@ -46,9 +46,9 @@ def _unroll_one(function, iteration_limit):
             for successor in cfg.by_label[label].successors
             if successor not in loop.blocks
         }
-        if len(outside) != 1 or len(exits) != 1:
+        if len(outside) != 1 or not exits:
             continue
-        preheader, exit_label = outside[0], next(iter(exits))
+        preheader = outside[0]
         preheader_block = cfg.by_label[preheader]
         if len(preheader_block.successors) != 1 or header_label not in preheader_block.successors:
             continue
@@ -66,26 +66,12 @@ def _unroll_one(function, iteration_limit):
             for item in header.instructions
         ):
             continue
-        loop_definitions = {
-            item.dst
-            for label in loop.blocks
-            for item in cfg.by_label[label].instructions
-            if item.dst is not None
-        }
-        non_phi = loop_definitions - {phi.dst for phi in phis}
-        if any(
-            value in non_phi
-            for block in cfg.blocks
-            if block.label not in loop.blocks
-            for item in block.instructions
-            for value in item.args
-        ):
-            continue
-        traces = _iteration_traces(
+        trace_result = _iteration_traces(
             cfg, loop, phis, preheader, definitions, def_block, iteration_limit
         )
-        if traces is None:
+        if trace_result is None:
             continue
+        traces, exit_trace, exit_source, exit_label = trace_result
 
         current = {phi.dst: dict(phi.extra)[preheader] for phi in phis}
         final_map = dict(current)
@@ -131,6 +117,38 @@ def _unroll_one(function, iteration_limit):
         if expanded is None:
             continue
 
+        iteration = dict(current)
+        predecessor = header_label
+        for label in exit_trace:
+            for item in cfg.by_label[label].instructions:
+                if item.op == "label" or item is cfg.by_label[label].terminator():
+                    continue
+                if item.op == "phi":
+                    incoming = dict(item.extra).get(predecessor)
+                    if incoming is None:
+                        expanded = None
+                        break
+                    iteration[item.dst] = iteration.get(incoming, incoming)
+                    continue
+                if item.op in ("branch_if", "cbranch_if", "jump", "return"):
+                    expanded = None
+                    break
+                args = tuple(iteration.get(value, value) for value in item.args)
+                destination = item.dst
+                if destination is not None:
+                    destination = function.values
+                    function.values += 1
+                    iteration[item.dst] = destination
+                expanded.append(
+                    Instruction(item.op, destination, args, item.type, item.extra)
+                )
+            if expanded is None:
+                break
+            predecessor = label
+        if expanded is None:
+            continue
+        final_map = {**final_map, **iteration}
+
         if preheader_block.terminator() is not None:
             terminator = preheader_block.instructions[-1]
             if terminator.op != "jump" or cfg.label_blocks.get(
@@ -148,15 +166,23 @@ def _unroll_one(function, iteration_limit):
                 continue
             items = []
             for item in block.instructions:
-                args = tuple(replacements.get(value, value) for value in item.args)
+                args = tuple(
+                    replacements.get(value, final_map.get(value, value))
+                    for value in item.args
+                )
                 extra = item.extra
                 if item.op == "phi":
                     extra = tuple(
+                        (source, value)
+                        for source, value in item.extra
+                        if source not in loop.blocks
+                    ) + tuple(
                         (
-                            preheader if source in loop.blocks else source,
+                            preheader,
                             replacements.get(value, final_map.get(value, value)),
                         )
                         for source, value in item.extra
+                        if source == exit_source
                     )
                 items.append(Instruction(item.op, item.dst, args, item.type, extra))
             surviving.append(BasicBlock(block.label, items))
@@ -280,7 +306,7 @@ def _iteration_traces(cfg, loop, phis, preheader, definitions, def_block, limit)
                     return None
                 next_label = target if take_target else alternatives[0]
                 if next_label not in loop.blocks:
-                    return traces if not trace else None
+                    return traces, trace, label, next_label
                 predecessor, label = label, next_label
                 transferred = True
                 break
@@ -292,7 +318,7 @@ def _iteration_traces(cfg, loop, phis, preheader, definitions, def_block, limit)
             return None
         next_label = block.successors[0]
         if next_label not in loop.blocks:
-            return traces if not trace else None
+            return traces, trace, label, next_label
         predecessor, label = label, next_label
     return None
 
