@@ -106,6 +106,12 @@ preserving the full suite after each atomic change:
    specialization and multi-site inlining only under an explicit size/cycle
    profitability policy, after the preceding foundations expose their gains.
 
+Bounded constant-call evaluation already handles transitive pure call towers:
+all nested direct calls share the caller's instruction budget, recursive cycles
+and observable operations reject evaluation, and folding runs before call-graph
+cleanup and inlining. Consequently, removing a constant tower can make another
+callee single-use and immediately expose it to the existing bottom-up inliner.
+
 ## GCC differential review (2026-09)
 
 The real same-ISA GCC backend was used to compile every checked-in example at

@@ -10,9 +10,10 @@ from .sccp import _fold_binary, _fold_unary, _normalize
 def evaluate_constant_calls(module, instruction_limit=1024):
     """Replace provably evaluable direct calls with typed constants.
 
-    This deliberately starts with scalar SSA only: memory, nested calls, and
-    target/runtime operations reject evaluation.  The instruction budget makes
-    loops safe to attempt without requiring a separate trip-count proof.
+    This deliberately starts with scalar SSA only: memory and target/runtime
+    operations reject evaluation. Direct call towers share one instruction
+    budget, and recursive cycles are rejected. The budget makes loops safe to
+    attempt without requiring a separate trip-count proof.
     """
     functions = {function.name: function for function in module.functions}
     changed = False
@@ -39,7 +40,9 @@ def evaluate_constant_calls(module, instruction_limit=1024):
                         result = _evaluate(
                             functions[item.extra],
                             tuple(value.extra for value in arguments),
-                            instruction_limit,
+                            functions,
+                            [instruction_limit],
+                            set(),
                         )
                         if result is not None:
                             replacement = Instruction(
@@ -344,21 +347,22 @@ def _region_binary(operator, left, right, type_):
     return _safe_binary(operator, left, right, type_)
 
 
-def _evaluate(function, arguments, instruction_limit):
+def _evaluate(function, arguments, functions, budget, active):
     if len(arguments) != len(function.params):
+        return None
+    if function.name in active:
         return None
     cfg = build_cfg(function)
     if not cfg.blocks:
         return None
+    active = active | {function.name}
     parameters = {
         parameter.key: value for parameter, value in zip(function.params, arguments)
     }
     values = {}
     label = cfg.blocks[0].label
     predecessor = None
-    steps = 0
-
-    while steps < instruction_limit:
+    while budget[0] > 0:
         block = cfg.by_label[label]
         phi_values = {}
         for item in block.instructions:
@@ -377,8 +381,8 @@ def _evaluate(function, arguments, instruction_limit):
         for item in block.instructions:
             if item.op in ("label", "phi"):
                 continue
-            steps += 1
-            if steps > instruction_limit:
+            budget[0] -= 1
+            if budget[0] < 0:
                 return None
             if item.op == "param":
                 if item.extra[1] not in parameters:
@@ -414,6 +418,27 @@ def _evaluate(function, arguments, instruction_limit):
                 if result is None:
                     return None
                 values[item.dst] = result
+            elif item.op == "direct_call":
+                if (
+                    item.dst is None
+                    or item.type.kind == "void"
+                    or item.extra not in functions
+                    or any(
+                        value not in values or not isinstance(values[value], int)
+                        for value in item.args
+                    )
+                ):
+                    return None
+                result = _evaluate(
+                    functions[item.extra],
+                    tuple(values[value] for value in item.args),
+                    functions,
+                    budget,
+                    active,
+                )
+                if result is None:
+                    return None
+                values[item.dst] = _normalize(result, item.type)
             elif item.op == "return":
                 if len(item.args) != 1 or item.args[0] not in values:
                     return None

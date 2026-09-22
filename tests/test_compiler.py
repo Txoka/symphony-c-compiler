@@ -1256,6 +1256,34 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 5)
         self.assertEqual(machine.outputs, [4])
 
+    def test_bounded_constant_call_evaluates_tower_before_inlining(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int leaf(int x){return x+1;}"
+            "int middle(int x){return leaf(x)+2;}"
+            "int runtime(int x){return leaf(x)+4;}"
+            "int main(void){return middle(5)+runtime(input());}"
+        )
+        old = OPTIMIZATIONS["bounded_constant_call_evaluation"]
+        try:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = False
+            unfolded = _compile_source(source, target=Target())
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = True
+            folded = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = old
+
+        measurements = []
+        for result in (unfolded, folded):
+            machine = Machine(result.image.binary, inputs=(10,))
+            returned = machine.run(result.image.symbols["_halt"])
+            self.assertEqual(returned, 23)
+            measurements.append(machine.steps)
+        self.assertIn("direct_call", unfolded.ir.dump())
+        self.assertNotIn("direct_call", folded.ir.dump())
+        self.assertLess(len(folded.image.binary), len(unfolded.image.binary))
+        self.assertLess(measurements[1], measurements[0])
+
     def test_constant_loop_evaluation_improves_demo_array_sum(self):
         source = (ROOT / "examples" / "demo.c").read_text()
         old = OPTIMIZATIONS["constant_loop_evaluation"]
