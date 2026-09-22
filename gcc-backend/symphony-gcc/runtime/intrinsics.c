@@ -58,6 +58,16 @@ unsigned int time(void) {
     return time_low();
 }
 
+unsigned int persistent_load(unsigned int address) {
+    unsigned int value;
+    __asm__ volatile ("persistent_load\t%0, %1" : "=r"(value) : "r"(address));
+    return value;
+}
+
+void persistent_store(unsigned int address, unsigned int value) {
+    __asm__ volatile ("persistent_store\t%0, %1" : : "r"(address), "r"(value));
+}
+
 /* Minimal atexit(): a real `int main(void){...}` function compiled by
    this GCC port ALWAYS gets an implicit `link_call __main` inserted at
    entry by expand_main_function (GCC's generic behaviour, not something

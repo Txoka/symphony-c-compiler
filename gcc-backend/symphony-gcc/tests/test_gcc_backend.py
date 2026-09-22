@@ -40,6 +40,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from toolchain import CompileError, Toolchain, ToolchainNotBuilt, screen_text, toolchain_prefix  # noqa: E402
+from symphony.emulator import Machine  # noqa: E402
 
 
 pytestmark = pytest.mark.skipif(
@@ -151,6 +152,25 @@ class TestLibgccArithmetic:
 # ---------------------------------------------------------------------
 
 class TestRuntimeLibc:
+    def test_persistent_memory_intrinsics(self, toolchain, tmp_path):
+        src = """
+        #include <symphony.h>
+        int main(void) {
+            persistent_store(12, 0x12345678u);
+            return persistent_load(12);
+        }
+        """
+        objects = [toolchain.compile_and_assemble(src, tmp_path, name="persistent")]
+        objects += toolchain.full_runtime_objects(tmp_path)
+        image, _symbols, entry = toolchain.link(objects, entry_symbol="main")
+        machine = Machine(image, persistent_size=256, symphony=True)
+        machine.pc = entry
+        machine.regs[14] = 0x800000
+        machine.regs[13] = 0xfffff0
+        result = machine.run(0xfffff0)
+        assert result == 0x12345678
+        assert machine.persistent_read(12) == 0x12345678
+
     def test_malloc_free_calloc_realloc_correctness(self, toolchain, tmp_path):
         src = """
         void *malloc(unsigned int);

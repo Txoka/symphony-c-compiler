@@ -2,9 +2,11 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.so
+*.o
 *.pyd
 .venv/
 .cache/
+.claude/
 build/
 dist/
 *.bin

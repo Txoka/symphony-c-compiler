@@ -18,39 +18,87 @@ sys.path[:0] = [str(ROOT), str(ROOT / "gcc-backend" / "symphony-gcc" / "tests")]
 
 from symphony import Target, compile_source
 from symphony.emulator import Machine, native_available, native_run
+from symphony.project import decode_control, make_persistent_image, project_from_directory
+from selfhost.tools.bootstrap import STAGE0_SOURCES, build_stage0
+from selfhost.tools.build_stages import compile_stage
 from toolchain import Toolchain, ToolchainNotBuilt
 
 
 # Inputs are deliberately modest, deterministic terminating workloads.  They
 # are part of the result's provenance, not an attempt to represent every use.
 CASES = {
+    "anonymous_aggregate_members.c": (),
     "arena_allocator.c": (),
     "bigprime.c": (),
+    "branch_merge.c": (1,),
+    "c_aggregate_compat.c": (),
+    "common_subexpression.c": (123456789,),
+    "comparison_zero_test.c": (7, 3),
     "constant_folding.c": (),
     "demo.c": (),
+    "divmod_pair.c": (123456789,),
     "dynamic_sensor_report.c": (8, 4, -2, 4, 9, 0, -2, 7, 1),
+    "hypercube.c": (),
     "insertion_sort.c": (15, 3, 9, 0, 14, 2, 8, 1, 13, 4, 12, 5, 11, 6, 10, 7),
     "interprocedural_constant_folding.c": (),
+    "loop_helper_inlining.c": (),
     "pi.c": (),
     "primes.c": (),
+    "render.c": (),
     "towers_of_hanoi.c": (2, 0, 2, 1),
 }
 
+# Interactive renderers deliberately have no terminating path. Benchmark a
+# deterministic prefix rather than misreporting their expected nontermination
+# as a failure. Other examples must still reach their halt normally.
+CONTINUOUS_CASES = {"hypercube.c", "render.c"}
+CONTINUOUS_STEPS = 10_000_000
 
-def run_current(source, inputs, max_steps):
-    result = compile_source(source, target=Target(isa="symphony", ram_size=1 << 20))
-    machine = Machine(result.image.binary, ram_size=1 << 20, inputs=inputs, symphony=True)
-    halt = result.image.symbols["_halt"]
-    if native_available(True):
-        native_run(machine, halt, max_steps)
-    else:
-        machine.run(halt, max_steps=max_steps)
+
+def validate_cases():
+    """Require every maintained example to have explicit benchmark inputs."""
+    examples = {path.name for path in (ROOT / "examples").glob("*.c")}
+    configured = set(CASES)
+    if examples != configured:
+        missing = ", ".join(sorted(examples - configured)) or "none"
+        stale = ", ".join(sorted(configured - examples)) or "none"
+        raise RuntimeError(
+            f"benchmark cases are incomplete (missing: {missing}; stale: {stale})"
+        )
+
+
+def _run(machine, halt, max_steps, continuous):
+    try:
+        if native_available(True):
+            native_run(machine, halt, max_steps)
+        else:
+            machine.run(halt, max_steps=max_steps)
+    except RuntimeError as exc:
+        if not continuous or "execution limit exceeded" not in str(exc):
+            raise
+
+
+def run_current(source, inputs, max_steps, continuous=False):
+    # Compare program execution, not dyncc's optional standalone BSS clearing
+    # loop.  GCC's raw-image linker likewise leaves .bss zero-filled by the
+    # loader/emulator, so assume-zeroed is the equivalent dyncc configuration.
+    result = compile_source(
+        source,
+        target=Target(
+            isa="symphony", ram_size=1 << 24, bss_mode="assume-zeroed"
+        ),
+    )
+    machine = Machine(result.image.binary, ram_size=1 << 24, inputs=inputs, symphony=True)
+    halt = result.image.symbols.get("_halt", 0xffffffff)
+    limit = min(max_steps, CONTINUOUS_STEPS) if continuous else max_steps
+    _run(machine, halt, limit, continuous)
     return len(result.image.binary), machine.steps
 
 
-def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp):
+def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp, continuous=False):
     objects = [toolchain.compile_and_assemble(source, tmp, name=name, optimize=optimize)]
     objects += toolchain.full_runtime_objects(tmp, optimize=optimize)
+    load_size = sum(len(obj.text) + len(obj.data) for obj in objects)
     image, _symbols, entry = toolchain.link(objects, entry_symbol="main")
     # Toolchain.run_image intentionally has no input argument because its test
     # cases mostly use pure programs; benchmarks need the emulator protocol.
@@ -60,18 +108,90 @@ def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp):
     # the normal 16 MiB target RAM layout rather than dyncc's 1 MiB default.
     machine.regs[14] = 0x800000
     machine.regs[13] = 0xfffff0
-    if native_available(True):
-        native_run(machine, 0xfffff0, max_steps)
-    else:
-        machine.run(halt_address=0xfffff0, max_steps=max_steps)
-    return len(image), machine.steps
+    limit = min(max_steps, CONTINUOUS_STEPS) if continuous else max_steps
+    _run(machine, 0xfffff0, limit, continuous)
+    # The GCC linker materializes virtual .bss as trailing zero bytes so the
+    # emulator reserves its addresses.  Those bytes are not part of a load
+    # image and dyncc's assume-zeroed mode does not serialize them either.
+    return load_size, machine.steps
 
 
 def cell(value):
     return "—" if value is None else f"{value:,}"
 
 
+def concise_error(exc):
+    """Keep generated benchmark reports stable and readable."""
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    for line in lines:
+        for marker in ("internal compiler error:", "relocation to '"):
+            if marker in line:
+                return f"{type(exc).__name__}: {line[line.index(marker):]}"
+    return f"{type(exc).__name__}: {lines[0] if lines else exc}"
+
+
+def selfhost_project_image():
+    """Pack the one compiler project consumed by every stage-0 variant."""
+    project = project_from_directory(
+        ROOT / "selfhost", exclude=("build", "examples", "tests")
+    )
+    return make_persistent_image(
+        project,
+        persistent_size=1 << 24,
+        program_load_address=0,
+        symphony=True,
+    )
+
+
+def run_selfhost_benchmark(persistent, max_steps):
+    """Measure Python-generated stage 0 compiling the complete C compiler."""
+    stage0 = build_stage0(Target(
+        isa="symphony", ram_size=1 << 24, bss_mode="assume-zeroed"
+    ))
+    stage1, steps = compile_stage(
+        stage0.image.binary, persistent, 0, max_steps, True
+    )
+    return len(stage0.image.binary), len(stage1), steps
+
+
+def run_gcc_selfhost(toolchain, persistent, optimize, max_steps, tmp):
+    """Build the complete C compiler with GCC and run the same workload."""
+    include_flag = f"-I{ROOT / 'selfhost' / 'include'}"
+    objects = []
+    for index, relative in enumerate(STAGE0_SOURCES):
+        path = ROOT / "selfhost" / relative
+        objects.append(toolchain.compile_and_assemble(
+            path.read_text(),
+            tmp,
+            name=f"selfhost_{optimize[1:]}_{index}_{path.stem}",
+            optimize=optimize,
+            extra_flags=(include_flag,),
+        ))
+    objects += toolchain.full_runtime_objects(tmp, optimize=optimize)
+    load_size = sum(len(obj.text) + len(obj.data) for obj in objects)
+    image, _symbols, entry = toolchain.link(objects, entry_symbol="main")
+    machine = Machine(
+        image,
+        persistent_size=len(persistent),
+        symphony=True,
+    )
+    machine.persistent[:] = persistent
+    machine.pc = entry
+    machine.regs[14] = 0x800000
+    machine.regs[13] = 0xfffff0
+    _run(machine, 0xfffff0, max_steps, False)
+    control = decode_control(machine.persistent)
+    if control.status:
+        raise RuntimeError(f"compiler failed: status={control.status}")
+    record = machine.persistent[control.output_address:]
+    output_size = int.from_bytes(record[:4], "big")
+    if output_size > control.output_byte_length - 4:
+        raise RuntimeError("compiler produced a truncated executable record")
+    return load_size, output_size, machine.steps
+
+
 def main():
+    validate_cases()
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "docs" / "example-benchmarks.md")
     parser.add_argument("--max-steps", type=int, default=2_000_000_000)
@@ -90,16 +210,17 @@ def main():
     rows, notes = [], []
     with tempfile.TemporaryDirectory(prefix="symphony-example-bench-") as raw_tmp:
         tmp = Path(raw_tmp)
-        for path in sorted((ROOT / "examples").glob("*.c")):
-            inputs = CASES.get(path.name)
-            if inputs is None:
-                raise RuntimeError(f"missing deterministic input case for {path.name}")
+        for name, inputs in sorted(CASES.items()):
+            path = ROOT / "examples" / name
+            if not path.is_file():
+                raise RuntimeError(f"benchmark source is missing: {path}")
             source = path.read_text()
+            continuous = name in CONTINUOUS_CASES
             values = []
             for label, runner in (
-                ("SSA", lambda: run_current(source, inputs, args.max_steps)),
-                ("GCC -Os", lambda: run_gcc(toolchain, source, path.stem + "_os", inputs, "-Os", args.max_steps, tmp)),
-                ("GCC -O2", lambda: run_gcc(toolchain, source, path.stem + "_o2", inputs, "-O2", args.max_steps, tmp)),
+                ("SSA", lambda: run_current(source, inputs, args.max_steps, continuous)),
+                ("GCC -Os", lambda: run_gcc(toolchain, source, path.stem + "_os", inputs, "-Os", args.max_steps, tmp, continuous)),
+                ("GCC -O2", lambda: run_gcc(toolchain, source, path.stem + "_o2", inputs, "-O2", args.max_steps, tmp, continuous)),
             ):
                 try:
                     values.append(runner())
@@ -108,16 +229,43 @@ def main():
                     notes.append(f"- `{path.name}` {label}: `{type(exc).__name__}: {exc}`")
             rows.append((path.name, inputs, *values))
 
+        persistent = selfhost_project_image()
+        selfhost_rows = []
+        for label, runner in (
+            ("SSA", lambda: run_selfhost_benchmark(persistent, args.max_steps)),
+            ("GCC -O0", lambda: run_gcc_selfhost(toolchain, persistent, "-O0", args.max_steps, tmp)),
+            ("GCC -Os", lambda: run_gcc_selfhost(toolchain, persistent, "-Os", args.max_steps, tmp)),
+            ("GCC -O2", lambda: run_gcc_selfhost(toolchain, persistent, "-O2", args.max_steps, tmp)),
+        ):
+            try:
+                selfhost_rows.append((label, *runner()))
+            except Exception as exc:
+                selfhost_rows.append((label, None, None, None))
+                notes.append(f"- self-host compiler {label}: `{concise_error(exc)}`")
+
     lines = [
         "# Example compiler benchmarks",
         "",
-        "Generated by `tools/benchmark_examples.py`. Sizes are final Symphony binary bytes; steps are emulator instructions from entry to the termination loop. GCC uses the real same-ISA Symphony GCC toolchain at `SYMPHONY_GCC_PREFIX`.",
+        "Generated by `tools/benchmark_examples.py`. Sizes are serialized Symphony load-image bytes; steps are emulator instructions from entry to the termination loop. The intentionally continuous `hypercube.c` and `render.c` demos instead report a fixed 10,000,000-instruction sample. Static zero storage is treated as loader-zeroed BSS (`--bss=assume-zeroed` for dyncc), so startup clearing is excluded from both size and runtime. GCC uses the real same-ISA Symphony GCC toolchain at `SYMPHONY_GCC_PREFIX`.",
         "",
         "| Example | Inputs | SSA bytes | SSA steps | GCC -Os bytes | GCC -Os steps | GCC -O2 bytes | GCC -O2 steps |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for name, inputs, ssa, os_, o2 in rows:
         lines.append(f"| `{name}` | `{list(inputs)}` | {cell(ssa[0])} | {cell(ssa[1])} | {cell(os_[0])} | {cell(os_[1])} | {cell(o2[0])} | {cell(o2[1])} |")
+    lines += [
+        "",
+        "## Self-host compiler benchmark",
+        "",
+        "Each row builds the complete self-hosted C compiler with that compiler, then runs it on the same packed compiler project to produce stage 1. Runtime is native-emulator target instruction steps, not host wall-clock time or a hardware cycle estimate. GCC sizes exclude zero-filled BSS, as in the example table.",
+        "",
+        "| Compiler build | Compiler bytes | Compiled output bytes | Compilation instructions |",
+        "|---|---:|---:|---:|",
+    ]
+    for label, compiler_size, output_size, steps in selfhost_rows:
+        lines.append(
+            f"| {label} | {cell(compiler_size)} | {cell(output_size)} | {cell(steps)} |"
+        )
     if notes:
         lines += ["", "## Failed measurements", "", *notes]
     args.output.parent.mkdir(parents=True, exist_ok=True)

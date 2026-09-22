@@ -4,6 +4,63 @@ This tracks the standard optimization work proposed for Symphony C. Checked
 items are implemented. Partially checked sections describe the
 working subset and the remaining work explicitly.
 
+## `opt/divmod-and-loop-roadmap` closeout
+
+The loop milestone on this branch is complete. It provides natural-loop and
+induction analysis, LICM, exact-address loop memory cleanup, bounded scalar loop
+evaluation, guarded full unrolling, statically traced `continue`/`break` paths,
+data-dependent internal CFG cloning for header-controlled bounded loops, affine
+scaled pointer induction, and scaled pointer-limit exits. Constant-bounded
+scaled recurrences use exact target-width trip analysis plus explicit
+setup/steady-state/depth/register-pressure costs, and matching safely looks
+through same-width signedness casts. Unrolling compares the
+complete final target images and defaults to no code growth; its independent
+policy switch permits speed-over-size experiments. Scaled induction and pointer
+limits are independently toggleable and avoid fixed small loops better handled
+by evaluation/unrolling and byte-stride exits that add pressure without removing
+scaling work. The costed recurrence closeout improves `bigprime` by 10.6%
+(512,181,658 to 457,901,426 steps) for 48 bytes and improves `pi` by 8,614,902
+steps while shrinking 16 bytes; insertion sort and the sensor report are
+unchanged.
+
+The loop passes now run to a local fixed point after self-tail recursion has
+been lowered.  The loop includes SCCP, copy/algebraic cleanup, dead-value and
+CFG cleanup, LICM, induction/scaled-induction reduction, pointer-limit
+conversion, and loop-memory elimination.  This placement was selected from
+full-example experiments: an earlier fixed point adds nothing once this phase
+is present, while moving it after inlining and runtime-arithmetic legalization
+regresses `bigprime` by 960 bytes and roughly 2.14 million steps. Reversing the
+scalar/loop order reaches identical output. The retained phase improves
+`insertion_sort`, `primes`, and Hanoi without regressions, and trades four
+bytes for 357 fewer steps in `dynamic_sensor_report`. It is independently
+toggleable as `loop_optimization_fixed_point`.
+
+Still-useful loop research is intentionally deferred: data-dependent breaks with
+general multi-exit LCSSA reconstruction, partial unrolling, profile/cost-guided
+unrolling, MemorySSA-backed cross-block forwarding, and bulk fill/copy recognition.
+
+## Goal for the next branch
+
+Create `opt/gcc-hot-loop-codegen`. Its sole optimization goal is to close the
+freshly remeasured GCC runtime gap on `bigprime.c`, `pi.c`, `insertion_sort.c`,
+and `dynamic_sensor_report.c`. Follow the evidence, priorities, experiments,
+and acceptance rules in [the hot-loop differential](gcc-hot-loop-gap-report.md).
+
+All branch measurements must use `--bss=assume-zeroed` for dyncc and exclude
+GCC's virtual/trailing BSS reservation from file size. Static BSS clear time is
+not an optimization target: explicitly serialized zeroes or a loader-zeroed
+contract are acceptable deployment choices. Runtime `memset`, `calloc`, and
+scratch-array initialization are still real program work and remain counted.
+
+CFG liveness, interference, and copy coalescing are already implemented; do not
+restart that completed foundation. Improve it with loop-frequency weighting,
+more usable volatile registers, spill-slot reuse, and direct allocated-operand
+emission. Then address Boolean/short-circuit materialization, richer pointer
+recurrence reuse, post-allocation cleanup, and runtime memory loops in the report's
+measured order. Every sub-change remains independently toggleable and must run
+both ISA suites, both selfhost suites, the complete maintained example set, and
+a fresh GCC comparison.
+
 ## Current priorities
 
 Completed foundations:
@@ -34,33 +91,191 @@ Completed foundations:
 ## Benchmark-derived performance priorities
 
 The maintained native-emulator comparison in `docs/example-benchmarks.md`
-shows that the completed SSA pipeline is consistently smaller than GCC and
-already wins several large workloads, but GCC still wins cycles in particular
-on `pi`, `primes`, `insertion_sort`, `dynamic_sensor_report`, and small
-runtime-heavy programs. The remaining gap is primarily code generation and
-loop quality, not another local constant-folding rule.
+shows that the completed SSA pipeline is usually smaller than GCC. The next
+branch deliberately prioritizes the four largest requested runtime gaps:
+`bigprime`, `pi`, `insertion_sort`, and `dynamic_sensor_report`. The current
+machine-code evidence and exact baseline are in
+`docs/gcc-hot-loop-gap-report.md`; that report supersedes older guesses here.
 
 Implement the following in this order, measuring native termination steps and
 preserving the full suite after each atomic change:
 
-1. [ ] **SSA liveness and allocation.** Retain SSA value identity through
-   allocation; compute block liveness/live intervals or interference; make
-   loop-depth/use-frequency spill decisions; keep loop-carried pointers,
-   bounds, and invariant results in callee-saved registers across calls.
-2. [ ] **Conservative value numbering/CSE.** Reuse repeated arithmetic,
-   address formation, and loads whose memory version is proven unchanged.
-3. [ ] **Stronger loop optimization.** Extend existing LICM/basic induction
-   work with pointer induction, pointer-limit exits, trip-count facts, and
-   proven bulk-fill/copy idioms. Keep growth-oriented unrolling opt-in.
-4. [ ] **Paired division/remainder.** Recognize same-operand `/` and `%` and
-   lower them to one two-result divmod operation when purity and ordering make
-   that valid.
+1. [ ] **Hot-loop allocation/codegen (next branch).** Existing CFG liveness,
+   interference, and copy coalescing are foundations, not missing work. Add
+   loop-depth/use-frequency costs, broader safe use of volatile registers,
+   spill-slot reuse, and direct allocated-operand emission; then remove the
+   remaining physical moves/spills with a target peephole pass.
+2. [x] **Conservative expensive-expression CSE (initial form).** Reuse
+   dominated repeated multiply/divide/remainder expressions. On `primes`,
+   this removes the second `i * i`, reducing 2,140 to 2,064 bytes and
+   2,418,382 to 2,413,144 steps. Cheap expression, address, and load CSE
+   remain below because indiscriminate reuse increases register pressure.
+3. [x] **Bounded loop optimization milestone.** Natural loops, invariant
+   hoisting, affine/scaled induction, pointer limits, bounded evaluation, and
+   guarded full unrolling are implemented as described in the closeout above.
+4. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
+   followed by `/` across pure instructions and stores proven to target a
+   different local object. The focused regression falls from 684 to 596 bytes
+   and 5,610 to 2,793 reference-emulator steps. On `primes`, pairing reduces
+   2,372 to 2,140 bytes and 4,113,385 to 2,418,382 steps.
 5. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
    redundant spills/reloads, and needless address materializations; iterate
    with branch/call relaxation.
 6. [ ] **Costed interprocedural specialization.** Consider constant-argument
    specialization and multi-site inlining only under an explicit size/cycle
    profitability policy, after the preceding foundations expose their gains.
+
+Bounded constant-call evaluation already handles transitive pure call towers:
+all nested direct calls share the caller's instruction budget, recursive cycles
+and observable operations reject evaluation, and folding runs before call-graph
+cleanup and inlining. Consequently, removing a constant tower can make another
+callee single-use and immediately expose it to the existing bottom-up inliner.
+The default budget is independently configurable through
+`bounded_constant_call_instruction_limit` in the optimization settings registry.
+
+## GCC differential review (2026-09)
+
+The real same-ISA GCC backend was used to compile every checked-in example at
+`-Os` and `-O2`.  This is an instruction-selection comparison, not a
+host-code comparison: both compilers emit the same Symphony `mov`, ALU,
+load/store, conditional-branch, and link-register-call encodings.  GCC's
+advantages therefore identify missing IR and code-generation transformations;
+its raw-image-size disadvantages often identify runtime/linker policy instead.
+
+- [x] **Branch merging and jump threading.** The existing CFG pass removes
+  convergent conditional paths and redundant jumps when phi values permit it.
+  `examples/branch_merge.c` is the executable regression: 44 bytes with CFG
+  simplification disabled, 12 bytes enabled, with both branch outcomes checked.
+- [x] **Comparison-zero-test fusion.** A safe local implementation folds a
+  sole-use `(comparison == 0)` or `(comparison != 0)` branch back to its
+  original predicate.  `examples/comparison_zero_test.c` is the executable
+  regression: 96 bytes with the pass disabled, 52 bytes enabled, with both
+  branch outcomes checked.
+- [ ] **Short-circuit predicate fusion.** Recognize a compare whose 0/1 result
+  flows through a loop-carried phi/copy and a zero-test before a branch.  Apply
+  only when the alternate incoming value and all uses preserve Boolean
+  semantics.  `insertion_sort.c` currently exposes this form; the existing
+  local comparison-branch fusion cannot cross that phi.
+- [ ] **General CFG-aware loop transformation and live-out reconstruction
+  (deferred advanced work).** Header-controlled bounded loops now retain and
+  clone data-dependent internal branches, and known paths handle continues,
+  breaks, multiple exits, and scalar live-outs. A future shared LCSSA-style
+  plan should generalize data-dependent breaks and arbitrary multi-exit value
+  reconstruction; this is no longer the next-branch priority.
+- [x] **Pointer induction and pointer-limit exits (scaled initial form).** Give an indexed loop a
+  derived advancing pointer and, where valid, a pointer end bound.  Reuse
+  bases and address increments rather than recomputing `base + index`.
+  Affine `base + i`, `base + i * scale`, and `base + (i << shift)` forms now
+  become advancing recurrences. Scaled dynamic-bound loops may compare the
+  cursor with a hoisted scaled end pointer. The focused four-element `int`
+  loop retains 132 bytes and falls from 124 to 121 steps. Fixed small loops
+  remain available to evaluation/unrolling, and byte-stride pointer exits are
+  rejected after they regressed `insertion_sort`.
+  Constant-bounded candidates are no longer rejected wholesale: a reusable
+  cost model derives exact trip counts with target-width wrap semantics, weights
+  nested loops, charges cursor setup, and rejects predicted register overflow.
+  Same-width integer signedness casts are transparent only behind their own
+  toggle. Both policy and thresholds are documented sliders in
+  `symphony/middle/ssa/optimizations.py`.
+- [x] **Printing-loop memory traffic (straight-line form).** Exact-address,
+  same-type loads and stores are forwarded within blocks outside natural
+  loops; calls, intrinsics, unknown stores, and differently typed accesses are
+  conservative barriers or invalidations. The general pass reduces a 12-line
+  formatted-output regression from 1,822 bytes/12,263 steps to 1,790/11,871,
+  and also improves `demo`, `bigprime`, `c_aggregate_compat`, `pi`, `primes`,
+  and `dynamic_sensor_report`. Cross-block and backedge memory facts remain a
+  future MemorySSA/alias-analysis extension.
+- [x] **Known-trip-count analysis and bounded full unrolling.** Canonical
+  header-controlled loops of at most four iterations
+  are cloned with SSA value remapping and retained side-effect order. The
+  default `unroll_no_code_growth` policy generates both complete target images
+  and keeps the unrolled form only when its final binary is no larger; setting
+  it false enables bounded speed-over-size experiments independently of the
+  `known_trip_full_unrolling` pass toggle. A two-iteration input/output loop
+  falls from 60 bytes/29 steps to 48/11. On `primes`, the guarded form reduces
+  2,032 bytes/2,397,784 steps to 2,008/2,388,532. Statically decidable internal
+  conditionals and continue paths are now traced per iteration while retaining
+  the executed side effects; the focused conditional loop falls from 84
+  bytes/95 steps to 48/21. Statically decidable `break` paths may select among
+  multiple exits and reconstruct live-out values from the executed path; the
+  focused break/live-out regression falls from 96 bytes/68 steps to 48/21.
+  For header-controlled loops whose trip count is independent of body choices,
+  data-dependent internal CFG arms are cloned with fresh SSA values and join
+  phis. The focused three-trip conditional loop keeps both runtime paths and
+  falls from 89 to 55 steps when the speed-over-size policy is selected
+  (92 to 140 bytes); the default no-growth policy correctly retains the loop.
+  General data-dependent break exits and multi-path LCSSA-style exit
+  reconstruction remain.
+- [x] **Bounded constant loop-region evaluation (initial form).** Fully known,
+  side-effect-free natural loops are interpreted independently of their
+  surrounding function, including reads from closed-world immutable globals.
+  The pass is limited to eight iterations and 1,024 SSA instructions and
+  rejects stores, calls, intrinsics, and unknown memory. It now follows
+  statically decidable breaks/multiple exits and materializes every scalar
+  live-out used by the selected exit path, including values forwarded through
+  exit trampolines and phis. The focused break/live-out loop falls from 80
+  bytes/44 steps to 12/2. This also folds `demo.c`'s inline
+  four-element array sum, reducing the current image from 1,632 bytes/3,812
+  steps to 1,479/3,741. Its next extension is the general CFG-aware loop plan
+  above, including multiple exits and complete live-out reconstruction.
+- [x] **Recursive associative reduction to accumulator loop.** A one-parameter
+  reduction using integer `+`, `*`, `|`, `^`, or `&`, the matching identity,
+  one recursive call, and a pure parameter-derived element expression now
+  becomes an accumulator phi plus backedge. This reduces `demo.c` from 1,964
+  to 1,852 bytes and 4,357 to 4,209 steps. Extend it to multiple parameters
+  only while retaining source evaluation order and rejecting escaping frame
+  addresses, multiple recursive calls, or observable post-combine work. Keep
+  this distinct from ordinary tail-recursion lowering.
+- [x] **Bounded constant-call evaluation after loop canonicalization (scalar
+  initial form).** Side-effect-free scalar SSA functions with constant
+  arguments are interpreted under a 1,024-instruction limit, including loops
+  and branches. Nested pure direct-call towers share the same configurable
+  instruction budget and reject recursive cycles; memory, target operations,
+  undefined arithmetic, and observable effects reject evaluation. This folds `demo.c`'s canonical
+  `factorial(5)` without naming factorial, reducing the current image from
+  1,820 bytes/4,165 steps to 1,632/3,812. A general sum-of-squares loop
+  regression falls from 216/753 to 8/1. Bounded private evaluator memory remains
+  future work.
+- [ ] **General single-recursion recurrence analysis.** Classify one-recursive-
+  call functions beyond associative reductions. Affine forms such as
+  `element - recurse(next)` may be lowered only with a proven equivalent state
+  update that preserves integer semantics; non-associative forms such as
+  `element / recurse(next)` generally require reverse-order evaluation. Extend
+  argument-state phis to multiple parameters and simultaneous permutations
+  independently of the result recurrence. Do not label these ordinary
+  accumulator reductions.
+- [ ] **Extend conservative value numbering.** Expensive pure arithmetic is
+  implemented. Add pressure-aware reuse for cheap arithmetic and address
+  formation, then loads keyed by a conservative memory version. A naïve
+  all-expression implementation regressed `dynamic_sensor_report`, so these
+  extensions require allocation-aware profitability.
+- [ ] **Bulk memory idioms.** Recognize proven non-overlapping fixed-size or
+  counted byte fill/copy loops and choose a size/cycle-costed inline
+  byte/word loop or runtime `memset`/`memcpy` call.  Preserve aliasing,
+  overlap, observable bound evaluation, and target byte order.  GCC recognizes
+  the sieve initialization as `memset`; scc currently emits the source loop.
+- [ ] **Extend paired division/remainder.** Pure-region and proven non-aliasing
+  local-store pairing are implemented. Add a true two-result IR/ABI operation
+  only if it beats the current temporary-slot helper, then cover signed pairs.
+  The ABI already permits multiple word results in `r1`-`r7`; scalar C still
+  exposes only `r1` today.
+- [ ] **Dead storage and bounded evaluation.** Prioritize the existing general
+  dead-storage/evaluator item for fully known local-object programs.
+  GCC reduces `arena_allocator.c`'s `main` to `mov r1, 1`; scc must
+  prove the local writes and copies unobservable before doing the same.
+- [ ] **Improve SSA-aware allocation.** CFG liveness, interference, and copy
+  coalescing are implemented. Add hot-loop weighting, more usable volatile
+  homes, spill-slot reuse, and direct allocated-operand emission as specified
+  in the next-branch differential report.
+- [x] **Comparison measurement hygiene.** The maintained harness now uses
+  loader-zeroed BSS for dyncc, counts only GCC text plus initialized data, and
+  excludes static BSS startup from step counts. Runtime zeroing requested by
+  the source remains counted.
+
+GCC is not uniformly better: scc's single-site inlining and self-tail-loop
+lowering make `towers_of_hanoi.c` substantially smaller and faster.  Preserve
+that behavior while improving ordinary loops; do not replace it with a generic
+recursive-layout transformation.
 
 Do not treat a terminating program alone as a valid benchmark result: compare
 its return value and externally visible output to the reference run. The GCC
@@ -75,14 +290,20 @@ one-shot phases.
 
 Remaining work, in dependency and payoff order:
 
-1. [ ] Add a bounded IR evaluator for side-effect-free calls and loops with known
-   inputs. Give it explicit instruction, recursion-depth, and memory limits; reject
-   device operations, volatile access, unknown calls, undefined operations, and
-   writes outside private evaluator state. Model immutable global bytes and private
-   local storage in the evaluator, then feed successful results back into the
-   ordinary fixed point. Together with the completed global passes, this should collapse the
-   constant demo to `mov r1, 146` plus halt.
-2. [ ] Add general dead-storage and dead-allocation elimination. Remove unused
+1. [ ] Build the general CFG-aware loop plan and exit-value reconstruction
+   described above. The initial natural-loop discovery, scalar constant-call
+   evaluator, constant loop-region evaluator, trip-count analysis, and linear
+   retained-effect unroller are complete foundations, not the general loop
+   transformation. First extend them to conditional multi-block bodies,
+   multiple backedges/continues, breaks, multiple exits, and escaping values;
+   retain the existing pass toggles and no-code-growth policy toggle.
+2. [ ] Extend bounded evaluation with private local memory. Nested pure direct
+   calls already share the configurable instruction budget. Keep explicit
+   instruction, recursion-cycle, iteration, and memory limits;
+   reject device operations, volatile access, unknown calls, undefined operations,
+   and writes outside private evaluator state. Immutable global-byte reads and
+   scalar call/loop evaluation are already implemented.
+3. [ ] Add general dead-storage and dead-allocation elimination. Remove unused
    fixed local storage, VLA `stack_alloc` operations, and other allocation-like
    setup when the object cannot be accessed or escape and the operation itself is
    not observable. Preserve required initialization, bound evaluation, cleanup,
@@ -90,19 +311,23 @@ Remaining work, in dependency and payoff order:
    side-effectful evaluation from removable storage setup where necessary. Add
    regression tests for unused locals, arrays, VLAs, temporaries, side-effectful
    bounds/initializers, and binary-layout changes.
-3. [ ] Identify natural loops, induction variables, and proven constant trip counts.
-   Use these facts for loop-invariant code motion and bounded evaluation first;
-   retain code-growing unrolling behind its explicit option.
-4. [ ] Recognize matching quotient/remainder expressions with identical proven-pure
-   operands and lower them to a two-result `divmod` IR operation. Preserve signed
-   C semantics and reject intervening mutation, volatile access, and calls.
-5. [ ] Add local value numbering, then global value numbering, using conservative
-   alias invalidation for loads. This removes repeated arithmetic and address work.
-6. [ ] Add block liveness and interference-based register/stack-slot reuse, followed
-   by loop-depth spill costs and better caller-saved allocation.
-7. [ ] Add the small post-allocation peephole pass and iterate it with branch/call
+4. [x] Identify natural loops and initial induction variables/proven constant
+   trip counts, and use them for bounded evaluation and restricted full
+   unrolling. General CFG coverage and stronger induction/pointer facts remain
+   in items 1 and the benchmark priorities above.
+5. [x] Recognize matching unsigned quotient/remainder expressions with identical
+   operands and lower them to a paired runtime call across pure instructions and
+   stores proven not to alias those operands. Signed pairing and a native
+   two-result IR/ABI form remain follow-up work.
+6. [ ] Extend the implemented dominator-based value numbering beyond expensive
+   arithmetic, using pressure-aware profitability for cheap/address expressions
+   and conservative alias invalidation for loads.
+7. [ ] Extend the existing block liveness/interference allocator with
+   register/stack-slot reuse, loop-depth spill costs, and broader caller-saved
+   allocation as specified in the next-branch report.
+8. [ ] Add the small post-allocation peephole pass and iterate it with branch/call
    relaxation. It should only remove artifacts requiring physical-register knowledge.
-8. [ ] Add non-tail recursive fallthrough-call layout for a recursive function
+9. [ ] Add non-tail recursive fallthrough-call layout for a recursive function
    with exactly one external direct caller. Split the caller around that site,
    pre-push its known continuation, place the recursive function next, and let
    the first entry fall through while recursive entries keep calling the stable
@@ -116,12 +341,12 @@ Remaining work, in dependency and payoff order:
    arguments, nested non-tail recursion, caller continuation execution, `sp`
    restoration, stable recursive entry labels, branch-distance thresholds, and
    a deliberately unprofitable layout that must remain unchanged.
-9. [ ] Add flag liveness and profile/cost-guided block ordering after the preceding
+10. [ ] Add flag liveness and profile/cost-guided block ordering after the preceding
     CFG and register foundations are stable.
-10. [ ] Extend singleton function-pointer recognition through immutable global loads.
+11. [ ] Extend singleton function-pointer recognition through immutable global loads.
     Local single-target pointers already reduce to direct calls after copy propagation.
     Keep guarded multi-target devirtualization deferred because it can grow code.
-11. [x] Implement the memory runtime, heap allocation, overflow-safe VLA sizing,
+12. [x] Implement the memory runtime, heap allocation, overflow-safe VLA sizing,
     and bidirectional heap/stack collision checks independently of optimizer correctness.
 
 ## Deferred and optional work
@@ -241,11 +466,11 @@ Remaining work, in dependency and payoff order:
 
 ## 8. Loop optimization
 
-- [ ] Identify natural loops and their nesting depth.
-- [ ] Move loop-invariant calculations out of loops.
-- [ ] Simplify induction variables.
-- [ ] Detect constant trip counts.
-- [ ] Remove redundant loop loads and stores.
+- [x] Identify natural loops and their nesting depth.
+- [x] Move safe loop-invariant calculations out of loops.
+- [x] Simplify basic and affine scaled induction variables.
+- [x] Detect bounded constant trip counts.
+- [x] Remove proven redundant exact-address loop loads and stores.
 - [ ] Recognize count-down loops when they are cheaper for the target ISA.
 
 ### GCC optimization techniques dyncc's own optimizer should adopt
@@ -418,11 +643,11 @@ memory behavior.
 
 ## Optional loop unrolling
 
-- [ ] Add an optimization-level and code-size policy before enabling unrolling.
-- [ ] Fully unroll very small loops with proven constant trip counts.
+- [x] Add an exact final-image no-growth policy before enabling unrolling.
+- [x] Fully unroll very small loops with proven constant trip counts.
 - [ ] Optionally partially unroll larger fixed loops by factors such as two or four.
-- [ ] Add an explicit `--unroll-loops` option for growth-oriented optimization.
-- [ ] Disable growth-oriented unrolling in a future size-optimization mode.
+- [x] Keep growth-oriented unrolling behind `unroll_no_code_growth = false`.
+- [x] Keep no-growth unrolling as the default.
 - [ ] Benchmark partial unrolling of the 32-round division loop; keep it rolled by default.
 
 ## Recursion and tail calls

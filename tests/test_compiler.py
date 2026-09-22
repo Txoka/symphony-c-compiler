@@ -19,6 +19,7 @@ from symphony.frontend import parse, typecheck
 from symphony.ir import lower
 from symphony import isa
 from symphony.targets.symphony.abi import ABI
+from symphony.middle.ssa.optimizations import OPTIMIZATIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ISA = os.environ.get("SYMPHONY_TEST_ISA", "symphony")
@@ -664,11 +665,18 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(set(result.image.symbols), {"_start", "_halt"})
 
     def test_written_or_escaped_globals_are_not_folded(self):
-        result, _ = run(
-            "int value=4; int main(void){value=input();return value;}",
-            17,
-            inputs=[17],
-        )
+        old = OPTIMIZATIONS["straight_line_memory_forwarding"]
+        try:
+            # Isolate immutable-global folding: the separate exact-address
+            # forwarding pass may validly replace this store-followed load.
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = False
+            result, _ = run(
+                "int value=4; int main(void){value=input();return value;}",
+                17,
+                inputs=[17],
+            )
+        finally:
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = old
         self.assertIn("value", result.image.symbols)
         self.assertIn(" load ", result.ir.dump())
         result, _ = run(
@@ -1047,6 +1055,563 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class EncodingTests(unittest.TestCase):
+    def test_branch_merge_example_beats_unoptimized_cfg(self):
+        source = (ROOT / "examples" / "branch_merge.c").read_text()
+        old = OPTIMIZATIONS["cfg_simplification"]
+        try:
+            OPTIMIZATIONS["cfg_simplification"] = False
+            unoptimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["cfg_simplification"] = old
+        optimized = _compile_source(source, target=Target())
+
+        def execute(result, inputs):
+            machine = Machine(result.image.binary, inputs=inputs)
+            return machine.run(result.image.symbols["_halt"])
+
+        for inputs in ((0,), (1,)):
+            self.assertEqual(execute(unoptimized, inputs), 4)
+            self.assertEqual(execute(optimized, inputs), 4)
+        self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
+
+    def test_comparison_zero_test_example_beats_unoptimized_branch_form(self):
+        source = (ROOT / "examples" / "comparison_zero_test.c").read_text()
+        old = OPTIMIZATIONS["comparison_zero_test_fusion"]
+        try:
+            OPTIMIZATIONS["comparison_zero_test_fusion"] = False
+            unoptimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["comparison_zero_test_fusion"] = old
+        optimized = _compile_source(source, target=Target())
+
+        def execute(result, inputs):
+            machine = Machine(result.image.binary, inputs=inputs)
+            return machine.run(result.image.symbols["_halt"])
+
+        for inputs, expected in (((1, 2), 7), ((2, 1), 3)):
+            self.assertEqual(execute(unoptimized, inputs), expected)
+            self.assertEqual(execute(optimized, inputs), expected)
+        self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
+
+    def test_paired_divmod_example_runs_one_software_division(self):
+        source = (ROOT / "examples" / "divmod_pair.c").read_text()
+        old = OPTIMIZATIONS["paired_divmod"]
+        try:
+            OPTIMIZATIONS["paired_divmod"] = False
+            unoptimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["paired_divmod"] = old
+        optimized = _compile_source(source, target=Target())
+
+        def execute(result, value):
+            machine = Machine(result.image.binary, inputs=(value,))
+            machine.run(result.image.symbols["_halt"])
+            return machine.outputs, machine.steps
+
+        for value, expected in ((0, [0, 0]), (123456789, [12345678, 9])):
+            self.assertEqual(execute(unoptimized, value)[0], expected)
+            self.assertEqual(execute(optimized, value)[0], expected)
+        self.assertLess(len(optimized.image.binary), len(unoptimized.image.binary))
+        self.assertLess(execute(optimized, 123456789)[1], execute(unoptimized, 123456789)[1])
+
+    def test_loop_pressure_guard_uses_live_at_call_and_configurable_budget(self):
+        source = (ROOT / "examples" / "loop_helper_inlining.c").read_text()
+        old = OPTIMIZATIONS["loop_pressure_aware_inlining"]
+        old_budget = OPTIMIZATIONS["inlining_register_budget"]
+        try:
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = True
+            OPTIMIZATIONS["inlining_register_budget"] = old_budget
+            live_costed = _compile_source(source, target=Target())
+            OPTIMIZATIONS["inlining_register_budget"] = 1
+            guarded = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = old
+            OPTIMIZATIONS["inlining_register_budget"] = old_budget
+        self.assertNotIn("helper", live_costed.image.symbols)
+        self.assertIn("helper", guarded.image.symbols)
+        for result in (live_costed, guarded):
+            machine = Machine(result.image.binary)
+            self.assertEqual(machine.run(result.image.symbols["_halt"]), 316)
+
+    def test_loop_fixed_point_has_a_configurable_hard_limit(self):
+        old = OPTIMIZATIONS["loop_fixed_point_iteration_limit"]
+        try:
+            OPTIMIZATIONS["loop_fixed_point_iteration_limit"] = 0
+            with self.assertRaisesRegex(RuntimeError, "did not converge"):
+                _compile_source("int main(void) { return 0; }", target=Target())
+        finally:
+            OPTIMIZATIONS["loop_fixed_point_iteration_limit"] = old
+
+    def test_alias_aware_divmod_improves_primes(self):
+        source = (ROOT / "examples" / "primes.c").read_text()
+        old_pair = OPTIMIZATIONS["paired_divmod"]
+        old_alias = OPTIMIZATIONS["alias_aware_divmod_pairing"]
+        old_guard = OPTIMIZATIONS["loop_pressure_aware_inlining"]
+        try:
+            OPTIMIZATIONS["paired_divmod"] = False
+            OPTIMIZATIONS["alias_aware_divmod_pairing"] = False
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["paired_divmod"] = True
+            OPTIMIZATIONS["alias_aware_divmod_pairing"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["paired_divmod"] = old_pair
+            OPTIMIZATIONS["alias_aware_divmod_pairing"] = old_alias
+            OPTIMIZATIONS["loop_pressure_aware_inlining"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            return machine.run(result.image.symbols["_halt"]), machine.outputs, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(optimized_result[:2], baseline_result[:2])
+        self.assertLess(optimized_result[2], baseline_result[2])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
+
+    def test_expensive_expression_cse_avoids_repeated_multiply(self):
+        source = (ROOT / "examples" / "common_subexpression.c").read_text()
+        old = OPTIMIZATIONS["expensive_expression_cse"]
+        try:
+            OPTIMIZATIONS["expensive_expression_cse"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["expensive_expression_cse"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["expensive_expression_cse"] = old
+
+        def execute(result, value):
+            machine = Machine(result.image.binary, inputs=(value,))
+            return machine.run(result.image.symbols["_halt"]), machine.steps
+
+        for value in (0, 7, 65537):
+            self.assertEqual(execute(optimized, value)[0], execute(baseline, value)[0])
+        self.assertLess(execute(optimized, 65537)[1], execute(baseline, 65537)[1])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
+
+    def test_self_reduction_loop_improves_demo(self):
+        source = (ROOT / "examples" / "demo.c").read_text()
+        old = OPTIMIZATIONS["self_reduction_loop_lowering"]
+        try:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+            text = bytes(machine.memory[framebuffer:framebuffer + 11])
+            return returned, text, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(optimized_result[:2], baseline_result[:2])
+        self.assertEqual(optimized_result[0], 146)
+        self.assertEqual(optimized_result[1], b"Result: 146")
+        self.assertLess(optimized_result[2], baseline_result[2])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
+
+    def test_self_reduction_requires_multiplicative_identity(self):
+        result = _compile_source(
+            "int f(int n){if(n<2)return 2;return n*f(n-1);}"
+            "int main(void){return f(3);}",
+            target=Target(),
+        )
+        machine = Machine(result.image.binary)
+        self.assertEqual(machine.run(result.image.symbols["_halt"]), 12)
+
+    def test_self_reduction_loop_handles_additive_parameter_expression(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int f(int n){if(n<2)return 0;return n*n+f(n-1);}"
+            "int main(void){return f((int)input());}"
+        )
+        old = OPTIMIZATIONS["self_reduction_loop_lowering"]
+        try:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = False
+            recursive = _compile_source(source, target=Target())
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = True
+            looped = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["self_reduction_loop_lowering"] = old
+
+        def execute(result, value):
+            machine = Machine(result.image.binary, inputs=(value,))
+            return machine.run(result.image.symbols["_halt"])
+
+        for value in (-4, 0, 1, 2, 5, 10):
+            self.assertEqual(execute(looped, value), execute(recursive, value))
+
+    def test_straight_line_memory_forwarding_improves_printing_loop(self):
+        source = (
+            '#include <stdio.h>\n'
+            'int main(void){for(int i=0;i<12;i++)'
+            'printf("value=%d\\n",i);return 0;}'
+        )
+        old = OPTIMIZATIONS["straight_line_memory_forwarding"]
+        try:
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+            rows = bytes(machine.memory[framebuffer:framebuffer + 12 * 96])
+            return returned, rows, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(optimized_result[:2], baseline_result[:2])
+        self.assertLess(optimized_result[2], baseline_result[2])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
+
+    def test_bounded_constant_call_evaluates_general_pure_loop(self):
+        source = (
+            "int sum_squares(int n){int total=0;"
+            "for(int i=0;i<n;i++)total+=i*i;return total;}"
+            "int main(void){return sum_squares(9);}"
+        )
+        old = OPTIMIZATIONS["bounded_constant_call_evaluation"]
+        try:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = False
+            runtime_loop = _compile_source(source, target=Target())
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = True
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            return machine.run(result.image.symbols["_halt"]), machine.steps
+
+        self.assertEqual(execute(runtime_loop)[0], 204)
+        self.assertEqual(execute(evaluated)[0], 204)
+        self.assertLess(execute(evaluated)[1], execute(runtime_loop)[1])
+        self.assertLess(len(evaluated.image.binary), len(runtime_loop.image.binary))
+
+        inline = _compile_source(
+            "int main(void){int acc=1;"
+            "for(int i=5;i>2;i--)acc*=i;return acc;}",
+            target=Target(),
+        )
+        returned, steps = execute(inline)
+        self.assertEqual(returned, 60)
+        self.assertEqual(steps, 1)
+        self.assertEqual(len(inline.image.binary), 8)
+
+    def test_bounded_constant_call_rejects_observable_function(self):
+        result = _compile_source(
+            "#include <symphony.h>\n"
+            "int noisy(int x){output(x);return x+1;}"
+            "int main(void){return noisy(4);}",
+            target=Target(),
+        )
+        machine = Machine(result.image.binary)
+        self.assertEqual(machine.run(result.image.symbols["_halt"]), 5)
+        self.assertEqual(machine.outputs, [4])
+
+    def test_bounded_constant_call_evaluates_tower_before_inlining(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int leaf(int x){return x+1;}"
+            "int middle(int x){return leaf(x)+2;}"
+            "int runtime(int x){return leaf(x)+4;}"
+            "int main(void){return middle(5)+runtime(input());}"
+        )
+        old = OPTIMIZATIONS["bounded_constant_call_evaluation"]
+        try:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = False
+            unfolded = _compile_source(source, target=Target())
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = True
+            folded = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = old
+
+        measurements = []
+        for result in (unfolded, folded):
+            machine = Machine(result.image.binary, inputs=(10,))
+            returned = machine.run(result.image.symbols["_halt"])
+            self.assertEqual(returned, 23)
+            measurements.append(machine.steps)
+        self.assertIn("direct_call", unfolded.ir.dump())
+        self.assertNotIn("direct_call", folded.ir.dump())
+        self.assertLess(len(folded.image.binary), len(unfolded.image.binary))
+        self.assertLess(measurements[1], measurements[0])
+
+    def test_bounded_constant_call_budget_is_configurable(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int leaf(int x){return x+1;}"
+            "int middle(int x){return leaf(x)+2;}"
+            "int runtime(int x){return leaf(x)+4;}"
+            "int main(void){return middle(5)+runtime(input());}"
+        )
+        key = "bounded_constant_call_instruction_limit"
+        old = OPTIMIZATIONS[key]
+        try:
+            OPTIMIZATIONS[key] = 1
+            limited = _compile_source(source, target=Target())
+            OPTIMIZATIONS[key] = 1024
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS[key] = old
+
+        for result in (limited, evaluated):
+            machine = Machine(result.image.binary, inputs=(10,))
+            self.assertEqual(machine.run(result.image.symbols["_halt"]), 23)
+        self.assertGreater(len(limited.image.binary), len(evaluated.image.binary))
+
+    def test_constant_loop_evaluation_improves_demo_array_sum(self):
+        source = (ROOT / "examples" / "demo.c").read_text()
+        old = OPTIMIZATIONS["constant_loop_evaluation"]
+        try:
+            OPTIMIZATIONS["constant_loop_evaluation"] = False
+            runtime_loop = _compile_source(source, target=Target())
+            OPTIMIZATIONS["constant_loop_evaluation"] = True
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["constant_loop_evaluation"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+            text = bytes(machine.memory[framebuffer:framebuffer + 11])
+            return returned, text, machine.steps
+
+        baseline = execute(runtime_loop)
+        optimized = execute(evaluated)
+        self.assertEqual(optimized[:2], baseline[:2])
+        self.assertEqual(optimized[:2], (146, b"Result: 146"))
+        self.assertLess(optimized[2], baseline[2])
+        self.assertLess(len(evaluated.image.binary), len(runtime_loop.image.binary))
+
+        mutable = _compile_source(
+            "#include <symphony.h>\n"
+            "int values[2]={1,2};int main(void){values[input()]=9;"
+            "int total=0;for(int i=0;i<2;i++)total+=values[i];return total;}",
+            target=Target(),
+        )
+        for index in (0, 1):
+            machine = Machine(mutable.image.binary, inputs=(index,))
+            self.assertEqual(machine.run(mutable.image.symbols["_halt"]), 11 if index == 0 else 10)
+
+    def test_constant_loop_evaluation_reconstructs_break_live_out(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int x=3;for(int i=0;i<6;i++){"
+            "if(i==2){x=i+7;break;}x++;}output(x);return x;}"
+        )
+        old_evaluate = OPTIMIZATIONS["constant_loop_evaluation"]
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            OPTIMIZATIONS["constant_loop_evaluation"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["constant_loop_evaluation"] = True
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["constant_loop_evaluation"] = old_evaluate
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(evaluated)[:2], execute(looped)[:2])
+        self.assertEqual(execute(evaluated)[:2], (9, [9]))
+        self.assertLess(execute(evaluated)[2], execute(looped)[2])
+        self.assertLess(len(evaluated.image.binary), len(looped.image.binary))
+
+    def test_known_trip_unrolling_obeys_final_code_growth_policy(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){for(int i=0;i<2;i++)output(input()+i);return 7;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(10, 20, 30))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(unrolled)[:2], execute(looped)[:2])
+        self.assertEqual(execute(unrolled)[:2], (7, [10, 21]))
+        self.assertLess(execute(unrolled)[2], execute(looped)[2])
+        self.assertLess(len(unrolled.image.binary), len(looped.image.binary))
+
+        speed_source = source.replace("i<2", "i<3")
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            guarded = _compile_source(speed_source, target=Target())
+            OPTIMIZATIONS["unroll_no_code_growth"] = False
+            speed = _compile_source(speed_source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+        self.assertGreater(len(speed.image.binary), len(guarded.image.binary))
+        self.assertLess(execute(speed)[2], execute(guarded)[2])
+
+    def test_known_trip_unrolling_traces_conditional_loop_body(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int i=0;while(i<4){i++;"
+            "if(i&1)output(input()+i);}return i;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(10, 20, 30, 40))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(looped)[:2], (4, [11, 23]))
+        self.assertEqual(execute(unrolled)[:2], execute(looped)[:2])
+        self.assertLess(execute(unrolled)[2], execute(looped)[2])
+        self.assertLess(len(unrolled.image.binary), len(looped.image.binary))
+
+    def test_known_trip_unrolling_reconstructs_known_break_live_out(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int x=3;for(int i=0;i<4;i++){"
+            "if(i==2){x=i+7;break;}x++;output(input()+x);}return x;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(10, 20))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(looped)[:2], (9, [14, 25]))
+        self.assertEqual(execute(unrolled)[:2], execute(looped)[:2])
+        self.assertLess(execute(unrolled)[2], execute(looped)[2])
+        self.assertLess(len(unrolled.image.binary), len(looped.image.binary))
+
+    def test_known_trip_unrolling_clones_data_dependent_cfg(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int x=0;for(int i=0;i<3;i++){"
+            "if(input())x+=i+1;else x+=2;output(x);}return x;}"
+        )
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        old_guard = OPTIMIZATIONS["unroll_no_code_growth"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["known_trip_full_unrolling"] = True
+            OPTIMIZATIONS["unroll_no_code_growth"] = True
+            guarded = _compile_source(source, target=Target())
+            OPTIMIZATIONS["unroll_no_code_growth"] = False
+            unrolled = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+            OPTIMIZATIONS["unroll_no_code_growth"] = old_guard
+
+        def execute(result, inputs):
+            machine = Machine(result.image.binary, inputs=inputs)
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        for inputs in ((1, 0, 1), (0, 1, 0)):
+            self.assertEqual(execute(unrolled, inputs)[:2], execute(looped, inputs)[:2])
+        self.assertEqual(execute(unrolled, (1, 0, 1))[:2], (6, [1, 3, 6]))
+        self.assertEqual(len(guarded.image.binary), len(looped.image.binary))
+        self.assertLess(execute(unrolled, (1, 0, 1))[2], execute(looped, (1, 0, 1))[2])
+
+    def test_pointer_limit_loop_uses_scaled_derived_recurrence(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int values[4]={2,4,6,8};int main(void){int n=input(),total=0;"
+            "for(int i=0;i<n;i++){total+=values[i];output(total);}return total;}"
+        )
+        old = OPTIMIZATIONS["pointer_limit_loops"]
+        old_budget = OPTIMIZATIONS["loop_register_budget"]
+        try:
+            # Isolate pointer-limit lowering from the independently tested
+            # scaled-induction pressure policy that supplies its cursor.
+            OPTIMIZATIONS["loop_register_budget"] = 64
+            OPTIMIZATIONS["pointer_limit_loops"] = False
+            indexed = _compile_source(source, target=Target())
+            OPTIMIZATIONS["pointer_limit_loops"] = True
+            pointer_limited = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["pointer_limit_loops"] = old
+            OPTIMIZATIONS["loop_register_budget"] = old_budget
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(4,))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(pointer_limited)[:2], execute(indexed)[:2])
+        self.assertEqual(execute(pointer_limited)[:2], (20, [2, 6, 12, 20]))
+        self.assertLess(execute(pointer_limited)[2], execute(indexed)[2])
+        self.assertLessEqual(len(pointer_limited.image.binary), len(indexed.image.binary))
+
+    def test_loop_pipeline_reaches_fixed_point_after_self_tail_lowering(self):
+        source = (ROOT / "examples" / "insertion_sort.c").read_text()
+        inputs = (15, 3, 9, 0, 14, 2, 8, 1, 13, 4, 12, 5, 11, 6, 10, 7)
+        old = OPTIMIZATIONS["loop_optimization_fixed_point"]
+        try:
+            OPTIMIZATIONS["loop_optimization_fixed_point"] = False
+            single_pass = _compile_source(source, target=Target(bss_mode="assume-zeroed"))
+            OPTIMIZATIONS["loop_optimization_fixed_point"] = True
+            fixed_point = _compile_source(source, target=Target(bss_mode="assume-zeroed"))
+        finally:
+            OPTIMIZATIONS["loop_optimization_fixed_point"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=inputs)
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(fixed_point)[:2], execute(single_pass)[:2])
+        self.assertLessEqual(len(fixed_point.image.binary), len(single_pass.image.binary))
+        self.assertLess(execute(fixed_point)[2], execute(single_pass)[2])
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)
@@ -1181,13 +1746,20 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(machine.run(result.image.symbols["_halt"]), 42)
 
     def test_promoted_parameters_are_permuted_safely_for_tailcalls(self):
-        result = compile_source(
-            "int pair(int a,int b){return a*100+b;} "
-            "int flip(int a,int b){return pair(b,a);} "
-            "int other(void){return pair(8,9);}"
-            "int (*keep)(int,int)=flip; "
-            "int main(void){return input()?keep(1,2):other();}"
-        )
+        old = OPTIMIZATIONS["bounded_constant_call_evaluation"]
+        try:
+            # Keep pair's second call site alive so this specifically tests
+            # tail-call argument permutation rather than constant evaluation.
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = False
+            result = compile_source(
+                "int pair(int a,int b){return a*100+b;} "
+                "int flip(int a,int b){return pair(b,a);} "
+                "int other(void){return pair(8,9);}"
+                "int (*keep)(int,int)=flip; "
+                "int main(void){return input()?keep(1,2):other();}"
+            )
+        finally:
+            OPTIMIZATIONS["bounded_constant_call_evaluation"] = old
         self.assertIn("direct_tailcall", result.ir.dump())
         for value, expected in ((0, 809), (1, 201)):
             with self.subTest(input=value):
@@ -1476,6 +2048,47 @@ class EncodingTests(unittest.TestCase):
                 )
                 machine = Machine(binary, 256)
                 self.assertEqual(machine.run(16), 42)
+
+    def test_costed_casted_scaled_induction_improves_long_array_loops(self):
+        source = """
+            unsigned values[402];
+            int main(void) {
+                unsigned seed = input();
+                for (unsigned i = 0; i < 402; i++) values[i] = seed + i;
+                unsigned total = 0;
+                for (unsigned i = 0; i < 402; i++) total += values[i];
+                return total;
+            }
+        """
+        keys = (
+            "representation_preserving_induction_casts",
+            "loop_profitability",
+        )
+        old = {key: OPTIMIZATIONS[key] for key in keys}
+        try:
+            for key in keys:
+                OPTIMIZATIONS[key] = False
+            baseline = compile_source(
+                source, target=Target(bss_mode="assume-zeroed")
+            )
+            for key in keys:
+                OPTIMIZATIONS[key] = True
+            optimized = compile_source(
+                source, target=Target(bss_mode="assume-zeroed")
+            )
+        finally:
+            OPTIMIZATIONS.update(old)
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=[7])
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(baseline_result[0], 83415)
+        self.assertEqual(optimized_result[0], baseline_result[0])
+        self.assertLess(optimized_result[1], baseline_result[1])
 
     def test_cli(self):
         with tempfile.TemporaryDirectory() as d:

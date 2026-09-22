@@ -210,6 +210,17 @@ unsigned int __dyn_udivmod(unsigned int a, unsigned int b, int remainder) {
     }
     return remainder ? a : q;
 }
+unsigned int __dyn_udivmod_pair(unsigned int a, unsigned int b, unsigned int *remainder) {
+    unsigned int bit=1, q=0;
+    if (!b) { *remainder=0; return 0; }
+    while (b < a && bit && !(b & 0x80000000u)) { b <<= 1; bit <<= 1; }
+    while (bit) {
+        if (a >= b) { a -= b; q |= bit; }
+        bit >>= 1; b >>= 1;
+    }
+    *remainder=a;
+    return q;
+}
 unsigned int __dyn_udiv(unsigned int a, unsigned int b) { return __dyn_udivmod(a,b,0); }
 unsigned int __dyn_umod(unsigned int a, unsigned int b) { return __dyn_udivmod(a,b,1); }
 int __dyn_sdiv(int a, int b) {
