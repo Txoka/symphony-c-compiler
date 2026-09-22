@@ -1291,6 +1291,34 @@ class EncodingTests(unittest.TestCase):
             machine = Machine(mutable.image.binary, inputs=(index,))
             self.assertEqual(machine.run(mutable.image.symbols["_halt"]), 11 if index == 0 else 10)
 
+    def test_constant_loop_evaluation_reconstructs_break_live_out(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int main(void){int x=3;for(int i=0;i<6;i++){"
+            "if(i==2){x=i+7;break;}x++;}output(x);return x;}"
+        )
+        old_evaluate = OPTIMIZATIONS["constant_loop_evaluation"]
+        old_unroll = OPTIMIZATIONS["known_trip_full_unrolling"]
+        try:
+            OPTIMIZATIONS["known_trip_full_unrolling"] = False
+            OPTIMIZATIONS["constant_loop_evaluation"] = False
+            looped = _compile_source(source, target=Target())
+            OPTIMIZATIONS["constant_loop_evaluation"] = True
+            evaluated = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["constant_loop_evaluation"] = old_evaluate
+            OPTIMIZATIONS["known_trip_full_unrolling"] = old_unroll
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(evaluated)[:2], execute(looped)[:2])
+        self.assertEqual(execute(evaluated)[:2], (9, [9]))
+        self.assertLess(execute(evaluated)[2], execute(looped)[2])
+        self.assertLess(len(evaluated.image.binary), len(looped.image.binary))
+
     def test_known_trip_unrolling_obeys_final_code_growth_policy(self):
         source = (
             "#include <symphony.h>\n"

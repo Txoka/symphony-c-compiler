@@ -91,9 +91,9 @@ def _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
             for successor in cfg.by_label[label].successors
             if successor not in loop.blocks
         }
-        if len(outside) != 1 or len(exits) != 1:
+        if len(outside) != 1 or not exits:
             continue
-        preheader, exit_label = outside[0], next(iter(exits))
+        preheader = outside[0]
         if header.label not in cfg.by_label[preheader].successors:
             continue
         if len(cfg.by_label[preheader].successors) != 1:
@@ -104,24 +104,12 @@ def _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
             for phi in phis
         ):
             continue
-        # Values defined in the body are not available on the loop's exit
-        # edge; only header phis may carry results into surrounding code.
         loop_definitions = {
             item.dst
             for label in loop.blocks
             for item in cfg.by_label[label].instructions
             if item.dst is not None
         }
-        non_phi = loop_definitions - {phi.dst for phi in phis}
-        if any(
-            value in non_phi
-            for block in cfg.blocks
-            if block.label not in loop.blocks
-            for item in block.instructions
-            for value in item.args
-        ):
-            continue
-
         static_cache = {}
 
         def static_value(value, visiting=None):
@@ -167,10 +155,26 @@ def _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
             )
             if result is None:
                 continue
-            exit_source, final_values = result
-            if exit_source != header.label:
-                continue
-            if any(not isinstance(final_values.get(phi.dst), int) for phi in phis):
+            exit_source, exit_label, final_values = result
+            live_out = {phi.dst for phi in phis}
+            live_out.update(
+                value
+                for block in cfg.blocks
+                if block.label not in loop.blocks
+                for item in block.instructions
+                for value in item.args
+                if value in loop_definitions
+            )
+            live_out.update(
+                value
+                for block in cfg.blocks
+                if block.label not in loop.blocks
+                for item in block.instructions
+                if item.op == "phi"
+                for source, value in item.extra
+                if value in loop_definitions
+            )
+            if any(not isinstance(final_values.get(value), int) for value in live_out):
                 continue
 
             preheader_block = cfg.by_label[preheader]
@@ -182,8 +186,10 @@ def _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
                     continue
                 preheader_block.instructions.pop()
             preheader_block.instructions.extend(
-                Instruction("const", phi.dst, (), phi.type, final_values[phi.dst])
-                for phi in phis
+                Instruction(
+                    "const", value, (), definitions[value].type, final_values[value]
+                )
+                for value in sorted(live_out)
             )
             preheader_block.instructions.append(Instruction("jump", extra=exit_label))
 
@@ -195,8 +201,13 @@ def _evaluate_one_loop(function, immutable, iteration_limit, instruction_limit):
                 for item in block.instructions:
                     if item.op == "phi":
                         extra = tuple(
-                            (preheader if source in loop.blocks else source, value)
+                            (source, value)
                             for source, value in item.extra
+                            if source not in loop.blocks
+                        ) + tuple(
+                            (preheader, value)
+                            for source, value in item.extra
+                            if source == exit_source
                         )
                         item = Instruction("phi", item.dst, (), item.type, extra)
                     items.append(item)
@@ -306,7 +317,7 @@ def _run_loop_region(cfg, loop, initial, immutable, iteration_limit, instruction
                     return None
                 next_label = target if take_target else alternatives[0]
                 if next_label not in loop.blocks:
-                    return label, values
+                    return label, next_label, values
                 predecessor, label = label, next_label
                 transferred = True
                 break
@@ -318,7 +329,7 @@ def _run_loop_region(cfg, loop, initial, immutable, iteration_limit, instruction
             return None
         next_label = block.successors[0]
         if next_label not in loop.blocks:
-            return label, values
+            return label, next_label, values
         predecessor, label = label, next_label
     return None
 

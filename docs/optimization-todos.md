@@ -146,8 +146,11 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   side-effect-free natural loops are interpreted independently of their
   surrounding function, including reads from closed-world immutable globals.
   The pass is limited to eight iterations and 1,024 SSA instructions and
-  rejects stores, calls, intrinsics, unknown memory, multiple exits, and
-  values escaping the loop outside header phis. This folds `demo.c`'s inline
+  rejects stores, calls, intrinsics, and unknown memory. It now follows
+  statically decidable breaks/multiple exits and materializes every scalar
+  live-out used by the selected exit path, including values forwarded through
+  exit trampolines and phis. The focused break/live-out loop falls from 80
+  bytes/44 steps to 12/2. This also folds `demo.c`'s inline
   four-element array sum, reducing the current image from 1,632 bytes/3,812
   steps to 1,479/3,741. Its next extension is the general CFG-aware loop plan
   above, including multiple exits and complete live-out reconstruction.
