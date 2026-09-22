@@ -632,11 +632,18 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(set(result.image.symbols), {"_start", "_halt"})
 
     def test_written_or_escaped_globals_are_not_folded(self):
-        result, _ = run(
-            "int value=4; int main(void){value=input();return value;}",
-            17,
-            inputs=[17],
-        )
+        old = OPTIMIZATIONS["straight_line_memory_forwarding"]
+        try:
+            # Isolate immutable-global folding: the separate exact-address
+            # forwarding pass may validly replace this store-followed load.
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = False
+            result, _ = run(
+                "int value=4; int main(void){value=input();return value;}",
+                17,
+                inputs=[17],
+            )
+        finally:
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = old
         self.assertIn("value", result.image.symbols)
         self.assertIn(" load ", result.ir.dump())
         result, _ = run(
@@ -1175,6 +1182,34 @@ class EncodingTests(unittest.TestCase):
 
         for value in (-4, 0, 1, 2, 5, 10):
             self.assertEqual(execute(looped, value), execute(recursive, value))
+
+    def test_straight_line_memory_forwarding_improves_printing_loop(self):
+        source = (
+            '#include <stdio.h>\n'
+            'int main(void){for(int i=0;i<12;i++)'
+            'printf("value=%d\\n",i);return 0;}'
+        )
+        old = OPTIMIZATIONS["straight_line_memory_forwarding"]
+        try:
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = False
+            baseline = _compile_source(source, target=Target())
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = True
+            optimized = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["straight_line_memory_forwarding"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary)
+            returned = machine.run(result.image.symbols["_halt"])
+            framebuffer = result.image.symbols["__dyn_printf_framebuffer"]
+            rows = bytes(machine.memory[framebuffer:framebuffer + 12 * 96])
+            return returned, rows, machine.steps
+
+        baseline_result = execute(baseline)
+        optimized_result = execute(optimized)
+        self.assertEqual(optimized_result[:2], baseline_result[:2])
+        self.assertLess(optimized_result[2], baseline_result[2])
+        self.assertLess(len(optimized.image.binary), len(baseline.image.binary))
 
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)

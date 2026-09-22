@@ -98,12 +98,14 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   bases and address increments rather than recomputing `base + index`.
   This is the most visible instruction-level difference in GCC's
   `insertion_sort`, sieve, and numeric-array loops.
-- [ ] **Printing-loop memory traffic.** Forward exact-address loads and stores
-  through straight-line regions using conservative memory versions, then
-  extend the profitable form across loop backedges. Calls, volatile/device
-  accesses, and possibly aliasing stores must invalidate cached values. Use
-  the formatted-output loops as real regressions, but keep the transformation
-  runtime-independent so ordinary global/local update loops benefit too.
+- [x] **Printing-loop memory traffic (straight-line form).** Exact-address,
+  same-type loads and stores are forwarded within blocks outside natural
+  loops; calls, intrinsics, unknown stores, and differently typed accesses are
+  conservative barriers or invalidations. The general pass reduces a 12-line
+  formatted-output regression from 1,822 bytes/12,263 steps to 1,790/11,871,
+  and also improves `demo`, `bigprime`, `c_aggregate_compat`, `pi`, `primes`,
+  and `dynamic_sensor_report`. Cross-block and backedge memory facts remain a
+  future MemorySSA/alias-analysis extension.
 - [ ] **Known-trip-count analysis and costed full unrolling.** Derive trip
   counts for canonical induction phis with constant initial value, step, and
   bound. For very small counts, compare the target cost of duplicated bodies
@@ -125,6 +127,14 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   with constant arguments within explicit instruction/recursion limits. This
   should allow `factorial(5)` to become `120`, matching GCC `-O2`, without a
   factorial-specific fold.
+- [ ] **General single-recursion recurrence analysis.** Classify one-recursive-
+  call functions beyond associative reductions. Affine forms such as
+  `element - recurse(next)` may be lowered only with a proven equivalent state
+  update that preserves integer semantics; non-associative forms such as
+  `element / recurse(next)` generally require reverse-order evaluation. Extend
+  argument-state phis to multiple parameters and simultaneous permutations
+  independently of the result recurrence. Do not label these ordinary
+  accumulator reductions.
 - [ ] **Extend conservative value numbering.** Expensive pure arithmetic is
   implemented. Add pressure-aware reuse for cheap arithmetic and address
   formation, then loads keyed by a conservative memory version. A naïve

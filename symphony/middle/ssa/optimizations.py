@@ -14,6 +14,7 @@ OPTIMIZATIONS = {
     "loop_invariant_hoisting": True,
     "induction_strength_reduction": True,
     "redundant_loop_memory_elimination": True,
+    "straight_line_memory_forwarding": True,
     "comparison_branch_fusion": True,
     "comparison_zero_test_fusion": True,
     "paired_divmod": True,

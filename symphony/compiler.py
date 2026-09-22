@@ -15,6 +15,7 @@ from .middle.ssa import (
     simplify_control_flow,
     reduce_induction_strength,
     eliminate_redundant_loop_memory,
+    eliminate_redundant_straight_line_memory,
     propagate_global_copies,
     simplify_algebra,
     fuse_comparison_branches,
@@ -64,6 +65,9 @@ reduce_induction_strength = _optional_optimization(
 )
 eliminate_redundant_loop_memory = _optional_optimization(
     "redundant_loop_memory_elimination", eliminate_redundant_loop_memory
+)
+eliminate_redundant_straight_line_memory = _optional_optimization(
+    "straight_line_memory_forwarding", eliminate_redundant_straight_line_memory
 )
 fuse_comparison_branches = _optional_optimization(
     "comparison_branch_fusion", fuse_comparison_branches
@@ -154,6 +158,8 @@ class Compiler:
             reduce_induction_strength(function)
             verify(function)
             eliminate_redundant_loop_memory(function)
+            verify(function)
+            eliminate_redundant_straight_line_memory(function)
             verify(function)
             fuse_comparison_zero_tests(function)
             verify(function)

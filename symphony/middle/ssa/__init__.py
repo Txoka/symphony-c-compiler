@@ -9,7 +9,10 @@ from .dce import remove_dead_values
 from .inline import inline_single_call_functions
 from .simplify_cfg import simplify_control_flow
 from .induction import reduce_induction_strength
-from .loop_memory import eliminate_redundant_loop_memory
+from .loop_memory import (
+    eliminate_redundant_loop_memory,
+    eliminate_redundant_straight_line_memory,
+)
 from .copies import propagate_global_copies
 from .algebra import simplify_algebra
 from .fuse_branches import fuse_comparison_branches, fuse_comparison_zero_tests
@@ -37,6 +40,7 @@ __all__ = [
     "simplify_control_flow",
     "reduce_induction_strength",
     "eliminate_redundant_loop_memory",
+    "eliminate_redundant_straight_line_memory",
     "propagate_global_copies",
     "simplify_algebra",
     "fuse_comparison_branches",
