@@ -4,6 +4,33 @@ This tracks the standard optimization work proposed for Symphony C. Checked
 items are implemented. Partially checked sections describe the
 working subset and the remaining work explicitly.
 
+## `opt/divmod-and-loop-roadmap` closeout
+
+The loop milestone on this branch is complete. It provides natural-loop and
+induction analysis, LICM, exact-address loop memory cleanup, bounded scalar loop
+evaluation, guarded full unrolling, statically traced `continue`/`break` paths,
+data-dependent internal CFG cloning for header-controlled bounded loops, affine
+scaled pointer induction, and scaled pointer-limit exits. Unrolling compares the
+complete final target images and defaults to no code growth; its independent
+policy switch permits speed-over-size experiments. Scaled induction and pointer
+limits are independently toggleable and avoid fixed small loops better handled
+by evaluation/unrolling and byte-stride exits that add pressure without removing
+scaling work.
+
+Still-useful loop research is intentionally deferred: data-dependent breaks with
+general multi-exit LCSSA reconstruction, partial unrolling, profile/cost-guided
+unrolling, MemorySSA-backed cross-block forwarding, and bulk fill/copy recognition.
+
+## Goal for the next branch
+
+Move from loop shape discovery to allocation/code-generation quality: retain SSA
+identity through allocation, compute CFG liveness and interference, weight spills
+by loop depth/use frequency, keep loop-carried cursors/bounds in callee-saved
+registers, reuse noninterfering stack slots, and then remove redundant physical
+moves/spills with a post-allocation peephole pass. Every sub-change remains
+independently toggleable and must run both ISA suites, both selfhost suites, and
+the complete before/after/fresh-GCC example benchmark.
+
 ## Current priorities
 
 Completed foundations:
@@ -43,43 +70,27 @@ loop quality, not another local constant-folding rule.
 Implement the following in this order, measuring native termination steps and
 preserving the full suite after each atomic change:
 
-1. [ ] **General CFG-aware loop transformation framework (next priority).**
-   Generalize the completed natural-loop discovery, bounded region evaluator,
-   and linear known-trip unroller into one reusable loop plan. Normalize or
-   explicitly model preheaders, latches, multiple backedges/`continue` edges,
-   internal conditional blocks, `break` edges, and multiple exits. Reconstruct
-   every live-out value with dedicated exit phis (LCSSA-style), including the
-   zero-trip path, before cloning, evaluating, or rewriting a loop. Preserve
-   exact side-effect order. Feed the shared trip-count and exit model to both
-   constant evaluation and retained-effect unrolling; keep exact final-image
-   no-growth comparison as the default and the existing speed-over-size option
-   as an independent policy. Use `insertion_sort`'s conditional loop and the
-   numeric examples as the first real-program targets.
-2. [ ] **SSA liveness and allocation.** Retain SSA value identity through
+1. [ ] **SSA liveness and allocation (next branch).** Retain SSA value identity through
    allocation; compute block liveness/live intervals or interference; make
    loop-depth/use-frequency spill decisions; keep loop-carried pointers,
    bounds, and invariant results in callee-saved registers across calls.
-3. [x] **Conservative expensive-expression CSE (initial form).** Reuse
+2. [x] **Conservative expensive-expression CSE (initial form).** Reuse
    dominated repeated multiply/divide/remainder expressions. On `primes`,
    this removes the second `i * i`, reducing 2,140 to 2,064 bytes and
    2,418,382 to 2,413,144 steps. Cheap expression, address, and load CSE
    remain below because indiscriminate reuse increases register pressure.
-4. [ ] **Stronger loop optimization.** On top of item 1, extend existing
-   LICM/basic induction work with pointer induction, pointer-limit exits, and
-   stronger trip-count facts, plus
-   proven bulk-fill/copy idioms. Use proven trip counts to fully unroll only
-   when a target-cost estimate predicts no final code growth; run this after
-   invariant hoisting and CFG simplification so bounds and loop bodies are in
-   canonical form. Keep growth-oriented unrolling separately opt-in.
-5. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
+3. [x] **Bounded loop optimization milestone.** Natural loops, invariant
+   hoisting, affine/scaled induction, pointer limits, bounded evaluation, and
+   guarded full unrolling are implemented as described in the closeout above.
+4. [x] **Paired unsigned division/remainder.** Recognize a same-operand `%`
    followed by `/` across pure instructions and stores proven to target a
    different local object. The focused regression falls from 684 to 596 bytes
    and 5,610 to 2,793 reference-emulator steps. On `primes`, pairing reduces
    2,372 to 2,140 bytes and 4,113,385 to 2,418,382 steps.
-6. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
+5. [ ] **Post-allocation target peepholes.** Remove physical-register moves,
    redundant spills/reloads, and needless address materializations; iterate
    with branch/call relaxation.
-7. [ ] **Costed interprocedural specialization.** Consider constant-argument
+6. [ ] **Costed interprocedural specialization.** Consider constant-argument
    specialization and multi-site inlining only under an explicit size/cycle
    profitability policy, after the preceding foundations expose their gains.
 
@@ -107,17 +118,20 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   semantics.  `insertion_sort.c` currently exposes this form; the existing
   local comparison-branch fusion cannot cross that phi.
 - [ ] **General CFG-aware loop transformation and live-out reconstruction
-  (highest remaining priority).** The initial evaluator and unroller only
-  cover restricted canonical regions. Add the shared loop plan described in
-  priority item 1 before broadening either pass, so internal branches,
-  multiple `continue`/backedge edges, `break`, multiple exits, and values used
-  after the loop are handled by one proved mechanism rather than pass-specific
-  matchers.
-- [ ] **Pointer induction and loop-address CSE.** Give an indexed loop a
+  (deferred advanced work).** Header-controlled bounded loops now retain and
+  clone data-dependent internal branches, and known paths handle continues,
+  breaks, multiple exits, and scalar live-outs. A future shared LCSSA-style
+  plan should generalize data-dependent breaks and arbitrary multi-exit value
+  reconstruction; this is no longer the next-branch priority.
+- [x] **Pointer induction and pointer-limit exits (scaled initial form).** Give an indexed loop a
   derived advancing pointer and, where valid, a pointer end bound.  Reuse
   bases and address increments rather than recomputing `base + index`.
-  This is the most visible instruction-level difference in GCC's
-  `insertion_sort`, sieve, and numeric-array loops.
+  Affine `base + i`, `base + i * scale`, and `base + (i << shift)` forms now
+  become advancing recurrences. Scaled dynamic-bound loops may compare the
+  cursor with a hoisted scaled end pointer. The focused four-element `int`
+  loop retains 132 bytes and falls from 124 to 121 steps. Fixed small loops
+  remain available to evaluation/unrolling, and byte-stride pointer exits are
+  rejected after they regressed `insertion_sort`.
 - [x] **Printing-loop memory traffic (straight-line form).** Exact-address,
   same-type loads and stores are forwarded within blocks outside natural
   loops; calls, intrinsics, unknown stores, and differently typed accesses are
@@ -126,8 +140,8 @@ its raw-image-size disadvantages often identify runtime/linker policy instead.
   and also improves `demo`, `bigprime`, `c_aggregate_compat`, `pi`, `primes`,
   and `dynamic_sensor_report`. Cross-block and backedge memory facts remain a
   future MemorySSA/alias-analysis extension.
-- [x] **Known-trip-count analysis and bounded full unrolling (linear initial
-  form).** Canonical single-backedge linear loops of at most four iterations
+- [x] **Known-trip-count analysis and bounded full unrolling.** Canonical
+  header-controlled loops of at most four iterations
   are cloned with SSA value remapping and retained side-effect order. The
   default `unroll_no_code_growth` policy generates both complete target images
   and keeps the unrolled form only when its final binary is no larger; setting
@@ -409,11 +423,11 @@ Remaining work, in dependency and payoff order:
 
 ## 8. Loop optimization
 
-- [ ] Identify natural loops and their nesting depth.
-- [ ] Move loop-invariant calculations out of loops.
-- [ ] Simplify induction variables.
-- [ ] Detect constant trip counts.
-- [ ] Remove redundant loop loads and stores.
+- [x] Identify natural loops and their nesting depth.
+- [x] Move safe loop-invariant calculations out of loops.
+- [x] Simplify basic and affine scaled induction variables.
+- [x] Detect bounded constant trip counts.
+- [x] Remove proven redundant exact-address loop loads and stores.
 - [ ] Recognize count-down loops when they are cheaper for the target ISA.
 
 ### GCC optimization techniques dyncc's own optimizer should adopt
@@ -586,11 +600,11 @@ memory behavior.
 
 ## Optional loop unrolling
 
-- [ ] Add an optimization-level and code-size policy before enabling unrolling.
-- [ ] Fully unroll very small loops with proven constant trip counts.
+- [x] Add an exact final-image no-growth policy before enabling unrolling.
+- [x] Fully unroll very small loops with proven constant trip counts.
 - [ ] Optionally partially unroll larger fixed loops by factors such as two or four.
-- [ ] Add an explicit `--unroll-loops` option for growth-oriented optimization.
-- [ ] Disable growth-oriented unrolling in a future size-optimization mode.
+- [x] Keep growth-oriented unrolling behind `unroll_no_code_growth = false`.
+- [x] Keep no-growth unrolling as the default.
 - [ ] Benchmark partial unrolling of the 32-round division loop; keep it rolled by default.
 
 ## Recursion and tail calls

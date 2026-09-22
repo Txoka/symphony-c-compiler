@@ -15,6 +15,8 @@ from .middle.ssa import (
     inline_single_call_functions,
     simplify_control_flow,
     reduce_induction_strength,
+    reduce_scaled_induction_strength,
+    convert_pointer_limit_loops,
     eliminate_redundant_loop_memory,
     eliminate_redundant_straight_line_memory,
     propagate_global_copies,
@@ -66,6 +68,12 @@ hoist_loop_invariants = _optional_optimization(
 )
 reduce_induction_strength = _optional_optimization(
     "induction_strength_reduction", reduce_induction_strength
+)
+reduce_scaled_induction_strength = _optional_optimization(
+    "scaled_induction_strength_reduction", reduce_scaled_induction_strength
+)
+convert_pointer_limit_loops = _optional_optimization(
+    "pointer_limit_loops", convert_pointer_limit_loops
 )
 eliminate_redundant_loop_memory = _optional_optimization(
     "redundant_loop_memory_elimination", eliminate_redundant_loop_memory
@@ -169,6 +177,10 @@ class Compiler:
             hoist_loop_invariants(function)
             verify(function)
             reduce_induction_strength(function)
+            verify(function)
+            reduce_scaled_induction_strength(function)
+            verify(function)
+            convert_pointer_limit_loops(function)
             verify(function)
             eliminate_redundant_loop_memory(function)
             verify(function)

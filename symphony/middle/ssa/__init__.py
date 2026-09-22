@@ -8,7 +8,11 @@ from .hoist import hoist_loop_invariants
 from .dce import remove_dead_values
 from .inline import inline_single_call_functions
 from .simplify_cfg import simplify_control_flow
-from .induction import reduce_induction_strength
+from .induction import (
+    reduce_induction_strength,
+    reduce_scaled_induction_strength,
+    convert_pointer_limit_loops,
+)
 from .loop_memory import (
     eliminate_redundant_loop_memory,
     eliminate_redundant_straight_line_memory,
@@ -41,6 +45,8 @@ __all__ = [
     "inline_single_call_functions",
     "simplify_control_flow",
     "reduce_induction_strength",
+    "reduce_scaled_induction_strength",
+    "convert_pointer_limit_loops",
     "eliminate_redundant_loop_memory",
     "eliminate_redundant_straight_line_memory",
     "propagate_global_copies",

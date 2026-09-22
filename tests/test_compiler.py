@@ -1446,6 +1446,31 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(len(guarded.image.binary), len(looped.image.binary))
         self.assertLess(execute(unrolled, (1, 0, 1))[2], execute(looped, (1, 0, 1))[2])
 
+    def test_pointer_limit_loop_uses_scaled_derived_recurrence(self):
+        source = (
+            "#include <symphony.h>\n"
+            "int values[4]={2,4,6,8};int main(void){int n=input(),total=0;"
+            "for(int i=0;i<n;i++){total+=values[i];output(total);}return total;}"
+        )
+        old = OPTIMIZATIONS["pointer_limit_loops"]
+        try:
+            OPTIMIZATIONS["pointer_limit_loops"] = False
+            indexed = _compile_source(source, target=Target())
+            OPTIMIZATIONS["pointer_limit_loops"] = True
+            pointer_limited = _compile_source(source, target=Target())
+        finally:
+            OPTIMIZATIONS["pointer_limit_loops"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=(4,))
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(pointer_limited)[:2], execute(indexed)[:2])
+        self.assertEqual(execute(pointer_limited)[:2], (20, [2, 6, 12, 20]))
+        self.assertLess(execute(pointer_limited)[2], execute(indexed)[2])
+        self.assertLessEqual(len(pointer_limited.image.binary), len(indexed.image.binary))
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)
