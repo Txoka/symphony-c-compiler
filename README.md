@@ -122,7 +122,7 @@ are documented in [docs/c-language-support.md](docs/c-language-support.md).
 - Plain `char` is unsigned; explicit signed/unsigned `char`, `short`, `int`, and `long` are supported.
 - Pointers, pointers to pointers, function pointers, explicit integer/pointer casts, and `void` functions/pointers.
 - Local variables and lexical scopes; file-scope globals, `static` globals/functions, static locals, external declarations resolved across linked translation units, and file/block-scope typedefs.
-- Named and anonymous structures, self-referential structure pointers, natural member layout, `.`/`->`, nested structure/array members, and brace initialization for structure objects.
+- Named and anonymous structures, self-referential structure pointers, natural member layout, `.`/`->`, nested structure/array members, anonymous aggregate-member promotion, and brace initialization for structure objects.
 - Enumerations with implicit or integer-constant enumerator values.
 - `const` objects and pointers with qualifier-preserving conversions and modification diagnostics.
 - Decimal/octal/hex integer literals, character literals, ordinary single-byte strings, and comments.
