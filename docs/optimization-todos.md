@@ -17,6 +17,18 @@ limits are independently toggleable and avoid fixed small loops better handled
 by evaluation/unrolling and byte-stride exits that add pressure without removing
 scaling work.
 
+The loop passes now run to a local fixed point after self-tail recursion has
+been lowered.  The loop includes SCCP, copy/algebraic cleanup, dead-value and
+CFG cleanup, LICM, induction/scaled-induction reduction, pointer-limit
+conversion, and loop-memory elimination.  This placement was selected from
+full-example experiments: an earlier fixed point adds nothing once this phase
+is present, while moving it after inlining and runtime-arithmetic legalization
+regresses `bigprime` by 960 bytes and roughly 2.14 million steps. Reversing the
+scalar/loop order reaches identical output. The retained phase improves
+`insertion_sort`, `primes`, and Hanoi without regressions, and trades four
+bytes for 357 fewer steps in `dynamic_sensor_report`. It is independently
+toggleable as `loop_optimization_fixed_point`.
+
 Still-useful loop research is intentionally deferred: data-dependent breaks with
 general multi-exit LCSSA reconstruction, partial unrolling, profile/cost-guided
 unrolling, MemorySSA-backed cross-block forwarding, and bulk fill/copy recognition.

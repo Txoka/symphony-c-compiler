@@ -1471,6 +1471,27 @@ class EncodingTests(unittest.TestCase):
         self.assertLess(execute(pointer_limited)[2], execute(indexed)[2])
         self.assertLessEqual(len(pointer_limited.image.binary), len(indexed.image.binary))
 
+    def test_loop_pipeline_reaches_fixed_point_after_self_tail_lowering(self):
+        source = (ROOT / "examples" / "insertion_sort.c").read_text()
+        inputs = (15, 3, 9, 0, 14, 2, 8, 1, 13, 4, 12, 5, 11, 6, 10, 7)
+        old = OPTIMIZATIONS["loop_optimization_fixed_point"]
+        try:
+            OPTIMIZATIONS["loop_optimization_fixed_point"] = False
+            single_pass = _compile_source(source, target=Target(bss_mode="assume-zeroed"))
+            OPTIMIZATIONS["loop_optimization_fixed_point"] = True
+            fixed_point = _compile_source(source, target=Target(bss_mode="assume-zeroed"))
+        finally:
+            OPTIMIZATIONS["loop_optimization_fixed_point"] = old
+
+        def execute(result):
+            machine = Machine(result.image.binary, inputs=inputs)
+            returned = machine.run(result.image.symbols["_halt"])
+            return returned, machine.outputs, machine.steps
+
+        self.assertEqual(execute(fixed_point)[:2], execute(single_pass)[:2])
+        self.assertLessEqual(len(fixed_point.image.binary), len(single_pass.image.binary))
+        self.assertLess(execute(fixed_point)[2], execute(single_pass)[2])
+
     def test_named_registers_and_abi_roles(self):
         self.assertEqual(isa.Register.ZR, 0)
         self.assertEqual(isa.Register.SP, 14)

@@ -128,6 +128,33 @@ inline_single_call_functions = _optional_optimization(
 )
 
 
+def _optimize_loops_to_fixed_point(function):
+    """Repeat mutually enabling scalar and loop simplifications."""
+    if not optimization_enabled("loop_optimization_fixed_point"):
+        return False
+    changed_any = False
+    while True:
+        changed = False
+        # Scalar cleanup first exposes canonical loop bounds and recurrences.
+        changed |= sparse_conditional_constant_propagation(function)
+        changed |= propagate_global_copies(function)
+        changed |= simplify_algebra(function)
+        changed |= remove_dead_values(function)
+        changed |= simplify_control_flow(function)
+        # Loop transforms can in turn expose constants, dead phis, and CFG.
+        changed |= hoist_loop_invariants(function)
+        changed |= reduce_induction_strength(function)
+        changed |= reduce_scaled_induction_strength(function)
+        changed |= convert_pointer_limit_loops(function)
+        changed |= eliminate_redundant_loop_memory(function)
+        changed |= remove_dead_values(function)
+        changed |= simplify_control_flow(function)
+        verify(function)
+        changed_any |= changed
+        if not changed:
+            return changed_any
+
+
 @dataclass
 class Compilation:
     parsed: object
@@ -246,6 +273,8 @@ class Compiler:
             eliminate_tail_calls(function, self_only=True)
             verify(function)
             lower_self_tail_calls_to_loops(function)
+            verify(function)
+            _optimize_loops_to_fixed_point(function)
             verify(function)
             propagate_global_copies(function)
             verify(function)

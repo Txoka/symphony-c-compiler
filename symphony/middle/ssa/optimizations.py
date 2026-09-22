@@ -16,6 +16,7 @@ OPTIMIZATIONS = {
     "scaled_induction_strength_reduction": True,
     "pointer_limit_loops": True,
     "redundant_loop_memory_elimination": True,
+    "loop_optimization_fixed_point": True,
     "straight_line_memory_forwarding": True,
     "comparison_branch_fusion": True,
     "comparison_zero_test_fusion": True,
