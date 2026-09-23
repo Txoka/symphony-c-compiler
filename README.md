@@ -221,6 +221,13 @@ queues are empty. `output()` appends to `machine.outputs`, and `screen()` append
 `(setting, value)` to `machine.screen_updates`. Set `persistent_size` on the
 compiler target to record and validate the hardware size; pass the same size to
 `Machine` for emulation. The CLI does this automatically when `--run` is used.
+`Machine` makes `time()`/`time_low()`/`time_high()` read Unix-epoch nanoseconds
+from the host clock. Passing an explicit `time_value` selects the frozen clock
+used by deterministic tests; `time_per_step_ns` may additionally advance that
+clock by a fixed amount per completed instruction for deterministic virtual-time
+simulation. A `screen_callback` may inspect
+`(setting, value, completed_steps)` and return true to stop immediately after
+that screen instruction, which is useful for exact frame-boundary sampling.
 Device addresses retain the hardware's wrapping behavior. These names are
 reserved and cannot be used for user-defined functions.
 

@@ -10,8 +10,7 @@ from pathlib import Path
 
 # Inputs are deliberately modest, deterministic terminating workloads. They
 # are provenance for the comparison, not an attempt to represent every use.
-# Animated and interactive examples use a fixed instruction sample until the
-# FPS/cycles-per-frame measurement replaces it in the next benchmark revision.
+# Animated and interactive examples use framebuffer-presentation cadence.
 CASES = {
     "anonymous_aggregate_members.c": (),
     "arena_allocator.c": (),
@@ -44,7 +43,8 @@ CONTINUOUS_CASES = frozenset({
     "unbounded/pong.c",
     "unbounded/sphere.c",
 })
-CONTINUOUS_STEPS = 10_000_000
+FRAME_WARMUP_COUNT = 3
+FRAME_SAMPLE_COUNT = 60
 
 
 def validate_cases(examples_directory):
@@ -60,4 +60,10 @@ def validate_cases(examples_directory):
         )
 
 
-__all__ = ["CASES", "CONTINUOUS_CASES", "CONTINUOUS_STEPS", "validate_cases"]
+__all__ = [
+    "CASES",
+    "CONTINUOUS_CASES",
+    "FRAME_SAMPLE_COUNT",
+    "FRAME_WARMUP_COUNT",
+    "validate_cases",
+]

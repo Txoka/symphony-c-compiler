@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Symphony vs. Dynphony is a per-run flag (State.is_symphony), checked once
  * per decode below. decoded_at() caches the result per PC (see below), so
@@ -83,6 +84,7 @@ typedef struct {
     PyObject *keyboard_inputs;       /* owned */
     PyObject *outputs;               /* owned */
     PyObject *screen_updates;        /* owned */
+    PyObject *screen_callback;       /* owned */
     PyObject *persistent_obj;        /* owned */
 
     uint8_t *memory;
@@ -96,8 +98,10 @@ typedef struct {
     uint32_t pc;
     uint64_t steps;
     uint64_t time_value;
+    uint64_t time_per_step_ns;
     int has_persistent;
     int is_symphony;
+    int live_time;
 
     Decoded *decode;
     size_t decode_count;
@@ -194,6 +198,7 @@ static int load_state(State *s, PyObject *machine) {
     LOAD_OWNED(keyboard_inputs, "keyboard_inputs");
     LOAD_OWNED(outputs, "outputs");
     LOAD_OWNED(screen_updates, "screen_updates");
+    LOAD_OWNED(screen_callback, "screen_callback");
     LOAD_OWNED(persistent_obj, "persistent");
 #undef LOAD_OWNED
 
@@ -229,6 +234,12 @@ static int load_state(State *s, PyObject *machine) {
     Py_DECREF(obj);
     if (s->is_symphony < 0) return -1;
 
+    obj = get_attr(machine, "live_time");
+    if (!obj) return -1;
+    s->live_time = PyObject_IsTrue(obj);
+    Py_DECREF(obj);
+    if (s->live_time < 0) return -1;
+
     obj = get_attr(machine, "steps");
     if (!obj) return -1;
     s->steps = PyLong_AsUnsignedLongLong(obj);
@@ -238,6 +249,12 @@ static int load_state(State *s, PyObject *machine) {
     obj = get_attr(machine, "time_value");
     if (!obj) return -1;
     s->time_value = PyLong_AsUnsignedLongLongMask(obj);
+    Py_DECREF(obj);
+    if (PyErr_Occurred()) return -1;
+
+    obj = get_attr(machine, "time_per_step_ns");
+    if (!obj) return -1;
+    s->time_per_step_ns = PyLong_AsUnsignedLongLongMask(obj);
     Py_DECREF(obj);
     if (PyErr_Occurred()) return -1;
 
@@ -280,6 +297,7 @@ static void release_state(State *s) {
     Py_XDECREF(s->keyboard_inputs);
     Py_XDECREF(s->outputs);
     Py_XDECREF(s->screen_updates);
+    Py_XDECREF(s->screen_callback);
     Py_XDECREF(s->persistent_obj);
 }
 
@@ -330,13 +348,37 @@ static int queue_pop(PyObject *queue, uint32_t *result) {
     return PyErr_Occurred() ? -1 : 0;
 }
 
-static int append_screen(PyObject *list, uint32_t setting, uint32_t value) {
+static int append_screen(State *s, uint32_t setting, uint32_t value) {
     PyObject *pair = Py_BuildValue("(II)", setting, value);
-    int result;
+    PyObject *callback_result;
+    int result, stop;
     if (!pair) return -1;
-    result = PyList_Append(list, pair);
+    result = PyList_Append(s->screen_updates, pair);
     Py_DECREF(pair);
-    return result;
+    if (result < 0 || s->screen_callback == Py_None) return result;
+    callback_result = PyObject_CallFunction(
+        s->screen_callback, "IIK", setting, value,
+        (unsigned long long)(s->steps + 1u));
+    if (!callback_result) return -1;
+    stop = PyObject_IsTrue(callback_result);
+    Py_DECREF(callback_result);
+    return stop;
+}
+
+static uint64_t current_time_ns(void) {
+    struct timespec now;
+#if defined(_WIN32)
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC) return 0;
+#else
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) return 0;
+#endif
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+}
+
+static inline uint64_t device_time(const State *s) {
+    return s->live_time
+        ? current_time_ns()
+        : s->time_value + s->steps * s->time_per_step_ns;
 }
 
 static inline void invalidate_decode(State *s, uint32_t address, unsigned size) {
@@ -513,6 +555,18 @@ static PyObject *run_chunk(PyObject *self, PyObject *args) {
     goto dispatch; \
 } while (0)
 
+#define FINISH_SCREEN(newpc, screen_result) do { \
+    int _screen_result = (screen_result); \
+    if (_screen_result < 0) { error = 1; goto done; } \
+    if (_screen_result > 0) { \
+        s.pc = (uint32_t)(newpc); \
+        ++s.steps; \
+        stopped = 1; \
+        goto done; \
+    } \
+    FINISH_INSN(newpc); \
+} while (0)
+
 /* Mask the condition bits against the named flag register, OR-reduce, then
  * invert when condition bit 3 is set. */
 #define BRANCH_TAKEN(d) \
@@ -557,10 +611,10 @@ L_IN:       if (queue_pop(s.inputs, &s.regs[d->a]) < 0) { error = 1; goto done; 
 L_OUT_R:    if (append_u32(s.outputs, s.regs[d->a]) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
 L_OUT_I:    if (append_u32(s.outputs, d->imm) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
 L_KEY:      if (queue_pop(s.keyboard_inputs, &s.regs[d->a]) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
-L_SCREEN_R: if (append_screen(s.screen_updates, s.regs[d->a], s.regs[d->c]) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
-L_SCREEN_I: if (append_screen(s.screen_updates, s.regs[d->a], d->imm) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
-L_TIME_LO:  s.regs[d->a] = (uint32_t)s.time_value; FINISH_INSN(d->next_pc);
-L_TIME_HI:  s.regs[d->a] = (uint32_t)(s.time_value >> 32); FINISH_INSN(d->next_pc);
+L_SCREEN_R: FINISH_SCREEN(d->next_pc, append_screen(&s, s.regs[d->a], s.regs[d->c]));
+L_SCREEN_I: FINISH_SCREEN(d->next_pc, append_screen(&s, s.regs[d->a], d->imm));
+L_TIME_LO:  s.regs[d->a] = (uint32_t)device_time(&s); FINISH_INSN(d->next_pc);
+L_TIME_HI:  s.regs[d->a] = (uint32_t)(device_time(&s) >> 32); FINISH_INSN(d->next_pc);
 L_GETPC:    s.regs[d->a] = previous; FINISH_INSN(d->next_pc);
 
 #define RR_BIN(label, expr) label: rhs = s.regs[d->c]; s.regs[d->a] = (expr); FINISH_INSN(d->next_pc)
@@ -623,10 +677,10 @@ dispatch:
             case U_OUT_R: if(append_u32(s.outputs,s.regs[d->a])<0){error=1;goto done;} FINISH_INSN(d->next_pc);
             case U_OUT_I: if(append_u32(s.outputs,d->imm)<0){error=1;goto done;} FINISH_INSN(d->next_pc);
             case U_KEY: if(queue_pop(s.keyboard_inputs,&s.regs[d->a])<0){error=1;goto done;} FINISH_INSN(d->next_pc);
-            case U_SCREEN_R: if(append_screen(s.screen_updates,s.regs[d->a],s.regs[d->c])<0){error=1;goto done;} FINISH_INSN(d->next_pc);
-            case U_SCREEN_I: if(append_screen(s.screen_updates,s.regs[d->a],d->imm)<0){error=1;goto done;} FINISH_INSN(d->next_pc);
-            case U_TIME_LO: s.regs[d->a]=(uint32_t)s.time_value; FINISH_INSN(d->next_pc);
-            case U_TIME_HI: s.regs[d->a]=(uint32_t)(s.time_value>>32); FINISH_INSN(d->next_pc);
+            case U_SCREEN_R: FINISH_SCREEN(d->next_pc,append_screen(&s,s.regs[d->a],s.regs[d->c]));
+            case U_SCREEN_I: FINISH_SCREEN(d->next_pc,append_screen(&s,s.regs[d->a],d->imm));
+            case U_TIME_LO: s.regs[d->a]=(uint32_t)device_time(&s); FINISH_INSN(d->next_pc);
+            case U_TIME_HI: s.regs[d->a]=(uint32_t)(device_time(&s)>>32); FINISH_INSN(d->next_pc);
             case U_GETPC: s.regs[d->a]=previous; FINISH_INSN(d->next_pc);
 
 #define SW_RR(u, expr) case u: rhs=s.regs[d->c]; s.regs[d->a]=(expr); FINISH_INSN(d->next_pc)
@@ -663,6 +717,8 @@ dispatch:
         }
     }
 #endif
+
+#undef FINISH_SCREEN
 
 done:
     if (sync_state(&s) < 0) error = 1;
