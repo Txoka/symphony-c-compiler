@@ -312,6 +312,14 @@ static int load_state(State *s, PyObject *machine) {
 }
 
 static void release_state(State *s) {
+    PyObject *error_type = NULL;
+    PyObject *error_value = NULL;
+    PyObject *error_traceback = NULL;
+
+    /* Cleanup must not replace an exception raised by a Python callback.
+     * In particular, older CPython releases may alter the active exception
+     * while releasing an exported bytearray buffer. */
+    PyErr_Fetch(&error_type, &error_value, &error_traceback);
     PyMem_Free(s->decode);
     s->decode = NULL;
     if (s->memory_view.obj) PyBuffer_Release(&s->memory_view);
@@ -323,6 +331,7 @@ static void release_state(State *s) {
     Py_XDECREF(s->screen_updates);
     Py_XDECREF(s->screen_update_callback);
     Py_XDECREF(s->persistent_obj);
+    PyErr_Restore(error_type, error_value, error_traceback);
 }
 
 static int set_attr_u64(PyObject *object, const char *name, uint64_t value) {
@@ -780,8 +789,26 @@ dispatch:
 #undef FINISH_SCREEN
 
 done:
-    if (sync_state(&s) < 0) error = 1;
     if (error) {
+        PyObject *error_type = NULL;
+        PyObject *error_value = NULL;
+        PyObject *error_traceback = NULL;
+
+        /* Do not call Python APIs with the callback exception active.  Save
+         * it while synchronizing partial machine state, then restore it as
+         * the error reported by run_chunk. */
+        PyErr_Fetch(&error_type, &error_value, &error_traceback);
+        if (sync_state(&s) < 0) PyErr_Clear();
+        release_state(&s);
+        if (error_type) {
+            PyErr_Restore(error_type, error_value, error_traceback);
+        } else {
+            PyErr_SetString(PyExc_SystemError,
+                            "native emulator failed without an exception");
+        }
+        return NULL;
+    }
+    if (sync_state(&s) < 0) {
         release_state(&s);
         return NULL;
     }
