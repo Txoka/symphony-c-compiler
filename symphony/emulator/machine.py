@@ -45,6 +45,7 @@ class Machine:
         keyboard_inputs=(),
         time_value=None,
         time_per_step_ns=0,
+        time_frequency_hz=0,
         live_time=None,
         persistent_size=0,
         symphony=False,
@@ -70,6 +71,7 @@ class Machine:
         self.live_time = time_value is None if live_time is None else live_time
         self.time_value = (0 if time_value is None else time_value) & 0xFFFFFFFFFFFFFFFF
         self.time_per_step_ns = time_per_step_ns & 0xFFFFFFFFFFFFFFFF
+        self.time_frequency_hz = time_frequency_hz & 0xFFFFFFFFFFFFFFFF
         self.persistent = bytearray(persistent_size)
         self.persistent_mask = persistent_size - 1 if persistent_size else None
         self.symphony = symphony
@@ -143,11 +145,17 @@ class Machine:
             next_pc = pc + (4 if immediate else 3)
         elif op in (5, 6):
             destination = self.read(pc + 1, 1) >> 4
-            value = (
-                time_ns()
-                if self.live_time
-                else self.time_value + self.steps * self.time_per_step_ns
-            )
+            if self.live_time:
+                value = time_ns()
+            elif self.time_frequency_hz:
+                seconds, cycles = divmod(self.steps, self.time_frequency_hz)
+                value = (
+                    self.time_value
+                    + seconds * 1_000_000_000
+                    + cycles * 1_000_000_000 // self.time_frequency_hz
+                )
+            else:
+                value = self.time_value + self.steps * self.time_per_step_ns
             r[destination] = (value if op == 5 else value >> 32) & MASK
             next_pc = pc + 2
         elif op == 7:

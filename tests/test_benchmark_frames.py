@@ -86,6 +86,32 @@ class FrameSampleTests(unittest.TestCase):
         self.assertEqual(fixed.run(result.image.symbols["_halt"]), 0)
         self.assertEqual(live.run(result.image.symbols["_halt"]), 1)
 
+    def test_frequency_clock_accumulates_fractional_nanoseconds_exactly(self):
+        machine = Machine(
+            bytes((0x05, 0x10)),
+            ram_size=4096,
+            time_value=123,
+            time_frequency_hz=15_000_000,
+        )
+        machine.steps = 15_000_001
+        machine.step()
+        self.assertEqual(machine.regs[1], 1_000_000_189)
+
+    @unittest.skipUnless(native_available(True), "native emulator is not built")
+    def test_frequency_clock_matches_in_native_emulator(self):
+        options = {
+            "ram_size": 4096,
+            "time_value": 123,
+            "time_frequency_hz": 15_000_000,
+        }
+        reference = Machine(bytes((0x05, 0x10)), **options)
+        native = Machine(bytes((0x05, 0x10)), **options)
+        reference.steps = native.steps = 15_000_001
+        reference.step()
+        with self.assertRaisesRegex(RuntimeError, "execution limit exceeded"):
+            native_run(native, None, native.steps + 1)
+        self.assertEqual(native.regs[1], reference.regs[1])
+
     @unittest.skipUnless(native_available(True), "native emulator is not built")
     def test_instruction_clock_matches_in_both_emulators(self):
         result = compile_source(

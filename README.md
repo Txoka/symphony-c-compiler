@@ -225,7 +225,9 @@ compiler target to record and validate the hardware size; pass the same size to
 from the host clock. Passing an explicit `time_value` selects the frozen clock
 used by deterministic tests; `time_per_step_ns` may additionally advance that
 clock by a fixed amount per completed instruction for deterministic virtual-time
-simulation. A `screen_update_callback` may inspect
+simulation. `time_frequency_hz` instead derives time from an exact target clock
+frequency, including frequencies that take a fractional number of nanoseconds
+per instruction. A `screen_update_callback` may inspect
 `(setting, value, completed_steps)` and return true to stop immediately after
 that screen instruction, which is useful for exact frame-boundary sampling.
 Device addresses retain the hardware's wrapping behavior. These names are

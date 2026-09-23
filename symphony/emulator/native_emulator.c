@@ -64,6 +64,7 @@ typedef enum {
     /* Keep optional device behavior out of the original hot handlers. */
     U_SCREEN_CALLBACK_R, U_SCREEN_CALLBACK_I,
     U_TIME_STEPPED_LO, U_TIME_STEPPED_HI,
+    U_TIME_FREQUENCY_LO, U_TIME_FREQUENCY_HI,
     U_TIME_LIVE_LO, U_TIME_LIVE_HI,
 
     U_COUNT
@@ -104,6 +105,7 @@ typedef struct {
     uint64_t steps;
     uint64_t time_value;
     uint64_t time_per_step_ns;
+    uint64_t time_frequency_hz;
     int has_persistent;
     int is_symphony;
     int live_time;
@@ -263,6 +265,12 @@ static int load_state(State *s, PyObject *machine) {
     Py_DECREF(obj);
     if (PyErr_Occurred()) return -1;
 
+    obj = get_attr(machine, "time_frequency_hz");
+    if (!obj) return -1;
+    s->time_frequency_hz = PyLong_AsUnsignedLongLongMask(obj);
+    Py_DECREF(obj);
+    if (PyErr_Occurred()) return -1;
+
     if (!PyByteArray_Check(s->persistent_obj)) {
         PyErr_SetString(PyExc_TypeError, "machine.persistent must be a bytearray");
         return -1;
@@ -383,6 +391,13 @@ static uint64_t current_time_ns(void) {
     return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
 }
 
+static inline uint64_t frequency_time_ns(const State *s) {
+    uint64_t seconds = s->steps / s->time_frequency_hz;
+    uint64_t cycles = s->steps % s->time_frequency_hz;
+    return s->time_value + seconds * UINT64_C(1000000000)
+        + cycles * UINT64_C(1000000000) / s->time_frequency_hz;
+}
+
 static inline void invalidate_decode(State *s, uint32_t address, unsigned size) {
     /* Any <=4-byte instruction beginning up to three bytes before the write can overlap it. */
     int delta;
@@ -443,11 +458,13 @@ static int decode_instruction(State *s, uint32_t pc, Decoded *d) {
         d->next_pc = DYN_NEXT_PC(pc, 4u);
     } else if (op == 0x05) {
         d->uop = s->live_time ? U_TIME_LIVE_LO
+            : s->time_frequency_hz ? U_TIME_FREQUENCY_LO
             : s->time_per_step_ns ? U_TIME_STEPPED_LO : U_TIME_LO;
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x06) {
         d->uop = s->live_time ? U_TIME_LIVE_HI
+            : s->time_frequency_hz ? U_TIME_FREQUENCY_HI
             : s->time_per_step_ns ? U_TIME_STEPPED_HI : U_TIME_HI;
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
@@ -606,6 +623,7 @@ static PyObject *run_chunk(PyObject *self, PyObject *args) {
             &&L_STORE8_I, &&L_STORE16_I, &&L_STORE32_I, &&L_PSTORE32_I,
             &&L_SCREEN_CALLBACK_R, &&L_SCREEN_CALLBACK_I,
             &&L_TIME_STEPPED_LO, &&L_TIME_STEPPED_HI,
+            &&L_TIME_FREQUENCY_LO, &&L_TIME_FREQUENCY_HI,
             &&L_TIME_LIVE_LO, &&L_TIME_LIVE_HI
         };
 
@@ -683,6 +701,8 @@ L_SCREEN_CALLBACK_I:
     FINISH_SCREEN(d->next_pc, call_screen_update_callback(&s, s.regs[d->a], d->imm));
 L_TIME_STEPPED_LO: s.regs[d->a]=(uint32_t)(s.time_value+s.steps*s.time_per_step_ns); FINISH_INSN(d->next_pc);
 L_TIME_STEPPED_HI: s.regs[d->a]=(uint32_t)((s.time_value+s.steps*s.time_per_step_ns)>>32); FINISH_INSN(d->next_pc);
+L_TIME_FREQUENCY_LO: s.regs[d->a]=(uint32_t)frequency_time_ns(&s); FINISH_INSN(d->next_pc);
+L_TIME_FREQUENCY_HI: s.regs[d->a]=(uint32_t)(frequency_time_ns(&s)>>32); FINISH_INSN(d->next_pc);
 L_TIME_LIVE_LO: s.regs[d->a]=(uint32_t)current_time_ns(); FINISH_INSN(d->next_pc);
 L_TIME_LIVE_HI: s.regs[d->a]=(uint32_t)(current_time_ns()>>32); FINISH_INSN(d->next_pc);
     }
@@ -737,6 +757,8 @@ dispatch:
             case U_SCREEN_CALLBACK_I: if(append_screen(s.screen_updates,s.regs[d->a],d->imm)<0){error=1;goto done;} FINISH_SCREEN(d->next_pc,call_screen_update_callback(&s,s.regs[d->a],d->imm));
             case U_TIME_STEPPED_LO:s.regs[d->a]=(uint32_t)(s.time_value+s.steps*s.time_per_step_ns);FINISH_INSN(d->next_pc);
             case U_TIME_STEPPED_HI:s.regs[d->a]=(uint32_t)((s.time_value+s.steps*s.time_per_step_ns)>>32);FINISH_INSN(d->next_pc);
+            case U_TIME_FREQUENCY_LO:s.regs[d->a]=(uint32_t)frequency_time_ns(&s);FINISH_INSN(d->next_pc);
+            case U_TIME_FREQUENCY_HI:s.regs[d->a]=(uint32_t)(frequency_time_ns(&s)>>32);FINISH_INSN(d->next_pc);
             case U_TIME_LIVE_LO:s.regs[d->a]=(uint32_t)current_time_ns();FINISH_INSN(d->next_pc);
             case U_TIME_LIVE_HI:s.regs[d->a]=(uint32_t)(current_time_ns()>>32);FINISH_INSN(d->next_pc);
             default: PyErr_SetString(PyExc_RuntimeError,"internal decoder error");error=1;goto done;

@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from time import time_ns
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,12 +32,11 @@ from selfhost.tools.build_stages import compile_stage
 from toolchain import Toolchain, ToolchainNotBuilt
 
 
-# 2024-01-01T00:00:00Z. Frame benchmarks advance this Unix-epoch clock by
-# one nanosecond per target instruction: a deterministic one-instruction-per-
-# cycle, 1 GHz timing model. The epoch matters to programs that seed from time;
-# elapsed frame timing depends only on the per-step increment.
-FRAME_CLOCK_ORIGIN_NS = 1_704_067_200_000_000_000
-FRAME_TIME_PER_STEP_NS = 1
+# Capture one real Unix-epoch timestamp for the whole benchmark invocation so
+# every compiler sees the same start time. Elapsed target time then advances at
+# an exact 15 MHz one-instruction-per-cycle clock.
+FRAME_CLOCK_ORIGIN_NS = time_ns()
+FRAME_CLOCK_FREQUENCY_HZ = 15_000_000
 
 
 def validate_cases():
@@ -104,7 +104,8 @@ def run_frame_sample(machine, halt, max_steps):
 def configure_frame_clock(machine):
     machine.live_time = False
     machine.time_value = FRAME_CLOCK_ORIGIN_NS
-    machine.time_per_step_ns = FRAME_TIME_PER_STEP_NS
+    machine.time_per_step_ns = 0
+    machine.time_frequency_hz = FRAME_CLOCK_FREQUENCY_HZ
 
 
 def run_current(source, inputs, max_steps, continuous=False):
@@ -311,7 +312,7 @@ def main():
         "",
         f"These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first {FRAME_WARMUP_COUNT} completed frames are warm-up; measurement starts at frame {FRAME_WARMUP_COUNT}, stops exactly at frame {FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT}, and records the integer instruction total across those {FRAME_SAMPLE_COUNT} frame intervals. The table deliberately stores that total rather than a rounded instructions-per-frame value.",
         "",
-        "Frame runs use a deterministic Unix-epoch virtual clock beginning at `2024-01-01T00:00:00Z` and advancing one nanosecond per target instruction: an explicit 1 GHz, one-instruction-per-cycle timing model. The native emulator is required so multi-billion-instruction samples remain practical.",
+        f"Frame runs capture the actual current Unix time once at benchmark startup (`{FRAME_CLOCK_ORIGIN_NS:,}` nanoseconds since `1970-01-01T00:00:00Z`) and give that same starting timestamp to every compiler run. Elapsed time then advances at the simulator's 15 MHz rate under a one-instruction-per-cycle model. Fractional nanoseconds are accumulated exactly rather than rounding each cycle. Because programs may seed themselves from time, results can vary between benchmark invocations. The native emulator is required so multi-billion-instruction samples remain practical.",
         "",
         "New unbounded examples must expose one measurable framebuffer presentation per completed frame. Double buffering should publish the newly completed back buffer, naturally alternating the framebuffer address. A different frame system is also valid, including a single-buffer renderer, but it must explicitly re-submit or change the framebuffer selection once—and only once—after every completed frame. The first framebuffer selection is setup; cursor/configuration updates and all screen settings other than `1` are not frame boundaries. A workload that does not reach frame 63 within the frame instruction budget is reported as a failed measurement.",
         "",
