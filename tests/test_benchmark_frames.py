@@ -43,7 +43,7 @@ class FrameSampleTests(unittest.TestCase):
         result = compile_source(FRAME_PROGRAM, target=Target(ram_size=1 << 16))
         machine = Machine(result.image.binary, ram_size=1 << 16, symphony=True)
         sample = FrameSample()
-        machine.screen_callback = sample
+        machine.screen_update_callback = sample
         machine.run(result.image.symbols["_halt"], max_steps=100_000)
         post_mode = machine.screen_updates[3:]
         self.assertEqual(sum(setting == 1 for setting, _ in post_mode), 63)
@@ -59,7 +59,7 @@ class FrameSampleTests(unittest.TestCase):
 
         native = Machine(result.image.binary, ram_size=1 << 16, symphony=True)
         sample = FrameSample()
-        native.screen_callback = sample
+        native.screen_update_callback = sample
         native_run(native, halt, 100_000)
         self.assertEqual(sample.instructions, expected)
         self.assertEqual(native.steps, reference.steps)

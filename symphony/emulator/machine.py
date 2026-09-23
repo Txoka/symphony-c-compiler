@@ -65,7 +65,7 @@ class Machine:
         self.keyboard_inputs = deque(value & MASK for value in keyboard_inputs)
         self.outputs = []
         self.screen_updates = []
-        self.screen_callback = None
+        self.screen_update_callback = None
         self._screen_stop_requested = False
         self.live_time = time_value is None if live_time is None else live_time
         self.time_value = (0 if time_value is None else time_value) & 0xFFFFFFFFFFFFFFFF
@@ -137,7 +137,7 @@ class Machine:
                 else r[self.read(pc + 2, 1) & 15]
             )
             self.screen_updates.append((setting, value))
-            callback = self.screen_callback
+            callback = self.screen_update_callback
             if callback is not None and callback(setting, value, self.steps + 1):
                 self._screen_stop_requested = True
             next_pc = pc + (4 if immediate else 3)

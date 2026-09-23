@@ -84,14 +84,14 @@ def run_frame_sample(machine, halt, max_steps):
     if not native_available(True):
         raise RuntimeError("frame sampling requires the native emulator")
     sample = FrameSample()
-    machine.screen_callback = sample
+    machine.screen_update_callback = sample
     try:
         native_run(machine, halt, max_steps)
     except RuntimeError as exc:
         if "execution limit exceeded" not in str(exc):
             raise
     finally:
-        machine.screen_callback = None
+        machine.screen_update_callback = None
     if sample.instructions is None:
         required = FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT
         raise RuntimeError(
@@ -238,7 +238,7 @@ def main():
     validate_cases()
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "docs" / "example-benchmarks.md")
-    parser.add_argument("--max-steps", type=int, default=2_000_000_000)
+    parser.add_argument("--max-steps", type=int, default=20_000_000_000)
     parser.add_argument("--frame-max-steps", type=int, default=5_000_000_000)
     parser.add_argument("--prefix", default=os.environ.get("SYMPHONY_GCC_PREFIX"))
     parser.add_argument("--build-gcc", action="store_true", help="build the local GCC toolchain when missing")

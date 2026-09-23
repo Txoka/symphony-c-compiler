@@ -61,6 +61,11 @@ typedef enum {
     U_LOAD8_I, U_LOAD16_I, U_LOAD32_I, U_PLOAD32_I,
     U_STORE8_I, U_STORE16_I, U_STORE32_I, U_PSTORE32_I,
 
+    /* Keep optional device behavior out of the original hot handlers. */
+    U_SCREEN_CALLBACK_R, U_SCREEN_CALLBACK_I,
+    U_TIME_STEPPED_LO, U_TIME_STEPPED_HI,
+    U_TIME_LIVE_LO, U_TIME_LIVE_HI,
+
     U_COUNT
 } UOp;
 
@@ -84,7 +89,7 @@ typedef struct {
     PyObject *keyboard_inputs;       /* owned */
     PyObject *outputs;               /* owned */
     PyObject *screen_updates;        /* owned */
-    PyObject *screen_callback;       /* owned */
+    PyObject *screen_update_callback; /* owned */
     PyObject *persistent_obj;        /* owned */
 
     uint8_t *memory;
@@ -198,7 +203,7 @@ static int load_state(State *s, PyObject *machine) {
     LOAD_OWNED(keyboard_inputs, "keyboard_inputs");
     LOAD_OWNED(outputs, "outputs");
     LOAD_OWNED(screen_updates, "screen_updates");
-    LOAD_OWNED(screen_callback, "screen_callback");
+    LOAD_OWNED(screen_update_callback, "screen_update_callback");
     LOAD_OWNED(persistent_obj, "persistent");
 #undef LOAD_OWNED
 
@@ -297,7 +302,7 @@ static void release_state(State *s) {
     Py_XDECREF(s->keyboard_inputs);
     Py_XDECREF(s->outputs);
     Py_XDECREF(s->screen_updates);
-    Py_XDECREF(s->screen_callback);
+    Py_XDECREF(s->screen_update_callback);
     Py_XDECREF(s->persistent_obj);
 }
 
@@ -348,20 +353,23 @@ static int queue_pop(PyObject *queue, uint32_t *result) {
     return PyErr_Occurred() ? -1 : 0;
 }
 
-static int append_screen(State *s, uint32_t setting, uint32_t value) {
+static int append_screen(PyObject *list, uint32_t setting, uint32_t value) {
     PyObject *pair = Py_BuildValue("(II)", setting, value);
-    PyObject *callback_result;
-    int result, stop;
+    int result;
     if (!pair) return -1;
-    result = PyList_Append(s->screen_updates, pair);
+    result = PyList_Append(list, pair);
     Py_DECREF(pair);
-    if (result < 0 || s->screen_callback == Py_None) return result;
-    callback_result = PyObject_CallFunction(
-        s->screen_callback, "IIK", setting, value,
+    return result;
+}
+
+static int call_screen_update_callback(State *s, uint32_t setting, uint32_t value) {
+    PyObject *result = PyObject_CallFunction(
+        s->screen_update_callback, "IIK", setting, value,
         (unsigned long long)(s->steps + 1u));
-    if (!callback_result) return -1;
-    stop = PyObject_IsTrue(callback_result);
-    Py_DECREF(callback_result);
+    int stop;
+    if (!result) return -1;
+    stop = PyObject_IsTrue(result);
+    Py_DECREF(result);
     return stop;
 }
 
@@ -373,12 +381,6 @@ static uint64_t current_time_ns(void) {
     if (clock_gettime(CLOCK_REALTIME, &now) != 0) return 0;
 #endif
     return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
-}
-
-static inline uint64_t device_time(const State *s) {
-    return s->live_time
-        ? current_time_ns()
-        : s->time_value + s->steps * s->time_per_step_ns;
 }
 
 static inline void invalidate_decode(State *s, uint32_t address, unsigned size) {
@@ -428,21 +430,25 @@ static int decode_instruction(State *s, uint32_t pc, Decoded *d) {
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x04) {
-        d->uop = U_SCREEN_R;
+        d->uop = s->screen_update_callback == Py_None
+            ? U_SCREEN_R : U_SCREEN_CALLBACK_R;
         d->a = mem8(m, mask, pc + 1u) & 15u;
         d->c = mem8(m, mask, pc + 2u) & 15u;
         d->next_pc = DYN_NEXT_PC(pc, 3u);
     } else if (op == 0x14) {
-        d->uop = U_SCREEN_I;
+        d->uop = s->screen_update_callback == Py_None
+            ? U_SCREEN_I : U_SCREEN_CALLBACK_I;
         d->a = mem8(m, mask, pc + 1u) & 15u;
         d->imm = mem16be(m, mask, pc + 2u);
         d->next_pc = DYN_NEXT_PC(pc, 4u);
     } else if (op == 0x05) {
-        d->uop = U_TIME_LO;
+        d->uop = s->live_time ? U_TIME_LIVE_LO
+            : s->time_per_step_ns ? U_TIME_STEPPED_LO : U_TIME_LO;
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x06) {
-        d->uop = U_TIME_HI;
+        d->uop = s->live_time ? U_TIME_LIVE_HI
+            : s->time_per_step_ns ? U_TIME_STEPPED_HI : U_TIME_HI;
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x07) {
@@ -597,7 +603,10 @@ static PyObject *run_chunk(PyObject *self, PyObject *args) {
             &&L_LOAD8_R, &&L_LOAD16_R, &&L_LOAD32_R, &&L_PLOAD32_R,
             &&L_STORE8_R, &&L_STORE16_R, &&L_STORE32_R, &&L_PSTORE32_R,
             &&L_LOAD8_I, &&L_LOAD16_I, &&L_LOAD32_I, &&L_PLOAD32_I,
-            &&L_STORE8_I, &&L_STORE16_I, &&L_STORE32_I, &&L_PSTORE32_I
+            &&L_STORE8_I, &&L_STORE16_I, &&L_STORE32_I, &&L_PSTORE32_I,
+            &&L_SCREEN_CALLBACK_R, &&L_SCREEN_CALLBACK_I,
+            &&L_TIME_STEPPED_LO, &&L_TIME_STEPPED_HI,
+            &&L_TIME_LIVE_LO, &&L_TIME_LIVE_HI
         };
 
 dispatch:
@@ -611,10 +620,10 @@ L_IN:       if (queue_pop(s.inputs, &s.regs[d->a]) < 0) { error = 1; goto done; 
 L_OUT_R:    if (append_u32(s.outputs, s.regs[d->a]) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
 L_OUT_I:    if (append_u32(s.outputs, d->imm) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
 L_KEY:      if (queue_pop(s.keyboard_inputs, &s.regs[d->a]) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
-L_SCREEN_R: FINISH_SCREEN(d->next_pc, append_screen(&s, s.regs[d->a], s.regs[d->c]));
-L_SCREEN_I: FINISH_SCREEN(d->next_pc, append_screen(&s, s.regs[d->a], d->imm));
-L_TIME_LO:  s.regs[d->a] = (uint32_t)device_time(&s); FINISH_INSN(d->next_pc);
-L_TIME_HI:  s.regs[d->a] = (uint32_t)(device_time(&s) >> 32); FINISH_INSN(d->next_pc);
+L_SCREEN_R: if (append_screen(s.screen_updates, s.regs[d->a], s.regs[d->c]) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
+L_SCREEN_I: if (append_screen(s.screen_updates, s.regs[d->a], d->imm) < 0) { error = 1; goto done; } FINISH_INSN(d->next_pc);
+L_TIME_LO:  s.regs[d->a] = (uint32_t)s.time_value; FINISH_INSN(d->next_pc);
+L_TIME_HI:  s.regs[d->a] = (uint32_t)(s.time_value >> 32); FINISH_INSN(d->next_pc);
 L_GETPC:    s.regs[d->a] = previous; FINISH_INSN(d->next_pc);
 
 #define RR_BIN(label, expr) label: rhs = s.regs[d->c]; s.regs[d->a] = (expr); FINISH_INSN(d->next_pc)
@@ -665,6 +674,17 @@ L_STORE8_I: addr=d->imm; store8(s.memory,s.mask,addr,s.regs[d->a]); invalidate_d
 L_STORE16_I: addr=d->imm; store16be(s.memory,s.mask,addr,s.regs[d->a]); invalidate_decode(&s,addr,2); FINISH_INSN(d->next_pc);
 L_STORE32_I: addr=d->imm; store32be(s.memory,s.mask,addr,s.regs[d->a]); invalidate_decode(&s,addr,4); FINISH_INSN(d->next_pc);
 L_PSTORE32_I: BAD_PERSISTENT(); addr=d->imm; store32be(s.persistent,s.persistent_mask,addr,s.regs[d->a]); FINISH_INSN(d->next_pc);
+
+L_SCREEN_CALLBACK_R:
+    if (append_screen(s.screen_updates, s.regs[d->a], s.regs[d->c]) < 0) { error = 1; goto done; }
+    FINISH_SCREEN(d->next_pc, call_screen_update_callback(&s, s.regs[d->a], s.regs[d->c]));
+L_SCREEN_CALLBACK_I:
+    if (append_screen(s.screen_updates, s.regs[d->a], d->imm) < 0) { error = 1; goto done; }
+    FINISH_SCREEN(d->next_pc, call_screen_update_callback(&s, s.regs[d->a], d->imm));
+L_TIME_STEPPED_LO: s.regs[d->a]=(uint32_t)(s.time_value+s.steps*s.time_per_step_ns); FINISH_INSN(d->next_pc);
+L_TIME_STEPPED_HI: s.regs[d->a]=(uint32_t)((s.time_value+s.steps*s.time_per_step_ns)>>32); FINISH_INSN(d->next_pc);
+L_TIME_LIVE_LO: s.regs[d->a]=(uint32_t)current_time_ns(); FINISH_INSN(d->next_pc);
+L_TIME_LIVE_HI: s.regs[d->a]=(uint32_t)(current_time_ns()>>32); FINISH_INSN(d->next_pc);
     }
 #else
     /* MSVC/portable fallback. Still benefits from predecode and specialized uops. */
@@ -677,10 +697,10 @@ dispatch:
             case U_OUT_R: if(append_u32(s.outputs,s.regs[d->a])<0){error=1;goto done;} FINISH_INSN(d->next_pc);
             case U_OUT_I: if(append_u32(s.outputs,d->imm)<0){error=1;goto done;} FINISH_INSN(d->next_pc);
             case U_KEY: if(queue_pop(s.keyboard_inputs,&s.regs[d->a])<0){error=1;goto done;} FINISH_INSN(d->next_pc);
-            case U_SCREEN_R: FINISH_SCREEN(d->next_pc,append_screen(&s,s.regs[d->a],s.regs[d->c]));
-            case U_SCREEN_I: FINISH_SCREEN(d->next_pc,append_screen(&s,s.regs[d->a],d->imm));
-            case U_TIME_LO: s.regs[d->a]=(uint32_t)device_time(&s); FINISH_INSN(d->next_pc);
-            case U_TIME_HI: s.regs[d->a]=(uint32_t)(device_time(&s)>>32); FINISH_INSN(d->next_pc);
+            case U_SCREEN_R: if(append_screen(s.screen_updates,s.regs[d->a],s.regs[d->c])<0){error=1;goto done;} FINISH_INSN(d->next_pc);
+            case U_SCREEN_I: if(append_screen(s.screen_updates,s.regs[d->a],d->imm)<0){error=1;goto done;} FINISH_INSN(d->next_pc);
+            case U_TIME_LO: s.regs[d->a]=(uint32_t)s.time_value; FINISH_INSN(d->next_pc);
+            case U_TIME_HI: s.regs[d->a]=(uint32_t)(s.time_value>>32); FINISH_INSN(d->next_pc);
             case U_GETPC: s.regs[d->a]=previous; FINISH_INSN(d->next_pc);
 
 #define SW_RR(u, expr) case u: rhs=s.regs[d->c]; s.regs[d->a]=(expr); FINISH_INSN(d->next_pc)
@@ -713,6 +733,12 @@ dispatch:
             case U_STORE16_I:addr=d->imm;store16be(s.memory,s.mask,addr,s.regs[d->a]);invalidate_decode(&s,addr,2);FINISH_INSN(d->next_pc);
             case U_STORE32_I:addr=d->imm;store32be(s.memory,s.mask,addr,s.regs[d->a]);invalidate_decode(&s,addr,4);FINISH_INSN(d->next_pc);
             case U_PSTORE32_I:BAD_PERSISTENT();addr=d->imm;store32be(s.persistent,s.persistent_mask,addr,s.regs[d->a]);FINISH_INSN(d->next_pc);
+            case U_SCREEN_CALLBACK_R: if(append_screen(s.screen_updates,s.regs[d->a],s.regs[d->c])<0){error=1;goto done;} FINISH_SCREEN(d->next_pc,call_screen_update_callback(&s,s.regs[d->a],s.regs[d->c]));
+            case U_SCREEN_CALLBACK_I: if(append_screen(s.screen_updates,s.regs[d->a],d->imm)<0){error=1;goto done;} FINISH_SCREEN(d->next_pc,call_screen_update_callback(&s,s.regs[d->a],d->imm));
+            case U_TIME_STEPPED_LO:s.regs[d->a]=(uint32_t)(s.time_value+s.steps*s.time_per_step_ns);FINISH_INSN(d->next_pc);
+            case U_TIME_STEPPED_HI:s.regs[d->a]=(uint32_t)((s.time_value+s.steps*s.time_per_step_ns)>>32);FINISH_INSN(d->next_pc);
+            case U_TIME_LIVE_LO:s.regs[d->a]=(uint32_t)current_time_ns();FINISH_INSN(d->next_pc);
+            case U_TIME_LIVE_HI:s.regs[d->a]=(uint32_t)(current_time_ns()>>32);FINISH_INSN(d->next_pc);
             default: PyErr_SetString(PyExc_RuntimeError,"internal decoder error");error=1;goto done;
         }
     }
