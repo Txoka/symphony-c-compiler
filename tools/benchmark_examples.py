@@ -11,7 +11,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from time import time_ns
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,10 +31,10 @@ from selfhost.tools.build_stages import compile_stage
 from toolchain import Toolchain, ToolchainNotBuilt
 
 
-# Capture one real Unix-epoch timestamp for the whole benchmark invocation so
-# every compiler sees the same start time. Elapsed target time then advances at
-# an exact 15 MHz one-instruction-per-cycle clock.
-FRAME_CLOCK_ORIGIN_NS = time_ns()
+# Use one fixed Unix-epoch timestamp so every compiler sees the same seed and
+# repeated benchmark invocations remain reproducible. Elapsed target time then
+# advances at an exact 15 MHz one-instruction-per-cycle clock.
+FRAME_CLOCK_ORIGIN_NS = 1_704_067_200_000_000_000
 FRAME_CLOCK_FREQUENCY_HZ = 15_000_000
 
 
@@ -312,7 +311,7 @@ def main():
         "",
         f"These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first {FRAME_WARMUP_COUNT} completed frames are warm-up; measurement starts at frame {FRAME_WARMUP_COUNT}, stops exactly at frame {FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT}, and records the integer instruction total across those {FRAME_SAMPLE_COUNT} frame intervals. The table deliberately stores that total rather than a rounded instructions-per-frame value.",
         "",
-        f"Frame runs capture the actual current Unix time once at benchmark startup (`{FRAME_CLOCK_ORIGIN_NS:,}` nanoseconds since `1970-01-01T00:00:00Z`) and give that same starting timestamp to every compiler run. Elapsed time then advances at the simulator's 15 MHz rate under a one-instruction-per-cycle model. Fractional nanoseconds are accumulated exactly rather than rounding each cycle. Because programs may seed themselves from time, results can vary between benchmark invocations. The native emulator is required so multi-billion-instruction samples remain practical.",
+        f"For reproducibility, frame runs use the fixed Unix timestamp `2024-01-01T00:00:00Z` (`{FRAME_CLOCK_ORIGIN_NS:,}` nanoseconds since `1970-01-01T00:00:00Z`) for every compiler run. Elapsed time then advances at the simulator's 15 MHz rate under a one-instruction-per-cycle model. Fractional nanoseconds are accumulated exactly rather than rounding each cycle. The native emulator is required so multi-billion-instruction samples remain practical.",
         "",
         "New unbounded examples must expose one measurable framebuffer presentation per completed frame. Double buffering should publish the newly completed back buffer, naturally alternating the framebuffer address. A different frame system is also valid, including a single-buffer renderer, but it must explicitly re-submit or change the framebuffer selection once—and only once—after every completed frame. The first framebuffer selection is setup; cursor/configuration updates and all screen settings other than `1` are not frame boundaries. A workload that does not reach frame 63 within the frame instruction budget is reported as a failed measurement.",
         "",
