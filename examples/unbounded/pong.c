@@ -40,11 +40,8 @@
 #define POS_SHIFT 16
 #define POS_ONE   (1 << POS_SHIFT)
 
-/*
- * Clamp a single elapsed interval so pausing/debugging cannot make the ball
- * teleport through a paddle when execution resumes.
- */
-#define MAX_DT_NS 50000000u
+/* Advance one logical 60 Hz game step for every rendered frame. */
+#define FRAME_DT_NS 16666667u
 
 #define KEY_W 0x77u
 #define KEY_S 0x73u
@@ -504,10 +501,6 @@ int main(void)
     int old_ball_x;
     int old_ball_y;
 
-    unsigned int last_time;
-    unsigned int now;
-    unsigned int dt_ns;
-
     left_y =
         HEIGHT / 2 - PADDLE_H / 2;
 
@@ -526,9 +519,6 @@ int main(void)
     l_down = 0u;
 
     reset_ball(1);
-
-    last_time = time_low();
-
 
     screen(
         1u,
@@ -579,15 +569,8 @@ int main(void)
 
         poll_keyboard();
 
-        now = time_low();
-        dt_ns = now - last_time;
-        last_time = now;
-
-        if (dt_ns > MAX_DT_NS)
-            dt_ns = MAX_DT_NS;
-
-        move_paddles(dt_ns);
-        move_ball(dt_ns);
+        move_paddles(FRAME_DT_NS);
+        move_ball(FRAME_DT_NS);
 
 
         /*

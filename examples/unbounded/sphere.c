@@ -105,15 +105,6 @@
 #define AMBIENT_LIGHT 40u
 #define DIRECT_LIGHT  215u
 
-/*
- * 256 steps in 16 seconds.
- *
- * time_low() is Unix-epoch nanoseconds modulo 2^32.
- */
-#define SUN_PERIOD_MS 16000u
-#define SUN_STEP_NS   62500000u
-
-
 /* ========================================================================= */
 /* Buffers and caches                                                        */
 /* ========================================================================= */
@@ -902,49 +893,10 @@ static void render_frame(unsigned int *buffer)
 
 
 /* ========================================================================= */
-/* Sun timing                                                                */
+/* Sun animation state                                                       */
 /* ========================================================================= */
 
 static unsigned int sun_step;
-static unsigned int last_sun_time;
-
-
-static int update_sun(void)
-{
-    unsigned int now;
-    unsigned int elapsed;
-
-    int changed;
-
-
-    now =
-        time_low();
-
-    elapsed =
-        now - last_sun_time;
-
-    changed =
-        0;
-
-
-    while (elapsed >= SUN_STEP_NS) {
-        last_sun_time +=
-            SUN_STEP_NS;
-
-        elapsed -=
-            SUN_STEP_NS;
-
-        sun_step =
-            (sun_step + 1u)
-            & LIGHT_MASK;
-
-        changed =
-            1;
-    }
-
-
-    return changed;
-}
 
 
 /* ========================================================================= */
@@ -1021,35 +973,33 @@ int main(void)
         1u;
 
 
-    last_sun_time =
-        time_low();
-
-
     /* --------------------------------------------------------------------- */
     /* Runtime                                                               */
     /* --------------------------------------------------------------------- */
 
     while (1) {
-        if (update_sun()) {
-            initialize_light_contributions(
-                sun_step
-            );
+        sun_step =
+            (sun_step + 1u)
+            & LIGHT_MASK;
+
+        initialize_light_contributions(
+            sun_step
+        );
 
 
-            render_frame(
-                framebuffer[back_buffer]
-            );
+        render_frame(
+            framebuffer[back_buffer]
+        );
 
 
-            screen(
-                1u,
-                (unsigned int)framebuffer[back_buffer]
-            );
+        screen(
+            1u,
+            (unsigned int)framebuffer[back_buffer]
+        );
 
 
-            back_buffer ^=
-                1u;
-        }
+        back_buffer ^=
+            1u;
     }
 
 

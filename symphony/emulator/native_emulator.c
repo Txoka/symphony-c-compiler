@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Symphony vs. Dynphony is a per-run flag (State.is_symphony), checked once
  * per decode below. decoded_at() caches the result per PC (see below), so
@@ -60,6 +61,12 @@ typedef enum {
     U_LOAD8_I, U_LOAD16_I, U_LOAD32_I, U_PLOAD32_I,
     U_STORE8_I, U_STORE16_I, U_STORE32_I, U_PSTORE32_I,
 
+    /* Keep optional device behavior out of the original hot handlers. */
+    U_SCREEN_CALLBACK_R, U_SCREEN_CALLBACK_I,
+    U_TIME_STEPPED_LO, U_TIME_STEPPED_HI,
+    U_TIME_FREQUENCY_LO, U_TIME_FREQUENCY_HI,
+    U_TIME_LIVE_LO, U_TIME_LIVE_HI,
+
     U_COUNT
 } UOp;
 
@@ -83,7 +90,10 @@ typedef struct {
     PyObject *keyboard_inputs;       /* owned */
     PyObject *outputs;               /* owned */
     PyObject *screen_updates;        /* owned */
+    PyObject *screen_update_callback; /* owned */
     PyObject *persistent_obj;        /* owned */
+    Py_buffer memory_view;
+    Py_buffer persistent_view;
 
     uint8_t *memory;
     uint8_t *persistent;
@@ -96,8 +106,11 @@ typedef struct {
     uint32_t pc;
     uint64_t steps;
     uint64_t time_value;
+    uint64_t time_per_step_ns;
+    uint64_t time_frequency_hz;
     int has_persistent;
     int is_symphony;
+    int live_time;
 
     Decoded *decode;
     size_t decode_count;
@@ -182,7 +195,11 @@ static int load_state(State *s, PyObject *machine) {
         PyErr_SetString(PyExc_ValueError, "machine.memory must not be empty");
         return -1;
     }
-    s->memory = (uint8_t *)PyByteArray_AS_STRING(obj);
+    if (PyObject_GetBuffer(obj, &s->memory_view, PyBUF_WRITABLE) < 0) {
+        Py_DECREF(obj);
+        return -1;
+    }
+    s->memory = (uint8_t *)s->memory_view.buf;
     Py_DECREF(obj);
 
 #define LOAD_OWNED(field, name) do { \
@@ -194,6 +211,7 @@ static int load_state(State *s, PyObject *machine) {
     LOAD_OWNED(keyboard_inputs, "keyboard_inputs");
     LOAD_OWNED(outputs, "outputs");
     LOAD_OWNED(screen_updates, "screen_updates");
+    LOAD_OWNED(screen_update_callback, "screen_update_callback");
     LOAD_OWNED(persistent_obj, "persistent");
 #undef LOAD_OWNED
 
@@ -229,6 +247,12 @@ static int load_state(State *s, PyObject *machine) {
     Py_DECREF(obj);
     if (s->is_symphony < 0) return -1;
 
+    obj = get_attr(machine, "live_time");
+    if (!obj) return -1;
+    s->live_time = PyObject_IsTrue(obj);
+    Py_DECREF(obj);
+    if (s->live_time < 0) return -1;
+
     obj = get_attr(machine, "steps");
     if (!obj) return -1;
     s->steps = PyLong_AsUnsignedLongLong(obj);
@@ -241,13 +265,28 @@ static int load_state(State *s, PyObject *machine) {
     Py_DECREF(obj);
     if (PyErr_Occurred()) return -1;
 
+    obj = get_attr(machine, "time_per_step_ns");
+    if (!obj) return -1;
+    s->time_per_step_ns = PyLong_AsUnsignedLongLongMask(obj);
+    Py_DECREF(obj);
+    if (PyErr_Occurred()) return -1;
+
+    obj = get_attr(machine, "time_frequency_hz");
+    if (!obj) return -1;
+    s->time_frequency_hz = PyLong_AsUnsignedLongLongMask(obj);
+    Py_DECREF(obj);
+    if (PyErr_Occurred()) return -1;
+
     if (!PyByteArray_Check(s->persistent_obj)) {
         PyErr_SetString(PyExc_TypeError, "machine.persistent must be a bytearray");
         return -1;
     }
     if (PyByteArray_GET_SIZE(s->persistent_obj) != 0) {
+        if (PyObject_GetBuffer(
+                s->persistent_obj, &s->persistent_view, PyBUF_WRITABLE) < 0)
+            return -1;
         s->has_persistent = 1;
-        s->persistent = (uint8_t *)PyByteArray_AS_STRING(s->persistent_obj);
+        s->persistent = (uint8_t *)s->persistent_view.buf;
         obj = get_attr(machine, "persistent_mask");
         if (!obj) return -1;
         s->persistent_mask = (uint32_t)PyLong_AsUnsignedLongMask(obj);
@@ -273,14 +312,26 @@ static int load_state(State *s, PyObject *machine) {
 }
 
 static void release_state(State *s) {
+    PyObject *error_type = NULL;
+    PyObject *error_value = NULL;
+    PyObject *error_traceback = NULL;
+
+    /* Cleanup must not replace an exception raised by a Python callback.
+     * In particular, older CPython releases may alter the active exception
+     * while releasing an exported bytearray buffer. */
+    PyErr_Fetch(&error_type, &error_value, &error_traceback);
     PyMem_Free(s->decode);
     s->decode = NULL;
+    if (s->memory_view.obj) PyBuffer_Release(&s->memory_view);
+    if (s->persistent_view.obj) PyBuffer_Release(&s->persistent_view);
     Py_XDECREF(s->regs_obj);
     Py_XDECREF(s->inputs);
     Py_XDECREF(s->keyboard_inputs);
     Py_XDECREF(s->outputs);
     Py_XDECREF(s->screen_updates);
+    Py_XDECREF(s->screen_update_callback);
     Py_XDECREF(s->persistent_obj);
+    PyErr_Restore(error_type, error_value, error_traceback);
 }
 
 static int set_attr_u64(PyObject *object, const char *name, uint64_t value) {
@@ -339,6 +390,34 @@ static int append_screen(PyObject *list, uint32_t setting, uint32_t value) {
     return result;
 }
 
+static int call_screen_update_callback(State *s, uint32_t setting, uint32_t value) {
+    PyObject *result = PyObject_CallFunction(
+        s->screen_update_callback, "IIK", setting, value,
+        (unsigned long long)(s->steps + 1u));
+    int stop;
+    if (!result) return -1;
+    stop = PyObject_IsTrue(result);
+    Py_DECREF(result);
+    return stop;
+}
+
+static uint64_t current_time_ns(void) {
+    struct timespec now;
+#if defined(_WIN32)
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC) return 0;
+#else
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) return 0;
+#endif
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+}
+
+static inline uint64_t frequency_time_ns(const State *s) {
+    uint64_t seconds = s->steps / s->time_frequency_hz;
+    uint64_t cycles = s->steps % s->time_frequency_hz;
+    return s->time_value + seconds * UINT64_C(1000000000)
+        + cycles * UINT64_C(1000000000) / s->time_frequency_hz;
+}
+
 static inline void invalidate_decode(State *s, uint32_t address, unsigned size) {
     /* Any <=4-byte instruction beginning up to three bytes before the write can overlap it. */
     int delta;
@@ -386,21 +465,27 @@ static int decode_instruction(State *s, uint32_t pc, Decoded *d) {
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x04) {
-        d->uop = U_SCREEN_R;
+        d->uop = s->screen_update_callback == Py_None
+            ? U_SCREEN_R : U_SCREEN_CALLBACK_R;
         d->a = mem8(m, mask, pc + 1u) & 15u;
         d->c = mem8(m, mask, pc + 2u) & 15u;
         d->next_pc = DYN_NEXT_PC(pc, 3u);
     } else if (op == 0x14) {
-        d->uop = U_SCREEN_I;
+        d->uop = s->screen_update_callback == Py_None
+            ? U_SCREEN_I : U_SCREEN_CALLBACK_I;
         d->a = mem8(m, mask, pc + 1u) & 15u;
         d->imm = mem16be(m, mask, pc + 2u);
         d->next_pc = DYN_NEXT_PC(pc, 4u);
     } else if (op == 0x05) {
-        d->uop = U_TIME_LO;
+        d->uop = s->live_time ? U_TIME_LIVE_LO
+            : s->time_frequency_hz ? U_TIME_FREQUENCY_LO
+            : s->time_per_step_ns ? U_TIME_STEPPED_LO : U_TIME_LO;
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x06) {
-        d->uop = U_TIME_HI;
+        d->uop = s->live_time ? U_TIME_LIVE_HI
+            : s->time_frequency_hz ? U_TIME_FREQUENCY_HI
+            : s->time_per_step_ns ? U_TIME_STEPPED_HI : U_TIME_HI;
         d->a = dst(mem8(m, mask, pc + 1u) >> 4);
         d->next_pc = DYN_NEXT_PC(pc, 2u);
     } else if (op == 0x07) {
@@ -513,6 +598,18 @@ static PyObject *run_chunk(PyObject *self, PyObject *args) {
     goto dispatch; \
 } while (0)
 
+#define FINISH_SCREEN(newpc, screen_result) do { \
+    int _screen_result = (screen_result); \
+    if (_screen_result < 0) { error = 1; goto done; } \
+    if (_screen_result > 0) { \
+        s.pc = (uint32_t)(newpc); \
+        ++s.steps; \
+        stopped = 1; \
+        goto done; \
+    } \
+    FINISH_INSN(newpc); \
+} while (0)
+
 /* Mask the condition bits against the named flag register, OR-reduce, then
  * invert when condition bit 3 is set. */
 #define BRANCH_TAKEN(d) \
@@ -543,7 +640,11 @@ static PyObject *run_chunk(PyObject *self, PyObject *args) {
             &&L_LOAD8_R, &&L_LOAD16_R, &&L_LOAD32_R, &&L_PLOAD32_R,
             &&L_STORE8_R, &&L_STORE16_R, &&L_STORE32_R, &&L_PSTORE32_R,
             &&L_LOAD8_I, &&L_LOAD16_I, &&L_LOAD32_I, &&L_PLOAD32_I,
-            &&L_STORE8_I, &&L_STORE16_I, &&L_STORE32_I, &&L_PSTORE32_I
+            &&L_STORE8_I, &&L_STORE16_I, &&L_STORE32_I, &&L_PSTORE32_I,
+            &&L_SCREEN_CALLBACK_R, &&L_SCREEN_CALLBACK_I,
+            &&L_TIME_STEPPED_LO, &&L_TIME_STEPPED_HI,
+            &&L_TIME_FREQUENCY_LO, &&L_TIME_FREQUENCY_HI,
+            &&L_TIME_LIVE_LO, &&L_TIME_LIVE_HI
         };
 
 dispatch:
@@ -611,6 +712,19 @@ L_STORE8_I: addr=d->imm; store8(s.memory,s.mask,addr,s.regs[d->a]); invalidate_d
 L_STORE16_I: addr=d->imm; store16be(s.memory,s.mask,addr,s.regs[d->a]); invalidate_decode(&s,addr,2); FINISH_INSN(d->next_pc);
 L_STORE32_I: addr=d->imm; store32be(s.memory,s.mask,addr,s.regs[d->a]); invalidate_decode(&s,addr,4); FINISH_INSN(d->next_pc);
 L_PSTORE32_I: BAD_PERSISTENT(); addr=d->imm; store32be(s.persistent,s.persistent_mask,addr,s.regs[d->a]); FINISH_INSN(d->next_pc);
+
+L_SCREEN_CALLBACK_R:
+    if (append_screen(s.screen_updates, s.regs[d->a], s.regs[d->c]) < 0) { error = 1; goto done; }
+    FINISH_SCREEN(d->next_pc, call_screen_update_callback(&s, s.regs[d->a], s.regs[d->c]));
+L_SCREEN_CALLBACK_I:
+    if (append_screen(s.screen_updates, s.regs[d->a], d->imm) < 0) { error = 1; goto done; }
+    FINISH_SCREEN(d->next_pc, call_screen_update_callback(&s, s.regs[d->a], d->imm));
+L_TIME_STEPPED_LO: s.regs[d->a]=(uint32_t)(s.time_value+s.steps*s.time_per_step_ns); FINISH_INSN(d->next_pc);
+L_TIME_STEPPED_HI: s.regs[d->a]=(uint32_t)((s.time_value+s.steps*s.time_per_step_ns)>>32); FINISH_INSN(d->next_pc);
+L_TIME_FREQUENCY_LO: s.regs[d->a]=(uint32_t)frequency_time_ns(&s); FINISH_INSN(d->next_pc);
+L_TIME_FREQUENCY_HI: s.regs[d->a]=(uint32_t)(frequency_time_ns(&s)>>32); FINISH_INSN(d->next_pc);
+L_TIME_LIVE_LO: s.regs[d->a]=(uint32_t)current_time_ns(); FINISH_INSN(d->next_pc);
+L_TIME_LIVE_HI: s.regs[d->a]=(uint32_t)(current_time_ns()>>32); FINISH_INSN(d->next_pc);
     }
 #else
     /* MSVC/portable fallback. Still benefits from predecode and specialized uops. */
@@ -659,14 +773,42 @@ dispatch:
             case U_STORE16_I:addr=d->imm;store16be(s.memory,s.mask,addr,s.regs[d->a]);invalidate_decode(&s,addr,2);FINISH_INSN(d->next_pc);
             case U_STORE32_I:addr=d->imm;store32be(s.memory,s.mask,addr,s.regs[d->a]);invalidate_decode(&s,addr,4);FINISH_INSN(d->next_pc);
             case U_PSTORE32_I:BAD_PERSISTENT();addr=d->imm;store32be(s.persistent,s.persistent_mask,addr,s.regs[d->a]);FINISH_INSN(d->next_pc);
+            case U_SCREEN_CALLBACK_R: if(append_screen(s.screen_updates,s.regs[d->a],s.regs[d->c])<0){error=1;goto done;} FINISH_SCREEN(d->next_pc,call_screen_update_callback(&s,s.regs[d->a],s.regs[d->c]));
+            case U_SCREEN_CALLBACK_I: if(append_screen(s.screen_updates,s.regs[d->a],d->imm)<0){error=1;goto done;} FINISH_SCREEN(d->next_pc,call_screen_update_callback(&s,s.regs[d->a],d->imm));
+            case U_TIME_STEPPED_LO:s.regs[d->a]=(uint32_t)(s.time_value+s.steps*s.time_per_step_ns);FINISH_INSN(d->next_pc);
+            case U_TIME_STEPPED_HI:s.regs[d->a]=(uint32_t)((s.time_value+s.steps*s.time_per_step_ns)>>32);FINISH_INSN(d->next_pc);
+            case U_TIME_FREQUENCY_LO:s.regs[d->a]=(uint32_t)frequency_time_ns(&s);FINISH_INSN(d->next_pc);
+            case U_TIME_FREQUENCY_HI:s.regs[d->a]=(uint32_t)(frequency_time_ns(&s)>>32);FINISH_INSN(d->next_pc);
+            case U_TIME_LIVE_LO:s.regs[d->a]=(uint32_t)current_time_ns();FINISH_INSN(d->next_pc);
+            case U_TIME_LIVE_HI:s.regs[d->a]=(uint32_t)(current_time_ns()>>32);FINISH_INSN(d->next_pc);
             default: PyErr_SetString(PyExc_RuntimeError,"internal decoder error");error=1;goto done;
         }
     }
 #endif
 
+#undef FINISH_SCREEN
+
 done:
-    if (sync_state(&s) < 0) error = 1;
     if (error) {
+        PyObject *error_type = NULL;
+        PyObject *error_value = NULL;
+        PyObject *error_traceback = NULL;
+
+        /* Do not call Python APIs with the callback exception active.  Save
+         * it while synchronizing partial machine state, then restore it as
+         * the error reported by run_chunk. */
+        PyErr_Fetch(&error_type, &error_value, &error_traceback);
+        if (sync_state(&s) < 0) PyErr_Clear();
+        release_state(&s);
+        if (error_type) {
+            PyErr_Restore(error_type, error_value, error_traceback);
+        } else {
+            PyErr_SetString(PyExc_SystemError,
+                            "native emulator failed without an exception");
+        }
+        return NULL;
+    }
+    if (sync_state(&s) < 0) {
         release_state(&s);
         return NULL;
     }

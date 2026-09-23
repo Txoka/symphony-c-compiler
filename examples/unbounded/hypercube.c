@@ -24,9 +24,6 @@
 #define ROTATION_MASK    (ROTATION_STEPS - 1u)
 #define ROTATION_QUARTER (ROTATION_STEPS / 4u)
 
-#define STEP_NS 31250000u
-
-
 /* ------------------------------------------------------------------------- */
 /* Fixed point                                                               */
 /* ------------------------------------------------------------------------- */
@@ -1348,49 +1345,10 @@ static unsigned int draw_tesseract(
 
 
 /* ========================================================================= */
-/* Animation timing                                                          */
+/* Animation state                                                           */
 /* ========================================================================= */
 
 static unsigned int current_step;
-static unsigned int last_step_time;
-
-
-static int update_animation(void)
-{
-    unsigned int now;
-    unsigned int elapsed;
-
-    int changed;
-
-
-    now =
-        time_low();
-
-    elapsed =
-        now - last_step_time;
-
-    changed =
-        0;
-
-
-    while (elapsed >= STEP_NS) {
-        last_step_time +=
-            STEP_NS;
-
-        elapsed -=
-            STEP_NS;
-
-        current_step =
-            (current_step + 1u)
-            & ROTATION_MASK;
-
-        changed =
-            1;
-    }
-
-
-    return changed;
-}
 
 
 /* ========================================================================= */
@@ -1441,9 +1399,6 @@ int main(void)
     current_step =
         0u;
 
-    last_step_time =
-        time_low();
-
     dirty_count[0] =
         0u;
 
@@ -1485,32 +1440,33 @@ int main(void)
     /* --------------------------------------------------------------------- */
 
     while (1) {
-        if (update_animation()) {
+        current_step =
+            (current_step + 1u)
+            & ROTATION_MASK;
 
-            clear_dirty(
+        clear_dirty(
+            framebuffer[back_buffer],
+            dirty_pixels[back_buffer],
+            dirty_count[back_buffer]
+        );
+
+
+        dirty_count[back_buffer] =
+            draw_tesseract(
                 framebuffer[back_buffer],
                 dirty_pixels[back_buffer],
-                dirty_count[back_buffer]
+                current_step
             );
 
 
-            dirty_count[back_buffer] =
-                draw_tesseract(
-                    framebuffer[back_buffer],
-                    dirty_pixels[back_buffer],
-                    current_step
-                );
+        screen(
+            1u,
+            (unsigned int)framebuffer[back_buffer]
+        );
 
 
-            screen(
-                1u,
-                (unsigned int)framebuffer[back_buffer]
-            );
-
-
-            back_buffer ^=
-                1u;
-        }
+        back_buffer ^=
+            1u;
     }
 
 

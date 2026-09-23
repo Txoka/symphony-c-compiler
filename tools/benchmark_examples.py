@@ -20,7 +20,8 @@ from symphony import Target, compile_source
 from symphony.benchmark_cases import (
     CASES,
     CONTINUOUS_CASES,
-    CONTINUOUS_STEPS,
+    FRAME_SAMPLE_COUNT,
+    FRAME_WARMUP_COUNT,
     validate_cases as validate_case_inventory,
 )
 from symphony.emulator import Machine, native_available, native_run
@@ -30,19 +31,86 @@ from selfhost.tools.build_stages import compile_stage
 from toolchain import Toolchain, ToolchainNotBuilt
 
 
+# Use one fixed Unix-epoch timestamp so every compiler sees the same seed and
+# repeated benchmark invocations remain reproducible. Elapsed target time then
+# advances at an exact 1 GHz one-instruction-per-cycle clock.
+FRAME_CLOCK_ORIGIN_NS = 1_704_067_200_000_000_000
+FRAME_CLOCK_FREQUENCY_HZ = 1_000_000_000
+
+
 def validate_cases():
     validate_case_inventory(ROOT / "examples")
 
 
-def _run(machine, halt, max_steps, continuous):
+def _run(machine, halt, max_steps):
+    if native_available(True):
+        native_run(machine, halt, max_steps)
+    else:
+        machine.run(halt, max_steps=max_steps)
+
+
+class FrameSample:
+    """Stop after an exact number of post-warm-up framebuffer presents."""
+
+    def __init__(self, warmup=FRAME_WARMUP_COUNT, count=FRAME_SAMPLE_COUNT):
+        if warmup < 0:
+            raise ValueError("frame warmup must not be negative")
+        if count <= 0:
+            raise ValueError("frame sample count must be positive")
+        self.warmup = warmup
+        self.count = count
+        self.framebuffer = None
+        self.frames = 0
+        self.start_step = None
+        self.instructions = None
+
+    def __call__(self, setting, value, step):
+        if setting != 1:
+            return False
+        # The first framebuffer selection establishes the display baseline;
+        # later selections/re-submissions publish completed frames. This is
+        # deliberately independent of screen-mode configuration order.
+        if self.framebuffer is None:
+            self.framebuffer = value
+            if self.warmup == 0:
+                self.start_step = step
+            return False
+        self.framebuffer = value
+        self.frames += 1
+        if self.frames == self.warmup:
+            self.start_step = step
+        elif self.frames == self.warmup + self.count:
+            self.instructions = step - self.start_step
+            return True
+        return False
+
+
+def run_frame_sample(machine, halt, max_steps):
+    if not native_available(True):
+        raise RuntimeError("frame sampling requires the native emulator")
+    sample = FrameSample()
+    machine.screen_update_callback = sample
     try:
-        if native_available(True):
-            native_run(machine, halt, max_steps)
-        else:
-            machine.run(halt, max_steps=max_steps)
+        native_run(machine, halt, max_steps)
     except RuntimeError as exc:
-        if not continuous or "execution limit exceeded" not in str(exc):
+        if "execution limit exceeded" not in str(exc):
             raise
+    finally:
+        machine.screen_update_callback = None
+    if sample.instructions is None:
+        required = FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT
+        raise RuntimeError(
+            f"frame sample incomplete: observed {sample.frames} of {required} "
+            f"presentations within {max_steps:,} instructions"
+        )
+    return sample.instructions
+
+
+def configure_frame_clock(machine):
+    machine.live_time = False
+    machine.time_value = FRAME_CLOCK_ORIGIN_NS
+    machine.time_per_step_ns = 0
+    machine.time_frequency_hz = FRAME_CLOCK_FREQUENCY_HZ
 
 
 def run_current(source, inputs, max_steps, continuous=False):
@@ -57,9 +125,13 @@ def run_current(source, inputs, max_steps, continuous=False):
     )
     machine = Machine(result.image.binary, ram_size=1 << 24, inputs=inputs, symphony=True)
     halt = result.image.symbols.get("_halt", 0xffffffff)
-    limit = min(max_steps, CONTINUOUS_STEPS) if continuous else max_steps
-    _run(machine, halt, limit, continuous)
-    return len(result.image.binary), machine.steps
+    if continuous:
+        configure_frame_clock(machine)
+        instructions = run_frame_sample(machine, halt, max_steps)
+    else:
+        _run(machine, halt, max_steps)
+        instructions = machine.steps
+    return len(result.image.binary), instructions
 
 
 def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp, continuous=False):
@@ -75,16 +147,26 @@ def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp, continuou
     # the normal 16 MiB target RAM layout rather than dyncc's 1 MiB default.
     machine.regs[14] = 0x800000
     machine.regs[13] = 0xfffff0
-    limit = min(max_steps, CONTINUOUS_STEPS) if continuous else max_steps
-    _run(machine, 0xfffff0, limit, continuous)
+    if continuous:
+        configure_frame_clock(machine)
+        instructions = run_frame_sample(machine, 0xfffff0, max_steps)
+    else:
+        _run(machine, 0xfffff0, max_steps)
+        instructions = machine.steps
     # The GCC linker materializes virtual .bss as trailing zero bytes so the
     # emulator reserves its addresses.  Those bytes are not part of a load
     # image and dyncc's assume-zeroed mode does not serialize them either.
-    return load_size, machine.steps
+    return load_size, instructions
 
 
 def cell(value):
     return "—" if value is None else f"{value:,}"
+
+
+def fps_cell(instructions):
+    if instructions is None:
+        return "—"
+    return f"{FRAME_CLOCK_FREQUENCY_HZ * FRAME_SAMPLE_COUNT / instructions:,.3f}"
 
 
 def concise_error(exc):
@@ -153,7 +235,7 @@ def run_gcc_selfhost(toolchain, persistent, optimize, max_steps, tmp):
     # above the linked image is available to malloc.
     machine.regs[14] = 0xfffff0
     machine.regs[13] = 0xfffff0
-    _run(machine, 0xfffff0, max_steps, False)
+    _run(machine, 0xfffff0, max_steps)
     control = decode_control(machine.persistent)
     if control.status:
         raise RuntimeError(f"compiler failed: status={control.status}")
@@ -168,7 +250,8 @@ def main():
     validate_cases()
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "docs" / "example-benchmarks.md")
-    parser.add_argument("--max-steps", type=int, default=2_000_000_000)
+    parser.add_argument("--max-steps", type=int, default=20_000_000_000)
+    parser.add_argument("--frame-max-steps", type=int, default=5_000_000_000)
     parser.add_argument("--prefix", default=os.environ.get("SYMPHONY_GCC_PREFIX"))
     parser.add_argument("--build-gcc", action="store_true", help="build the local GCC toolchain when missing")
     args = parser.parse_args()
@@ -190,11 +273,12 @@ def main():
                 raise RuntimeError(f"benchmark source is missing: {path}")
             source = path.read_text()
             continuous = name in CONTINUOUS_CASES
+            step_limit = args.frame_max_steps if continuous else args.max_steps
             values = []
             for label, runner in (
-                ("SSA", lambda: run_current(source, inputs, args.max_steps, continuous)),
-                ("GCC -Os", lambda: run_gcc(toolchain, source, name.replace("/", "_")[:-2] + "_os", inputs, "-Os", args.max_steps, tmp, continuous)),
-                ("GCC -O2", lambda: run_gcc(toolchain, source, name.replace("/", "_")[:-2] + "_o2", inputs, "-O2", args.max_steps, tmp, continuous)),
+                ("SCC", lambda: run_current(source, inputs, step_limit, continuous)),
+                ("GCC -Os", lambda: run_gcc(toolchain, source, name.replace("/", "_")[:-2] + "_os", inputs, "-Os", step_limit, tmp, continuous)),
+                ("GCC -O2", lambda: run_gcc(toolchain, source, name.replace("/", "_")[:-2] + "_o2", inputs, "-O2", step_limit, tmp, continuous)),
             ):
                 try:
                     values.append(runner())
@@ -206,7 +290,7 @@ def main():
         persistent = selfhost_project_image()
         selfhost_rows = []
         for label, runner in (
-            ("SSA", lambda: run_selfhost_benchmark(persistent, args.max_steps)),
+            ("SCC", lambda: run_selfhost_benchmark(persistent, args.max_steps)),
             ("GCC -O0", lambda: run_gcc_selfhost(toolchain, persistent, "-O0", args.max_steps, tmp)),
             ("GCC -Os", lambda: run_gcc_selfhost(toolchain, persistent, "-Os", args.max_steps, tmp)),
             ("GCC -O2", lambda: run_gcc_selfhost(toolchain, persistent, "-O2", args.max_steps, tmp)),
@@ -217,16 +301,37 @@ def main():
                 selfhost_rows.append((label, None, None, None))
                 notes.append(f"- self-host compiler {label}: `{concise_error(exc)}`")
 
+    bounded_rows = [row for row in rows if row[0] not in CONTINUOUS_CASES]
+    frame_rows = [row for row in rows if row[0] in CONTINUOUS_CASES]
     lines = [
         "# Example compiler benchmarks",
         "",
-        "Generated by `tools/benchmark_examples.py`. Sizes are serialized Symphony load-image bytes; GCC sizes include extracted libgcc members and linker-generated trampolines. Steps are emulator instructions from entry to termination; animated and interactive `examples/unbounded/` demos report a fixed 10,000,000-instruction sample pending FPS/cycles-per-frame measurement. Static zero storage is treated as loader-zeroed BSS (`--bss=assume-zeroed` for dyncc), so startup clearing is excluded from both size and runtime. GCC uses the real same-ISA Symphony GCC toolchain at `SYMPHONY_GCC_PREFIX`.",
+        "Generated by `tools/benchmark_examples.py`. Sizes are serialized Symphony load-image bytes; GCC sizes include extracted libgcc members and linker-generated trampolines. Static zero storage is treated as loader-zeroed BSS (`--bss=assume-zeroed` for SCC), so startup clearing is excluded from both size and runtime. GCC uses the real same-ISA Symphony GCC toolchain at `SYMPHONY_GCC_PREFIX`.",
         "",
-        "| Example | Inputs | SSA bytes | SSA steps | GCC -Os bytes | GCC -Os steps | GCC -O2 bytes | GCC -O2 steps |",
+        "## Bounded examples",
+        "",
+        "These programs terminate. Their instruction columns count execution from entry through termination using the documented deterministic inputs.",
+        "",
+        "| Example | Inputs | SCC bytes | SCC instructions | GCC -Os bytes | GCC -Os instructions | GCC -O2 bytes | GCC -O2 instructions |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for name, inputs, ssa, os_, o2 in rows:
-        lines.append(f"| `{name}` | `{list(inputs)}` | {cell(ssa[0])} | {cell(ssa[1])} | {cell(os_[0])} | {cell(os_[1])} | {cell(o2[0])} | {cell(o2[1])} |")
+    for name, inputs, scc, os_, o2 in bounded_rows:
+        lines.append(f"| `{name}` | `{list(inputs)}` | {cell(scc[0])} | {cell(scc[1])} | {cell(os_[0])} | {cell(os_[1])} | {cell(o2[0])} | {cell(o2[1])} |")
+    lines += [
+        "",
+        "## Unbounded frame benchmarks",
+        "",
+        f"These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first {FRAME_WARMUP_COUNT} completed frames are warm-up; measurement starts at frame {FRAME_WARMUP_COUNT}, stops exactly at frame {FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT}, and records the integer instruction total across those {FRAME_SAMPLE_COUNT} frame intervals. Each FPS column is derived from that unrounded total using the documented 1 GHz clock.",
+        "",
+        f"For reproducibility, frame runs use the fixed Unix timestamp `2024-01-01T00:00:00Z` (`{FRAME_CLOCK_ORIGIN_NS:,}` nanoseconds since `1970-01-01T00:00:00Z`) for every compiler run. Elapsed time then advances at 1 GHz under a one-instruction-per-cycle model. The native emulator is required so multi-billion-instruction samples remain practical.",
+        "",
+        "New unbounded examples must expose one measurable framebuffer presentation per completed frame. Double buffering should publish the newly completed back buffer, naturally alternating the framebuffer address. A different frame system is also valid, including a single-buffer renderer, but it must explicitly re-submit or change the framebuffer selection once—and only once—after every completed frame. The first framebuffer selection is setup; cursor/configuration updates and all screen settings other than `1` are not frame boundaries. A workload that does not reach frame 63 within the frame instruction budget is reported as a failed measurement.",
+        "",
+        f"| Example | Inputs | SCC bytes | SCC instructions / {FRAME_SAMPLE_COUNT} frames | SCC FPS @ 1 GHz | GCC -Os bytes | GCC -Os instructions / {FRAME_SAMPLE_COUNT} frames | GCC -Os FPS @ 1 GHz | GCC -O2 bytes | GCC -O2 instructions / {FRAME_SAMPLE_COUNT} frames | GCC -O2 FPS @ 1 GHz |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for name, inputs, scc, os_, o2 in frame_rows:
+        lines.append(f"| `{name}` | `{list(inputs)}` | {cell(scc[0])} | {cell(scc[1])} | {fps_cell(scc[1])} | {cell(os_[0])} | {cell(os_[1])} | {fps_cell(os_[1])} | {cell(o2[0])} | {cell(o2[1])} | {fps_cell(o2[1])} |")
     lines += [
         "",
         "## Self-host compiler benchmark",

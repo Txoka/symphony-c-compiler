@@ -8,6 +8,7 @@ behaves exactly as the bits say it should.
 """
 
 from collections import deque
+from time import time_ns
 
 from ..targets.symphony.config import Target
 
@@ -42,7 +43,10 @@ class Machine:
         *,
         inputs=(),
         keyboard_inputs=(),
-        time_value=0,
+        time_value=None,
+        time_per_step_ns=0,
+        time_frequency_hz=0,
+        live_time=None,
         persistent_size=0,
         symphony=False,
     ):
@@ -62,7 +66,12 @@ class Machine:
         self.keyboard_inputs = deque(value & MASK for value in keyboard_inputs)
         self.outputs = []
         self.screen_updates = []
-        self.time_value = time_value & 0xFFFFFFFFFFFFFFFF
+        self.screen_update_callback = None
+        self._screen_stop_requested = False
+        self.live_time = time_value is None if live_time is None else live_time
+        self.time_value = (0 if time_value is None else time_value) & 0xFFFFFFFFFFFFFFFF
+        self.time_per_step_ns = time_per_step_ns & 0xFFFFFFFFFFFFFFFF
+        self.time_frequency_hz = time_frequency_hz & 0xFFFFFFFFFFFFFFFF
         self.persistent = bytearray(persistent_size)
         self.persistent_mask = persistent_size - 1 if persistent_size else None
         self.symphony = symphony
@@ -130,12 +139,24 @@ class Machine:
                 else r[self.read(pc + 2, 1) & 15]
             )
             self.screen_updates.append((setting, value))
+            callback = self.screen_update_callback
+            if callback is not None and callback(setting, value, self.steps + 1):
+                self._screen_stop_requested = True
             next_pc = pc + (4 if immediate else 3)
         elif op in (5, 6):
             destination = self.read(pc + 1, 1) >> 4
-            r[destination] = (
-                self.time_value if op == 5 else self.time_value >> 32
-            ) & MASK
+            if self.live_time:
+                value = time_ns()
+            elif self.time_frequency_hz:
+                seconds, cycles = divmod(self.steps, self.time_frequency_hz)
+                value = (
+                    self.time_value
+                    + seconds * 1_000_000_000
+                    + cycles * 1_000_000_000 // self.time_frequency_hz
+                )
+            else:
+                value = self.time_value + self.steps * self.time_per_step_ns
+            r[destination] = (value if op == 5 else value >> 32) & MASK
             next_pc = pc + 2
         elif op == 7:
             destination = self.read(pc + 1, 1) >> 4
@@ -214,12 +235,15 @@ class Machine:
         progress=None,
         progress_interval=250_000,
     ):
+        self._screen_stop_requested = False
         next_progress = self.steps + progress_interval
         while self.steps < max_steps:
             if halt_address is not None and self.pc == halt_address:
                 return self.regs[1]
             previous = self.pc
             self.step()
+            if self._screen_stop_requested:
+                return self.regs[1]
             if progress is not None and self.steps >= next_progress:
                 progress(self)
                 next_progress = self.steps + progress_interval

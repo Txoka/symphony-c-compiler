@@ -221,6 +221,17 @@ queues are empty. `output()` appends to `machine.outputs`, and `screen()` append
 `(setting, value)` to `machine.screen_updates`. Set `persistent_size` on the
 compiler target to record and validate the hardware size; pass the same size to
 `Machine` for emulation. The CLI does this automatically when `--run` is used.
+`Machine` makes `time()`/`time_low()`/`time_high()` read Unix-epoch nanoseconds
+from the host clock. Passing an explicit `time_value` selects the frozen clock
+used by deterministic tests; `time_per_step_ns` may additionally advance that
+clock by a fixed amount per completed instruction for deterministic virtual-time
+simulation. `time_frequency_hz` instead derives time from an exact target clock
+frequency, including frequencies that take a fractional number of nanoseconds
+per instruction. A `screen_update_callback` may inspect
+`(setting, value, completed_steps)` and return true to stop immediately after
+that screen instruction, which is useful for exact frame-boundary sampling. A
+native callback may inspect or modify existing RAM and persistent-memory bytes,
+but cannot resize either backing bytearray while execution is active.
 Device addresses retain the hardware's wrapping behavior. These names are
 reserved and cannot be used for user-defined functions.
 
@@ -324,6 +335,17 @@ Both size columns exclude zero-fill storage: dyncc defaults to
 `--bss=assume-zeroed` in this harness, and the GCC measurement counts only its
 loadable text and data rather than the linker's emulator-only trailing BSS
 reservation. This also keeps BSS startup clearing out of the step counts.
+
+The report separates terminating examples from `examples/unbounded/` frame
+benchmarks. To make a new unbounded example measurable, publish exactly one
+framebuffer-selection update after each completed frame. Double-buffered code
+normally does this with `screen(1, newly_completed_back_buffer)`, changing the
+address on every frame. A single-buffer or other frame system must explicitly
+re-submit or change its framebuffer selection once per completed frame. The
+first `screen(1, ...)` selection establishes the baseline; subsequent setting-1
+updates are frame boundaries regardless of screen-mode configuration order. All
+other screen settings are ignored. The benchmark warms up through frame 3 and
+records the total instructions through frame 63.
 
 ## Project structure
 
