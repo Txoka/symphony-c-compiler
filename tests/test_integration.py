@@ -32,9 +32,20 @@ class RepositoryCoverageTests(unittest.TestCase):
         validate_cases(ROOT / "examples")
         self.assertEqual(
             set(CASES),
-            {path.name for path in (ROOT / "examples").glob("*.c")},
+            {
+                path.relative_to(ROOT / "examples").as_posix()
+                for path in (ROOT / "examples").rglob("*.c")
+            },
         )
-        self.assertEqual(CONTINUOUS_CASES, set())
+        self.assertEqual(
+            CONTINUOUS_CASES,
+            {
+                "unbounded/game_of_life.c",
+                "unbounded/hypercube.c",
+                "unbounded/pong.c",
+                "unbounded/sphere.c",
+            },
+        )
 
     def test_generated_object_files_are_ignored_and_not_committed(self):
         gitignore = ROOT / ".gitignore"

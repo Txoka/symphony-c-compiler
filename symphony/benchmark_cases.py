@@ -10,8 +10,8 @@ from pathlib import Path
 
 # Inputs are deliberately modest, deterministic terminating workloads. They
 # are provenance for the comparison, not an attempt to represent every use.
-# Animated and interactive examples live under examples/unbounded/ and are
-# intentionally excluded until their FPS/cycles-per-frame measurement exists.
+# Animated and interactive examples use a fixed instruction sample until the
+# FPS/cycles-per-frame measurement replaces it in the next benchmark revision.
 CASES = {
     "anonymous_aggregate_members.c": (),
     "arena_allocator.c": (),
@@ -32,17 +32,25 @@ CASES = {
     "pi.c": (),
     "primes.c": (),
     "towers_of_hanoi.c": (2, 0, 2, 1),
+    "unbounded/game_of_life.c": (),
+    "unbounded/hypercube.c": (),
+    "unbounded/pong.c": (),
+    "unbounded/sphere.c": (),
 }
 
-CONTINUOUS_CASES = frozenset()
+CONTINUOUS_CASES = frozenset({
+    "unbounded/game_of_life.c",
+    "unbounded/hypercube.c",
+    "unbounded/pong.c",
+    "unbounded/sphere.c",
+})
 CONTINUOUS_STEPS = 10_000_000
 
 
 def validate_cases(examples_directory):
     """Require every maintained example to have explicit benchmark inputs."""
-    examples = {
-        path.name for path in Path(examples_directory).glob("*.c")
-    }
+    root = Path(examples_directory)
+    examples = {path.relative_to(root).as_posix() for path in root.rglob("*.c")}
     configured = set(CASES)
     if examples != configured:
         missing = ", ".join(sorted(examples - configured)) or "none"
