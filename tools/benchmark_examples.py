@@ -33,9 +33,9 @@ from toolchain import Toolchain, ToolchainNotBuilt
 
 # Use one fixed Unix-epoch timestamp so every compiler sees the same seed and
 # repeated benchmark invocations remain reproducible. Elapsed target time then
-# advances at an exact 15 MHz one-instruction-per-cycle clock.
+# advances at an exact 1 GHz one-instruction-per-cycle clock.
 FRAME_CLOCK_ORIGIN_NS = 1_704_067_200_000_000_000
-FRAME_CLOCK_FREQUENCY_HZ = 15_000_000
+FRAME_CLOCK_FREQUENCY_HZ = 1_000_000_000
 
 
 def validate_cases():
@@ -155,6 +155,12 @@ def run_gcc(toolchain, source, name, inputs, optimize, max_steps, tmp, continuou
 
 def cell(value):
     return "—" if value is None else f"{value:,}"
+
+
+def fps_cell(instructions):
+    if instructions is None:
+        return "—"
+    return f"{FRAME_CLOCK_FREQUENCY_HZ * FRAME_SAMPLE_COUNT / instructions:,.3f}"
 
 
 def concise_error(exc):
@@ -309,17 +315,17 @@ def main():
         "",
         "## Unbounded frame benchmarks",
         "",
-        f"These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first {FRAME_WARMUP_COUNT} completed frames are warm-up; measurement starts at frame {FRAME_WARMUP_COUNT}, stops exactly at frame {FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT}, and records the integer instruction total across those {FRAME_SAMPLE_COUNT} frame intervals. The table deliberately stores that total rather than a rounded instructions-per-frame value.",
+        f"These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first {FRAME_WARMUP_COUNT} completed frames are warm-up; measurement starts at frame {FRAME_WARMUP_COUNT}, stops exactly at frame {FRAME_WARMUP_COUNT + FRAME_SAMPLE_COUNT}, and records the integer instruction total across those {FRAME_SAMPLE_COUNT} frame intervals. Each FPS column is derived from that unrounded total using the documented 1 GHz clock.",
         "",
-        f"For reproducibility, frame runs use the fixed Unix timestamp `2024-01-01T00:00:00Z` (`{FRAME_CLOCK_ORIGIN_NS:,}` nanoseconds since `1970-01-01T00:00:00Z`) for every compiler run. Elapsed time then advances at the simulator's 15 MHz rate under a one-instruction-per-cycle model. Fractional nanoseconds are accumulated exactly rather than rounding each cycle. The native emulator is required so multi-billion-instruction samples remain practical.",
+        f"For reproducibility, frame runs use the fixed Unix timestamp `2024-01-01T00:00:00Z` (`{FRAME_CLOCK_ORIGIN_NS:,}` nanoseconds since `1970-01-01T00:00:00Z`) for every compiler run. Elapsed time then advances at 1 GHz under a one-instruction-per-cycle model. The native emulator is required so multi-billion-instruction samples remain practical.",
         "",
         "New unbounded examples must expose one measurable framebuffer presentation per completed frame. Double buffering should publish the newly completed back buffer, naturally alternating the framebuffer address. A different frame system is also valid, including a single-buffer renderer, but it must explicitly re-submit or change the framebuffer selection once—and only once—after every completed frame. The first framebuffer selection is setup; cursor/configuration updates and all screen settings other than `1` are not frame boundaries. A workload that does not reach frame 63 within the frame instruction budget is reported as a failed measurement.",
         "",
-        f"| Example | Inputs | SCC bytes | SCC instructions / {FRAME_SAMPLE_COUNT} frames | GCC -Os bytes | GCC -Os instructions / {FRAME_SAMPLE_COUNT} frames | GCC -O2 bytes | GCC -O2 instructions / {FRAME_SAMPLE_COUNT} frames |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        f"| Example | Inputs | SCC bytes | SCC instructions / {FRAME_SAMPLE_COUNT} frames | SCC FPS @ 1 GHz | GCC -Os bytes | GCC -Os instructions / {FRAME_SAMPLE_COUNT} frames | GCC -Os FPS @ 1 GHz | GCC -O2 bytes | GCC -O2 instructions / {FRAME_SAMPLE_COUNT} frames | GCC -O2 FPS @ 1 GHz |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, inputs, scc, os_, o2 in frame_rows:
-        lines.append(f"| `{name}` | `{list(inputs)}` | {cell(scc[0])} | {cell(scc[1])} | {cell(os_[0])} | {cell(os_[1])} | {cell(o2[0])} | {cell(o2[1])} |")
+        lines.append(f"| `{name}` | `{list(inputs)}` | {cell(scc[0])} | {cell(scc[1])} | {fps_cell(scc[1])} | {cell(os_[0])} | {cell(os_[1])} | {fps_cell(os_[1])} | {cell(o2[0])} | {cell(o2[1])} | {fps_cell(o2[1])} |")
     lines += [
         "",
         "## Self-host compiler benchmark",

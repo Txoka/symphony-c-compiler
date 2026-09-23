@@ -30,18 +30,18 @@ These programs terminate. Their instruction columns count execution from entry t
 
 ## Unbounded frame benchmarks
 
-These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first 3 completed frames are warm-up; measurement starts at frame 3, stops exactly at frame 63, and records the integer instruction total across those 60 frame intervals. The table deliberately stores that total rather than a rounded instructions-per-frame value.
+These programs do not terminate, so their instruction columns use completed frames rather than entry-to-exit execution. The first `screen(1, framebuffer_address)` selection establishes the display baseline. Every later `screen(1, ...)` selection or explicit re-submission publishes a completed frame, independently of when or whether `screen(0, 3)` configures graphics mode. The first 3 completed frames are warm-up; measurement starts at frame 3, stops exactly at frame 63, and records the integer instruction total across those 60 frame intervals. Each FPS column is derived from that unrounded total using the documented 1 GHz clock.
 
-For reproducibility, frame runs use the fixed Unix timestamp `2024-01-01T00:00:00Z` (`1,704,067,200,000,000,000` nanoseconds since `1970-01-01T00:00:00Z`) for every compiler run. Elapsed time then advances at the simulator's 15 MHz rate under a one-instruction-per-cycle model. Fractional nanoseconds are accumulated exactly rather than rounding each cycle. The native emulator is required so multi-billion-instruction samples remain practical.
+For reproducibility, frame runs use the fixed Unix timestamp `2024-01-01T00:00:00Z` (`1,704,067,200,000,000,000` nanoseconds since `1970-01-01T00:00:00Z`) for every compiler run. Elapsed time then advances at 1 GHz under a one-instruction-per-cycle model. The native emulator is required so multi-billion-instruction samples remain practical.
 
 New unbounded examples must expose one measurable framebuffer presentation per completed frame. Double buffering should publish the newly completed back buffer, naturally alternating the framebuffer address. A different frame system is also valid, including a single-buffer renderer, but it must explicitly re-submit or change the framebuffer selection once—and only once—after every completed frame. The first framebuffer selection is setup; cursor/configuration updates and all screen settings other than `1` are not frame boundaries. A workload that does not reach frame 63 within the frame instruction budget is reported as a failed measurement.
 
-| Example | Inputs | SCC bytes | SCC instructions / 60 frames | GCC -Os bytes | GCC -Os instructions / 60 frames | GCC -O2 bytes | GCC -O2 instructions / 60 frames |
-|---|---|---:|---:|---:|---:|---:|---:|
-| `unbounded/game_of_life.c` | `[]` | 6,296 | 258,474,394 | 7,488 | 43,094,537 | 10,928 | 71,278,598 |
-| `unbounded/hypercube.c` | `[]` | 10,594 | 77,750,868 | 11,154 | 28,135,925 | 15,662 | 28,136,150 |
-| `unbounded/pong.c` | `[]` | 7,644 | 388,980 | 8,688 | 81,600 | 12,672 | 78,000 |
-| `unbounded/sphere.c` | `[]` | 5,764 | 66,887,509 | 9,208 | 56,261,404 | 12,468 | 56,261,387 |
+| Example | Inputs | SCC bytes | SCC instructions / 60 frames | SCC FPS @ 1 GHz | GCC -Os bytes | GCC -Os instructions / 60 frames | GCC -Os FPS @ 1 GHz | GCC -O2 bytes | GCC -O2 instructions / 60 frames | GCC -O2 FPS @ 1 GHz |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `unbounded/game_of_life.c` | `[]` | 6,296 | 258,505,265 | 232.104 | 7,488 | 43,129,611 | 1,391.156 | 10,928 | 71,313,551 | 841.355 |
+| `unbounded/hypercube.c` | `[]` | 10,410 | 75,727,807 | 792.311 | 11,002 | 21,400,349 | 2,803.693 | 15,402 | 16,828,400 | 3,565.401 |
+| `unbounded/pong.c` | `[]` | 7,644 | 160,680 | 373,412.995 | 8,688 | 52,800 | 1,136,363.636 | 12,672 | 35,880 | 1,672,240.803 |
+| `unbounded/sphere.c` | `[]` | 5,564 | 66,900,884 | 896.849 | 9,012 | 46,767,872 | 1,282.932 | 12,372 | 35,782,232 | 1,676.810 |
 
 ## Self-host compiler benchmark
 
