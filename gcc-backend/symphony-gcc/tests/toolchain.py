@@ -181,6 +181,7 @@ class Toolchain:
     # ---- link + run -----------------------------------------------------
 
     def link(self, objects, entry_symbol="main", load_address=0, with_libgcc=True):
+        self.last_load_size = None
         linker = Linker(load_address=load_address)
         for obj in objects:
             linker.add_object(obj)
@@ -224,7 +225,8 @@ class Toolchain:
 
     def build_and_run(self, c_source, tmp_path, *, name="prog", optimize="-O0",
                        with_runtime=True, runtime_order=None,
-                       runtime_optimize="-O0", dynphony=False, **run_kwargs):
+                       runtime_optimize="-O0", dynphony=False,
+                       extra_flags=(), **run_kwargs):
         """`with_runtime=False` only works for programs that do NOT define
         `main` (use `entry_symbol` for a differently-named entry point
         instead, e.g. via `run_kwargs`) -- GCC's expand_main_function
@@ -244,7 +246,9 @@ class Toolchain:
         matching this codebase's real current Dynphony support surface.
         """
         objects = [self.compile_and_assemble(c_source, tmp_path, name=name,
-                                              optimize=optimize, dynphony=dynphony)]
+                                              optimize=optimize,
+                                              extra_flags=extra_flags,
+                                              dynphony=dynphony)]
         if with_runtime and not dynphony:
             objects += self.full_runtime_objects(
                 tmp_path, optimize=runtime_optimize, order=runtime_order

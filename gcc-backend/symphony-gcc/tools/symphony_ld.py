@@ -154,7 +154,7 @@ class Linker:
                     for reloc in obj.relocs:
                         if reloc.kind != "jump_u16":
                             continue
-                        lookup = self._lookup_name(obj, reloc, symtab)
+                        lookup = self._lookup_name(obj, reloc)
                         # Preserve the linker's normal undefined-symbol
                         # diagnostic; the relocation pass below reports it.
                         if lookup not in symtab:
@@ -225,7 +225,7 @@ class Linker:
             base = {"text": text_base[id(obj)], "data": data_base[id(obj)],
                     "bss": bss_base[id(obj)]}
             for reloc in obj.relocs:
-                lookup = self._lookup_name(obj, reloc, symtab)
+                lookup = self._lookup_name(obj, reloc)
                 if lookup not in symtab:
                     raise ValueError(
                         f"{obj.unit_name}: undefined symbol '{reloc.symbol}'")
@@ -277,9 +277,18 @@ class Linker:
         return symtab
 
     @staticmethod
-    def _lookup_name(obj, reloc, symtab):
-        local = f"{obj.unit_name}::{reloc.symbol}"
-        return local if local in symtab else reloc.symbol
+    def _lookup_name(obj, reloc):
+        """Resolve a relocation in the namespace of its own object only.
+
+        Local symbol names are qualified by unit name in the combined table,
+        but unit names are not unique in hand-built objects.  Looking merely
+        for a qualified name in the global table can therefore bind an
+        external relocation to another object's static label.
+        """
+        if any(not sym.global_ and sym.name == reloc.symbol
+               for sym in obj.symbols):
+            return f"{obj.unit_name}::{reloc.symbol}"
+        return reloc.symbol
 
     @staticmethod
     def _apply_reloc(image, site, target, kind, unit_name, symbol, reg=0, fixed_width=True):

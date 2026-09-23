@@ -136,6 +136,24 @@ class TestBasicSanity:
         )
         assert result == 28
 
+    def test_eighth_argument_with_fixed_callee_saved_register(self, toolchain, tmp_path):
+        """The fixed incoming save area must remain 24 bytes even when a
+        caller reserves one of its normally callee-saved registers."""
+        src = """
+        int eighth(int a, int b, int c, int d, int e, int f, int g, int h) {
+            return h;
+        }
+        int main(void) { return eighth(1, 2, 3, 4, 5, 6, 7, 42); }
+        """
+        result, _machine, _symtab = toolchain.build_and_run(
+            src,
+            tmp_path,
+            name="stack_arg_fixed_r8",
+            optimize="-O2",
+            extra_flags=("-ffixed-r8",),
+        )
+        assert result == 42
+
 
 def test_linker_relaxes_far_direct_call():
     """A linked image may put a direct-call target above U16 without
@@ -171,6 +189,46 @@ def test_linker_relaxes_far_direct_call():
     machine.pc = entry
     machine.regs[13] = 0xFFFFF0
     assert machine.run(0xFFFFF0, max_steps=50) == 42
+
+
+def test_global_relocation_ignores_another_units_static_label():
+    """A duplicate unit name must not turn an external relocation into a
+    reference to another input object's local label."""
+    from symphony_as import Assembler
+    from symphony_ld import Linker
+
+    caller = Assembler("shared")
+    caller.assemble("""
+        .text
+        .global main
+    main:
+        link_call target
+        link_return
+    """)
+    shadow = Assembler("shared")
+    shadow.assemble("""
+        .text
+    target:
+        mov r1, 111
+        link_return
+    """)
+    provider = Assembler("provider")
+    provider.assemble("""
+        .text
+        .global target
+    target:
+        mov r1, 222
+        link_return
+    """)
+    linker = Linker()
+    linker.add_object(caller.to_object())
+    linker.add_object(shadow.to_object())
+    linker.add_object(provider.to_object())
+    image, _symbols, entry = linker.link(entry_symbol="main")
+    machine = Machine(image, symphony=True)
+    machine.pc = entry
+    machine.regs[13] = 0xFFFFF0
+    assert machine.run(0xFFFFF0, max_steps=50) == 222
 
 
 @pytest.mark.parametrize("optimize", ["-Os", "-O2"])

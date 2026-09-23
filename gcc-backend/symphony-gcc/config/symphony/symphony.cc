@@ -233,8 +233,9 @@ symphony_expand_prologue (void)
   for (unsigned i = 0; i < ARRAY_SIZE (symphony_other_callee_saved_regs); i++)
     {
       int regno = symphony_other_callee_saved_regs[i];
-      if (!call_used_or_fixed_reg_p (regno)
-          && (fixed_save_area_p || df_regs_ever_live_p (regno)))
+      if (fixed_save_area_p
+          || (df_regs_ever_live_p (regno)
+              && !call_used_or_fixed_reg_p (regno)))
         emit_insn (gen_movsi_push (gen_rtx_REG (SImode, regno)));
     }
   /* Materialize the hard frame pointer (r11) as sp *before* the frame is
@@ -303,8 +304,9 @@ symphony_expand_epilogue (void)
   for (unsigned i = ARRAY_SIZE (symphony_other_callee_saved_regs); i-- > 0; )
     {
       int regno = symphony_other_callee_saved_regs[i];
-      if (!call_used_or_fixed_reg_p (regno)
-          && (fixed_save_area_p || df_regs_ever_live_p (regno)))
+      if (fixed_save_area_p
+          || (df_regs_ever_live_p (regno)
+              && !call_used_or_fixed_reg_p (regno)))
         emit_insn (gen_movsi_pop (gen_rtx_REG (SImode, regno)));
     }
   emit_insn (gen_movsi_pop (hfp));
