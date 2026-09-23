@@ -10,6 +10,8 @@ from pathlib import Path
 
 # Inputs are deliberately modest, deterministic terminating workloads. They
 # are provenance for the comparison, not an attempt to represent every use.
+# Animated and interactive examples live under examples/unbounded/ and are
+# intentionally excluded until their FPS/cycles-per-frame measurement exists.
 CASES = {
     "anonymous_aggregate_members.c": (),
     "arena_allocator.c": (),
@@ -22,17 +24,17 @@ CASES = {
     "demo.c": (),
     "divmod_pair.c": (123456789,),
     "dynamic_sensor_report.c": (8, 4, -2, 4, 9, 0, -2, 7, 1),
-    "hypercube.c": (),
     "insertion_sort.c": (15, 3, 9, 0, 14, 2, 8, 1, 13, 4, 12, 5, 11, 6, 10, 7),
     "interprocedural_constant_folding.c": (),
+    "julia.c": (),
     "loop_helper_inlining.c": (),
+    "mandelbrot.c": (),
     "pi.c": (),
     "primes.c": (),
-    "render.c": (),
     "towers_of_hanoi.c": (2, 0, 2, 1),
 }
 
-CONTINUOUS_CASES = frozenset({"hypercube.c", "render.c"})
+CONTINUOUS_CASES = frozenset()
 CONTINUOUS_STEPS = 10_000_000
 
 

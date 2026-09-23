@@ -4,7 +4,7 @@
  * Optimized fixed-point sphere renderer for Dynphony/Symphony.
  *
  * This is the latest version we had converged on:
- *   - 1024x768 Pixel32
+ *   - 260x195 Pixel32 (SCREEN_SETTING = 64)
  *   - Q10 geometry
  *   - static sphere/camera geometry cached at startup
  *   - signed 8-bit cached normals

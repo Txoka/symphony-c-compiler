@@ -34,7 +34,7 @@ class RepositoryCoverageTests(unittest.TestCase):
             set(CASES),
             {path.name for path in (ROOT / "examples").glob("*.c")},
         )
-        self.assertEqual(CONTINUOUS_CASES, {"hypercube.c", "render.c"})
+        self.assertEqual(CONTINUOUS_CASES, set())
 
     def test_generated_object_files_are_ignored_and_not_committed(self):
         gitignore = ROOT / ".gitignore"
