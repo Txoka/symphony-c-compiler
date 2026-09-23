@@ -42,6 +42,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from toolchain import CompileError, Toolchain, ToolchainNotBuilt, screen_text, toolchain_prefix  # noqa: E402
 from symphony.emulator import Machine  # noqa: E402
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SELFHOST_SOURCES = tuple(sorted(
+    path.relative_to(REPO_ROOT / "selfhost").as_posix()
+    for path in (REPO_ROOT / "selfhost" / "src").rglob("*.c")
+))
+
 
 pytestmark = pytest.mark.skipif(
     toolchain_prefix() is None,
@@ -107,6 +113,136 @@ class TestBasicSanity:
             src, tmp_path, name=f"mixed_{optimize.strip('-')}", optimize=optimize
         )
         assert result == 5 * 2 + 6 * 2
+
+    @pytest.mark.parametrize("optimize", ["-O0", "-Os", "-O2"])
+    def test_eighth_argument_is_loaded_from_stack(self, toolchain, tmp_path, optimize):
+        src = """
+        void set_eighth(unsigned int a, unsigned int b, unsigned int c,
+                        unsigned int d, unsigned int e, unsigned int f,
+                        unsigned int g, unsigned int *out) {
+            *out = a + b + c + d + e + f + g;
+        }
+        int main(void) {
+            unsigned int value = 0;
+            set_eighth(1, 2, 3, 4, 5, 6, 7, &value);
+            return (int)value;
+        }
+        """
+        result, _machine, _symtab = toolchain.build_and_run(
+            src,
+            tmp_path,
+            name=f"stack_arg_{optimize.strip('-')}",
+            optimize=optimize,
+        )
+        assert result == 28
+
+    def test_eighth_argument_with_fixed_callee_saved_register(self, toolchain, tmp_path):
+        """The fixed incoming save area must remain 24 bytes even when a
+        caller reserves one of its normally callee-saved registers."""
+        src = """
+        int eighth(int a, int b, int c, int d, int e, int f, int g, int h) {
+            return h;
+        }
+        int main(void) { return eighth(1, 2, 3, 4, 5, 6, 7, 42); }
+        """
+        result, _machine, _symtab = toolchain.build_and_run(
+            src,
+            tmp_path,
+            name="stack_arg_fixed_r8",
+            optimize="-O2",
+            extra_flags=("-ffixed-r8",),
+        )
+        assert result == 42
+
+
+def test_linker_relaxes_far_direct_call():
+    """A linked image may put a direct-call target above U16 without
+    changing the compact form of ordinary calls."""
+    from symphony_as import Assembler
+    from symphony_ld import Linker
+    from symphony_obj import ObjectFile
+
+    caller_asm = Assembler("caller")
+    caller_asm.assemble("""
+        .text
+        .global main
+    main:
+        link_call target
+        link_return
+    """)
+    target_asm = Assembler("target")
+    target_asm.assemble("""
+        .text
+        .global target
+    target:
+        mov r1, 42
+        link_return
+    """)
+    linker = Linker()
+    linker.add_object(caller_asm.to_object())
+    # This object is never executed; it gives target a >64KiB text address.
+    linker.add_object(ObjectFile("padding", text=bytes(0x10000)))
+    linker.add_object(target_asm.to_object())
+    image, symbols, entry = linker.link(entry_symbol="main")
+    assert symbols["target"] > 0xFFFF
+    machine = Machine(image, symphony=True)
+    machine.pc = entry
+    machine.regs[13] = 0xFFFFF0
+    assert machine.run(0xFFFFF0, max_steps=50) == 42
+
+
+def test_global_relocation_ignores_another_units_static_label():
+    """A duplicate unit name must not turn an external relocation into a
+    reference to another input object's local label."""
+    from symphony_as import Assembler
+    from symphony_ld import Linker
+
+    caller = Assembler("shared")
+    caller.assemble("""
+        .text
+        .global main
+    main:
+        link_call target
+        link_return
+    """)
+    shadow = Assembler("shared")
+    shadow.assemble("""
+        .text
+    target:
+        mov r1, 111
+        link_return
+    """)
+    provider = Assembler("provider")
+    provider.assemble("""
+        .text
+        .global target
+    target:
+        mov r1, 222
+        link_return
+    """)
+    linker = Linker()
+    linker.add_object(caller.to_object())
+    linker.add_object(shadow.to_object())
+    linker.add_object(provider.to_object())
+    image, _symbols, entry = linker.link(entry_symbol="main")
+    machine = Machine(image, symphony=True)
+    machine.pc = entry
+    machine.regs[13] = 0xFFFFF0
+    assert machine.run(0xFFFFF0, max_steps=50) == 222
+
+
+@pytest.mark.parametrize("optimize", ["-Os", "-O2"])
+@pytest.mark.parametrize("relative", SELFHOST_SOURCES)
+def test_selfhost_translation_unit_compiles_optimized(toolchain, tmp_path, optimize, relative):
+    """Keep the two former reload-ICE sites covered as part of the actual
+    complete self-host compiler source set, not as synthetic lookalikes."""
+    source = REPO_ROOT / "selfhost" / relative
+    toolchain.compile_to_asm(
+        source,
+        tmp_path / f"{source.stem}_{optimize[1:]}.s",
+        optimize=optimize,
+        extra_flags=(f"-I{REPO_ROOT / 'selfhost' / 'include'}",),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -214,27 +350,17 @@ class TestRuntimeLibc:
 
 
 # ---------------------------------------------------------------------
-# Known, documented-but-not-fixed ICE gaps: calloc()/__dyn_printf_unsigned()
-# hit "maximum number of generated reload insns" at -O1/-O2 (works at -O0);
-# 64-bit multiply/divide (_muldi3 etc.) hit the same ICE class and are
+# Known, documented-but-not-fixed ICE gap: 64-bit multiply/divide
+# (_muldi3 etc.) hit the reload ICE class inside the libgcc build and are
 # excluded from libgcc entirely (see libgcc-config/symphony/t-symphony).
 # These are xfail, not skip, so a future fix flips them green automatically
 # instead of the gap silently going untracked.
 # ---------------------------------------------------------------------
 
 class TestKnownIceGaps:
-    @pytest.mark.xfail(
-        reason="runtime/heap.c's calloc() still hits GCC's 'maximum number "
-        "of generated reload insns' ICE at -O1 specifically (works at -O0 "
-        "and, since the *movsi_reg memory-alternative fix -- see README.md's "
-        "Known gaps 'Bug 4' -- at -O2 too); real, unresolved backend "
-        "limitation, plausibly explained by -O1 sometimes carrying higher "
-        "register pressure than -O2 at certain points (less aggressive "
-        "rematerialization/copy-propagation), but not further root-caused "
-        "-- see README.md's Known gaps section.",
-        strict=True,
-    )
     def test_calloc_compiles_at_o1(self, toolchain, tmp_path):
+        """The narrow-move memory alternatives also close calloc's former
+        -O1 reload ICE; this strict xfail became an XPASS with that fix."""
         toolchain.compile_to_asm(
             Path(__file__).resolve().parents[1] / "runtime" / "heap.c",
             tmp_path / "heap_o1.s",

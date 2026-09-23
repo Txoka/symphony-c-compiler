@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 .cache/
 .claude/
+.worktrees/
 build/
 dist/
 *.bin

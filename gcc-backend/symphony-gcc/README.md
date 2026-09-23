@@ -458,7 +458,7 @@ would need.
   never the other callee-saved registers (`CALL_USED_REGISTERS` in
   `symphony.h` declares r8-r10/r12 callee-saved too) — any non-leaf
   function holding a live value in one of those across its own call had
-  it silently clobbered. Fixed by pushing/popping exactly the
+  it silently clobbered. Fixed initially by pushing/popping the
   callee-saved registers a function's RTL actually uses, placed
   *before* the hard frame pointer is materialized (an earlier attempt
   placed them after, which aliased a spill slot with a real local —
@@ -776,18 +776,42 @@ and the commit.
     Regression test: `test_gcc_backend.py`'s
     `TestDynphonyEncoding::test_dynphony_link_call_and_global_and_loop`.
 
+12. **Reload ICEs on narrow-mode spills in the complete self-host
+    compiler.** `movhi` and `movqi` had the same register-only reload
+    gap previously fixed for `movsi`: under the self-host compiler's
+    register pressure, LRA could not reload a spilled halfword or byte
+    value and repeatedly generated new reload insns. Added real memory
+    alternatives for HImode and QImode moves. Every self-host
+    translation unit now compiles at both `-Os` and `-O2`; the complete
+    compiler runs successfully at both levels. The same fix also closes
+    the previously documented `calloc()` `-O1` ICE.
+
+13. **Large linked programs could not call targets above 64 KiB.** The
+    fixed-width ISA's direct `jmp`/`link_call` relocation is U16, so the
+    `-O0` self-host image failed to link. The linker now reserves one
+    low-address trampoline per far target and redirects out-of-range
+    calls and branches through `la flags,target; jmp flags`. Near calls
+    retain their original encoding and cost. A focused regression links
+    and executes a call whose real target is above `0xffff`.
+
+14. **The runtime declared but did not implement `jump()`.** Added the
+    missing non-returning intrinsic in `runtime/jump.c` using the
+    register-target `jmp` instruction. It is linked only for the self-host
+    workload, so ordinary examples retain their previous size and runtime.
+
+15. **Incoming stack arguments used a variable frame offset.** The
+    prologue established r11 after a variable number of register saves,
+    while `FIRST_PARM_OFFSET` assumed no save area. Calls with an eighth
+    argument therefore read the wrong word; in the self-host compiler,
+    `dyn_preprocess_project` failed to write its `output_length` pointer.
+    Functions receiving stack arguments now use a fixed six-word save area
+    (r13, r11, r8-r10, r12) and a 24-byte first-parameter offset; other
+    functions retain selective saves and their existing performance. A
+    regression compiles and runs an eight-argument call at `-O0`, `-Os`,
+    and `-O2`.
+
 ## Known gaps / real unresolved bugs (for whoever picks this up next)
 
-- **`calloc()` at `-O1` specifically** (not `-O2`) still hits the
-  "maximum number of generated reload insns" ICE signature, even after
-  bug 10 above closed the rest of that ICE class. This is a real,
-  reproducible result (re-run directly with `xgcc -S -O1`, not
-  inferred) -- plausible given GCC's own well-known behavior of `-O1`
-  sometimes carrying *higher* register pressure than `-O2` at certain
-  points (less aggressive rematerialization/copy-propagation can leave
-  more values simultaneously live), but not further root-caused.
-  `test_calloc_compiles_at_o1` remains xfail; `test_calloc_compiles_at_o2`
-  passes.
 - **64-bit arithmetic** (`__muldi3`, `__divdi3`, etc.) still hits the
   same ICE signature *inside libgcc's own build* at `-O2` and is still
   excluded from libgcc (`LIB2FUNCS_EXCLUDE` in
@@ -899,8 +923,10 @@ permanent benchmarking framework.
   full image including zeroed BSS bytes. To keep the byte-count
   apples-to-apples, the GCC column below is **text+data size** (excludes
   BSS), computed from the same objects the linker actually linked
-  (including whatever `libgcc.a`/runtime members got pulled in) — not
-  the raw returned image length.
+  (including whatever `libgcc.a`/runtime members got pulled in and any
+  far-target trampolines it generated) — not the raw returned image
+  length. Older tables accidentally omitted extracted archive members;
+  the benchmark now records the linker's actual text/data boundary.
 - **Steps**: both sides run on the exact same `symphony.emulator.Machine`
   step-counting model (`machine.steps`, incremented once per instruction
   executed) — the GCC side via `tools/symphony_ld.py`'s linked image
