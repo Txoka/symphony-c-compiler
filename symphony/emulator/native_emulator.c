@@ -92,6 +92,8 @@ typedef struct {
     PyObject *screen_updates;        /* owned */
     PyObject *screen_update_callback; /* owned */
     PyObject *persistent_obj;        /* owned */
+    Py_buffer memory_view;
+    Py_buffer persistent_view;
 
     uint8_t *memory;
     uint8_t *persistent;
@@ -193,7 +195,11 @@ static int load_state(State *s, PyObject *machine) {
         PyErr_SetString(PyExc_ValueError, "machine.memory must not be empty");
         return -1;
     }
-    s->memory = (uint8_t *)PyByteArray_AS_STRING(obj);
+    if (PyObject_GetBuffer(obj, &s->memory_view, PyBUF_WRITABLE) < 0) {
+        Py_DECREF(obj);
+        return -1;
+    }
+    s->memory = (uint8_t *)s->memory_view.buf;
     Py_DECREF(obj);
 
 #define LOAD_OWNED(field, name) do { \
@@ -276,8 +282,11 @@ static int load_state(State *s, PyObject *machine) {
         return -1;
     }
     if (PyByteArray_GET_SIZE(s->persistent_obj) != 0) {
+        if (PyObject_GetBuffer(
+                s->persistent_obj, &s->persistent_view, PyBUF_WRITABLE) < 0)
+            return -1;
         s->has_persistent = 1;
-        s->persistent = (uint8_t *)PyByteArray_AS_STRING(s->persistent_obj);
+        s->persistent = (uint8_t *)s->persistent_view.buf;
         obj = get_attr(machine, "persistent_mask");
         if (!obj) return -1;
         s->persistent_mask = (uint32_t)PyLong_AsUnsignedLongMask(obj);
@@ -305,6 +314,8 @@ static int load_state(State *s, PyObject *machine) {
 static void release_state(State *s) {
     PyMem_Free(s->decode);
     s->decode = NULL;
+    if (s->memory_view.obj) PyBuffer_Release(&s->memory_view);
+    if (s->persistent_view.obj) PyBuffer_Release(&s->persistent_view);
     Py_XDECREF(s->regs_obj);
     Py_XDECREF(s->inputs);
     Py_XDECREF(s->keyboard_inputs);

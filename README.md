@@ -229,7 +229,9 @@ simulation. `time_frequency_hz` instead derives time from an exact target clock
 frequency, including frequencies that take a fractional number of nanoseconds
 per instruction. A `screen_update_callback` may inspect
 `(setting, value, completed_steps)` and return true to stop immediately after
-that screen instruction, which is useful for exact frame-boundary sampling.
+that screen instruction, which is useful for exact frame-boundary sampling. A
+native callback may inspect or modify existing RAM and persistent-memory bytes,
+but cannot resize either backing bytearray while execution is active.
 Device addresses retain the hardware's wrapping behavior. These names are
 reserved and cannot be used for user-defined functions.
 

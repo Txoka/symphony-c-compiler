@@ -53,6 +53,10 @@ class FrameSample:
     """Stop after an exact number of post-warm-up framebuffer presents."""
 
     def __init__(self, warmup=FRAME_WARMUP_COUNT, count=FRAME_SAMPLE_COUNT):
+        if warmup < 0:
+            raise ValueError("frame warmup must not be negative")
+        if count <= 0:
+            raise ValueError("frame sample count must be positive")
         self.warmup = warmup
         self.count = count
         self.framebuffer = None
@@ -68,6 +72,8 @@ class FrameSample:
         # deliberately independent of screen-mode configuration order.
         if self.framebuffer is None:
             self.framebuffer = value
+            if self.warmup == 0:
+                self.start_step = step
             return False
         self.framebuffer = value
         self.frames += 1

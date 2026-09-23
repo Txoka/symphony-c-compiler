@@ -39,6 +39,20 @@ class FrameSampleTests(unittest.TestCase):
         self.assertEqual(sample.start_step, 30)
         self.assertEqual(sample.instructions, 600)
 
+    def test_zero_warmup_starts_at_framebuffer_baseline(self):
+        sample = FrameSample(warmup=0, count=2)
+        self.assertFalse(sample(1, 100, 5))
+        self.assertFalse(sample(1, 101, 11))
+        self.assertTrue(sample(1, 100, 19))
+        self.assertEqual(sample.start_step, 5)
+        self.assertEqual(sample.instructions, 14)
+
+    def test_invalid_frame_sample_counts_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "warmup"):
+            FrameSample(warmup=-1)
+        with self.assertRaisesRegex(ValueError, "sample count"):
+            FrameSample(count=0)
+
     def test_python_emulator_stops_on_exact_frame_boundary(self):
         result = compile_source(FRAME_PROGRAM, target=Target(ram_size=1 << 16))
         machine = Machine(result.image.binary, ram_size=1 << 16, symphony=True)
@@ -64,6 +78,27 @@ class FrameSampleTests(unittest.TestCase):
         self.assertEqual(sample.instructions, expected)
         self.assertEqual(native.steps, reference.steps)
         self.assertEqual(native.screen_updates, reference.screen_updates)
+
+    @unittest.skipUnless(native_available(True), "native emulator is not built")
+    def test_native_callback_cannot_resize_live_memory(self):
+        result = compile_source(FRAME_PROGRAM, target=Target(ram_size=1 << 16))
+        for attribute in ("memory", "persistent"):
+            with self.subTest(attribute=attribute):
+                machine = Machine(
+                    result.image.binary,
+                    ram_size=1 << 16,
+                    persistent_size=16,
+                    symphony=True,
+                )
+
+                def resize_memory(setting, value, step):
+                    del setting, value, step
+                    getattr(machine, attribute).append(0)
+                    return False
+
+                machine.screen_update_callback = resize_memory
+                with self.assertRaises(BufferError):
+                    native_run(machine, result.image.symbols["_halt"], 100_000)
 
     @unittest.skipUnless(native_available(True), "native emulator is not built")
     def test_insufficient_budget_reports_observed_frames(self):
