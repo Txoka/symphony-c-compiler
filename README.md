@@ -332,6 +332,17 @@ Both size columns exclude zero-fill storage: dyncc defaults to
 loadable text and data rather than the linker's emulator-only trailing BSS
 reservation. This also keeps BSS startup clearing out of the step counts.
 
+The report separates terminating examples from `examples/unbounded/` frame
+benchmarks. To make a new unbounded example measurable, publish exactly one
+framebuffer-selection update after each completed frame. Double-buffered code
+normally does this with `screen(1, newly_completed_back_buffer)`, changing the
+address on every frame. A single-buffer or other frame system must explicitly
+re-submit or change its framebuffer selection once per completed frame. The
+first `screen(1, ...)` selection establishes the baseline; subsequent setting-1
+updates are frame boundaries regardless of screen-mode configuration order. All
+other screen settings are ignored. The benchmark warms up through frame 3 and
+records the total instructions through frame 63.
+
 ## Project structure
 
 ```text

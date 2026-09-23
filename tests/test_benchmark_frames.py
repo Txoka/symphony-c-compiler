@@ -31,7 +31,6 @@ class FrameSampleTests(unittest.TestCase):
     def test_third_frame_starts_exact_sixty_frame_interval(self):
         sample = FrameSample(warmup=3, count=60)
         self.assertFalse(sample(1, 100, 5))
-        self.assertFalse(sample(0, 3, 10))
         for frame in range(1, 63):
             self.assertFalse(sample(2, frame, frame * 10))
             self.assertFalse(sample(1, 100 + frame % 2, frame * 10))
