@@ -28,6 +28,9 @@ from symphony.targets.symphony import isa
 from symphony.targets.symphony.registers import Register
 
 
+FAR_STUB_BYTES = 16
+
+
 def pad_fixed_width(data):
     data = bytes(data)
     out = bytearray()
@@ -132,38 +135,46 @@ class Linker:
 
     def link(self, entry_symbol=None):
         fixed_width = self._check_consistent_width()
+        # A U16 branch cannot be expanded in place without either clobbering
+        # the condition flags or changing a link_call's return address.  Put
+        # far-target trampolines before all user text instead: the original
+        # branch/call remains unchanged and jumps to its low-address stub;
+        # the stub materializes the final 32-bit destination in flags and
+        # jumps there.  The number of stubs changes code addresses, so solve
+        # the monotone layout decision to a fixed point.
+        if not fixed_width:
+            far_stubs = set()
+        else:
+            far_stubs = set()
+            while True:
+                layout = self._layout(len(far_stubs) * FAR_STUB_BYTES)
+                symtab = self._symbol_table(layout)
+                newly_far = set()
+                for obj in self.objects:
+                    for reloc in obj.relocs:
+                        if reloc.kind != "jump_u16":
+                            continue
+                        lookup = self._lookup_name(obj, reloc, symtab)
+                        # Preserve the linker's normal undefined-symbol
+                        # diagnostic; the relocation pass below reports it.
+                        if lookup not in symtab:
+                            continue
+                        if symtab[lookup] + reloc.addend > 0xFFFF:
+                            newly_far.add((lookup, reloc.addend))
+                if newly_far <= far_stubs:
+                    break
+                far_stubs |= newly_far
+        layout = self._layout(len(far_stubs) * FAR_STUB_BYTES)
+        symtab = self._symbol_table(layout)
         # Lay out sections: all .text first, then .data, then .bss.
-        text_base = {}
-        data_base = {}
-        bss_base = {}
-        text_cursor = 0
-        for obj in self.objects:
-            text_base[id(obj)] = text_cursor
-            text_cursor += len(obj.text)
-        data_cursor = text_cursor
-        for obj in self.objects:
-            data_base[id(obj)] = data_cursor
-            data_cursor += len(obj.data)
-        bss_cursor = data_cursor
-        for obj in self.objects:
-            bss_base[id(obj)] = bss_cursor
-            bss_cursor += obj.bss_size
-
-        symtab = {}
-        for obj in self.objects:
-            base = {"text": text_base[id(obj)], "data": data_base[id(obj)],
-                    "bss": bss_base[id(obj)]}
-            for sym in obj.symbols:
-                addr = self.load_address + base[sym.section] + sym.offset
-                if sym.global_:
-                    if sym.name in symtab and symtab[sym.name] != addr:
-                        raise ValueError(f"duplicate global symbol: {sym.name}")
-                    symtab[sym.name] = addr
-                else:
-                    # Local labels: still need addresses for this object's
-                    # own relocations, but must not collide across objects
-                    # -- namespace by unit.
-                    symtab[f"{obj.unit_name}::{sym.name}"] = addr
+        text_base, data_base, bss_base, text_cursor, data_cursor, bss_cursor = layout
+        self.load_size = data_cursor
+        stub_addresses = {
+            key: self.load_address + index * FAR_STUB_BYTES
+            for index, key in enumerate(sorted(far_stubs))
+        }
+        if stub_addresses and max(stub_addresses.values()) > 0xFFFF:
+            raise ValueError("far-branch trampoline area exceeds U16 range")
 
         # Synthesize a genuine end-of-image marker: the address right after
         # every object's .text/.data/.bss has been laid out, consuming no
@@ -195,6 +206,15 @@ class Linker:
         symtab["__dyn_heap_anchor"] = self.load_address + bss_cursor
 
         image = bytearray(bss_cursor)
+        for key, address in stub_addresses.items():
+            target = symtab[key[0]] + key[1]
+            stub = (
+                encode_width(isa.constant(Register.FLAGS, target), True)
+                + encode_width(isa.jump("jmp", Register.FLAGS), True)
+            )
+            assert len(stub) == FAR_STUB_BYTES
+            start = address - self.load_address
+            image[start:start + FAR_STUB_BYTES] = stub
         for obj in self.objects:
             image[text_base[id(obj)]:text_base[id(obj)] + len(obj.text)] = obj.text
         for obj in self.objects:
@@ -204,14 +224,14 @@ class Linker:
         for obj in self.objects:
             base = {"text": text_base[id(obj)], "data": data_base[id(obj)],
                     "bss": bss_base[id(obj)]}
-            local_names = {s.name for s in obj.symbols if not s.global_}
             for reloc in obj.relocs:
-                lookup = (f"{obj.unit_name}::{reloc.symbol}"
-                          if reloc.symbol in local_names else reloc.symbol)
+                lookup = self._lookup_name(obj, reloc, symtab)
                 if lookup not in symtab:
                     raise ValueError(
                         f"{obj.unit_name}: undefined symbol '{reloc.symbol}'")
                 target = symtab[lookup] + reloc.addend
+                if reloc.kind == "jump_u16":
+                    target = stub_addresses.get((lookup, reloc.addend), target)
                 site = base[reloc.section] + reloc.offset
                 self._apply_reloc(image, site, target, reloc.kind, obj.unit_name,
                                    reloc.symbol, reloc.reg, fixed_width)
@@ -222,6 +242,44 @@ class Linker:
                 raise ValueError(f"undefined entry symbol: {entry_symbol}")
             entry_addr = symtab[entry_symbol]
         return bytes(image), symtab, entry_addr
+
+    def _layout(self, stub_bytes):
+        text_base, data_base, bss_base = {}, {}, {}
+        text_cursor = stub_bytes
+        for obj in self.objects:
+            text_base[id(obj)] = text_cursor
+            text_cursor += len(obj.text)
+        data_cursor = text_cursor
+        for obj in self.objects:
+            data_base[id(obj)] = data_cursor
+            data_cursor += len(obj.data)
+        bss_cursor = data_cursor
+        for obj in self.objects:
+            bss_base[id(obj)] = bss_cursor
+            bss_cursor += obj.bss_size
+        return text_base, data_base, bss_base, text_cursor, data_cursor, bss_cursor
+
+    def _symbol_table(self, layout):
+        text_base, data_base, bss_base, *_ = layout
+        symtab = {}
+        for obj in self.objects:
+            base = {
+                "text": text_base[id(obj)],
+                "data": data_base[id(obj)],
+                "bss": bss_base[id(obj)],
+            }
+            for sym in obj.symbols:
+                addr = self.load_address + base[sym.section] + sym.offset
+                name = sym.name if sym.global_ else f"{obj.unit_name}::{sym.name}"
+                if sym.global_ and name in symtab and symtab[name] != addr:
+                    raise ValueError(f"duplicate global symbol: {sym.name}")
+                symtab[name] = addr
+        return symtab
+
+    @staticmethod
+    def _lookup_name(obj, reloc, symtab):
+        local = f"{obj.unit_name}::{reloc.symbol}"
+        return local if local in symtab else reloc.symbol
 
     @staticmethod
     def _apply_reloc(image, site, target, kind, unit_name, symbol, reg=0, fixed_width=True):

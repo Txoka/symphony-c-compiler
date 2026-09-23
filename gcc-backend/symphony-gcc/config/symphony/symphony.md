@@ -76,6 +76,17 @@
   (ior (match_operand 0 "arith_operand")
        (match_operand 0 "memory_operand")))
 
+;; Narrow spills use the same frame-relative addresses as SImode spills.
+;; Giving their move patterns memory alternatives lets LRA legalize that
+;; address in place instead of repeatedly creating a fresh reload pseudo.
+(define_predicate "movhi_src_operand"
+  (ior (match_operand 0 "arith_operand")
+       (match_operand 0 "memory_operand")))
+
+(define_predicate "movqi_src_operand"
+  (ior (match_operand 0 "arith_operand")
+       (match_operand 0 "memory_operand")))
+
 ;; -------------------------------------------------------------------
 ;; Moves
 ;; -------------------------------------------------------------------
@@ -202,10 +213,23 @@
 })
 
 (define_insn "*movhi_reg"
-  [(set (match_operand:HI 0 "register_operand" "=r,r")
-        (match_operand:HI 1 "arith_operand"    "r,I"))]
-  ""
-  "mov\t%0, %1"
+  [(set (match_operand:HI 0 "nonimmediate_operand" "=r,r,r,m")
+        (match_operand:HI 1 "movhi_src_operand" "r,I,m,r"))]
+  "!MEM_P (operands[0]) || REG_P (operands[1])"
+{
+  switch (which_alternative)
+    {
+    case 0:
+    case 1:
+      return "mov\t%0, %1";
+    case 2:
+      return "load_16\t%0, %1";
+    case 3:
+      return "store_16\t%0, %1";
+    default:
+      gcc_unreachable ();
+    }
+}
   [(set_attr "length" "3")])
 
 (define_insn "*store_hi"
@@ -225,10 +249,23 @@
 })
 
 (define_insn "*movqi_reg"
-  [(set (match_operand:QI 0 "register_operand" "=r,r")
-        (match_operand:QI 1 "arith_operand"    "r,I"))]
-  ""
-  "mov\t%0, %1"
+  [(set (match_operand:QI 0 "nonimmediate_operand" "=r,r,r,m")
+        (match_operand:QI 1 "movqi_src_operand" "r,I,m,r"))]
+  "!MEM_P (operands[0]) || REG_P (operands[1])"
+{
+  switch (which_alternative)
+    {
+    case 0:
+    case 1:
+      return "mov\t%0, %1";
+    case 2:
+      return "load_8\t%0, %1";
+    case 3:
+      return "store_8\t%0, %1";
+    default:
+      gcc_unreachable ();
+    }
+}
   [(set_attr "length" "3")])
 
 (define_insn "*store_qi"

@@ -230,11 +230,11 @@ typedef struct symphony_args
 #define RETURN_ADDR_RTX(COUNT, FRAME) \
   ((COUNT) == 0 ? gen_rtx_REG (Pmode, R13_REGNUM) : NULL_RTX)
 
-/* Stack-passed arguments (the eighth word-sized argument onward) start
-   immediately at the incoming argument pointer -- there is no fixed
-   register-save area ahead of them to skip, since the ABI passes only
-   r1-r7 in registers and spills the rest directly. */
-#define FIRST_PARM_OFFSET(FNDECL) 0
+/* A function with stack-passed arguments saves r13, r11, r8, r9, r10, and
+   r12 before establishing r11.  Keeping that incoming save area fixed makes
+   those arguments addressable independent of register allocation; functions
+   without stack arguments retain the cheaper selective-save prologue. */
+#define FIRST_PARM_OFFSET(FNDECL) 24
 
 /* No profiling support target-side; -pg is simply unsupported here. */
 #define FUNCTION_PROFILER(FILE, LABELNO) \

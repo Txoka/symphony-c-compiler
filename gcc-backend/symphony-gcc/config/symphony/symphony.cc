@@ -175,10 +175,9 @@ symphony_call_is_leaf (void)
    malloc's own use of r8 internally, corrupting the caller's pointer
    to 0 with no build-time diagnostic -- only a wrong-output symptom
    at emulator run time). Fixed generically here: walk the other
-   callee-saved registers and push/pop exactly the ones this function's
-   RTL actually references (df_regs_ever_live_p), mirroring what GCC's
-   default callee-saved loop would have done had this port not
-   replaced it. */
+   callee-saved registers.  A function with incoming stack arguments
+   reserves all four slots so those arguments retain a fixed offset;
+   other functions still save only the registers they use. */
 static const int symphony_other_callee_saved_regs[] =
   { 8, 9, 10, R12_REGNUM };
 
@@ -186,67 +185,16 @@ void
 symphony_expand_prologue (void)
 {
   HOST_WIDE_INT size = get_frame_size () + crtl->outgoing_args_size;
-  /* Save the incoming link register (r13) whenever this function's own
-     RTL clobbers it for ANY reason -- not just "whenever this function
-     itself makes a call" (the original, WRONG condition here was
-     !symphony_call_is_leaf ()). r13 holds the caller's chosen return
-     address at entry, per the link_call/link_return calling
-     convention (docs/isa.txt, symphony.h's header comment) -- unlike
-     an ordinary caller-saved register (r1-r7, which only ever hold
-     values the CALLER put there for the callee to consume and is
-     responsible for saving itself if needed after the call), the
-     return address must survive UNCHANGED until this function's own
-     `link_return` reads it back, regardless of what else this
-     function's body does with r13 in the meantime. CALL_USED_REGISTERS
-     (symphony.h) marks r13 caller-saved specifically so GCC's ordinary
-     allocator treats it as a free, unrestricted GENERAL_REGS register
-     for local values in leaf functions (this port's own design intent,
-     per the header comment above FIXED_REGISTERS) -- but that intent
-     was only half-implemented: the prologue/epilogue only preserved
-     r13 for non-leaf functions, on the false assumption that "a leaf
-     function never touches r13" (leaf here meaning "makes no calls of
-     its own" -- true, but irrelevant: nothing stops GCC's register
-     allocator from picking r13 to hold an ordinary local variable in a
-     leaf function precisely BECAUSE it's marked freely allocatable).
-     Root-caused via a minimal reproducer that never involved 64-bit
-     arithmetic, recursion, or any ICE at all: a leaf function
-     (examples/insertion_sort.c-shaped: a fill loop, an insertion-sort
-     loop using several live locals, a sum loop) at -O2, where the
-     allocator picked r13 to hold the insertion-sort loop's `index`
-     counter. The function compiled and linked cleanly, but never
-     returned to its caller at runtime -- traced on the emulator
-     (see symphony_gcc_run.py) to `mov r13, 1` overwriting the return
-     address `link_call`'s caller-side sequence had placed there,
-     confirmed by single-stepping: r13 held the correct return address
-     immediately after entry, then became a small loop-counter value
-     partway through the function body, and `link_return`'s final
-     `jmp r13` consequently jumped into the middle of the function's
-     own already-executed code instead of back to the caller, an
-     infinite loop with the stack pointer/frame pointer drifting
-     upward each spurious re-entry (an artifact of re-running the
-     prologue's pushes against an sp that was never popped back by a
-     real return). Fixed by keying the save/restore on whether this
-     function's OWN body ever writes r13 (df_regs_ever_live_p), exactly
-     like the other callee-saved registers in
-     symphony_other_callee_saved_regs below -- not on whether the
-     function itself is a leaf. A genuine leaf function that does NOT
-     use r13 for anything still correctly skips the save/restore (no
-     regression for the common case this was originally optimizing
-     for); a leaf function that DOES get r13 allocated for a local (as
-     found here) now correctly preserves the incoming return address
-     around that use. */
+  bool fixed_save_area_p = known_ne (crtl->args.size, 0);
+  /* r13 holds the incoming return address but is allocatable in leaf
+     functions, so it must be preserved even when the function makes no
+     calls.  Its slot is also the first word of the fixed save area. */
   rtx r13 = gen_rtx_REG (SImode, R13_REGNUM);
-  bool save_r13_p = df_regs_ever_live_p (R13_REGNUM);
-  if (save_r13_p)
-    {
-      /* Save the incoming link register (r13) before any use (a
-         nested call, or -- as found above -- an ordinary local
-         variable this function's own body allocates it to) can
-         clobber it -- push is the ISA's own U16-immediate pseudo-op
-         (docs/isa.txt), always exactly usable here since a single
-         register push never exceeds it. */
-      emit_insn (gen_movsi_push (r13));
-    }
+  /* In functions with incoming stack arguments, this and the five saves
+     below form a fixed area.  Stack arguments therefore have one stable
+     offset from r11 even when the function does not otherwise need them. */
+  if (fixed_save_area_p || df_regs_ever_live_p (R13_REGNUM))
+    emit_insn (gen_movsi_push (r13));
   /* Save the CALLER's r11 (hard frame pointer) before clobbering it below.
      r11 is classified callee-saved in CALL_USED_REGISTERS (symphony.h),
      which tells GCC's generated code at every call site that r11 survives
@@ -264,8 +212,8 @@ symphony_expand_prologue (void)
      own frame pointer), not a build-time error. */
   rtx hfp = gen_rtx_REG (SImode, HARD_FRAME_POINTER_REGNUM);
   emit_insn (gen_movsi_push (hfp));
-  /* Save the other callee-saved registers this function actually
-     clobbers (see symphony_other_callee_saved_regs's comment above)
+  /* Save the other callee-saved registers (see
+     symphony_other_callee_saved_regs's comment above)
      BEFORE materializing r11 below, exactly like r13/r11 themselves --
      NOT after, and NOT interleaved with the `sub sp,sp,size` frame
      allocation. GCC's STARTING_FRAME_OFFSET is left at its default of
@@ -285,7 +233,8 @@ symphony_expand_prologue (void)
   for (unsigned i = 0; i < ARRAY_SIZE (symphony_other_callee_saved_regs); i++)
     {
       int regno = symphony_other_callee_saved_regs[i];
-      if (df_regs_ever_live_p (regno) && !call_used_or_fixed_reg_p (regno))
+      if (!call_used_or_fixed_reg_p (regno)
+          && (fixed_save_area_p || df_regs_ever_live_p (regno)))
         emit_insn (gen_movsi_push (gen_rtx_REG (SImode, regno)));
     }
   /* Materialize the hard frame pointer (r11) as sp *before* the frame is
@@ -331,6 +280,7 @@ void
 symphony_expand_epilogue (void)
 {
   HOST_WIDE_INT size = get_frame_size () + crtl->outgoing_args_size;
+  bool fixed_save_area_p = known_ne (crtl->args.size, 0);
   rtx hfp = gen_rtx_REG (SImode, HARD_FRAME_POINTER_REGNUM);
   /* Undo the frame allocation first (mirrors the prologue in reverse: sp
      is currently at post-allocation position, i.e. r11 - size, per the
@@ -353,19 +303,14 @@ symphony_expand_epilogue (void)
   for (unsigned i = ARRAY_SIZE (symphony_other_callee_saved_regs); i-- > 0; )
     {
       int regno = symphony_other_callee_saved_regs[i];
-      if (df_regs_ever_live_p (regno) && !call_used_or_fixed_reg_p (regno))
+      if (!call_used_or_fixed_reg_p (regno)
+          && (fixed_save_area_p || df_regs_ever_live_p (regno)))
         emit_insn (gen_movsi_pop (gen_rtx_REG (SImode, regno)));
     }
   emit_insn (gen_movsi_pop (hfp));
-  /* Mirror symphony_expand_prologue's save condition exactly (see its
-     long comment above) -- restore r13 whenever this function's own
-     body ever wrote it, not only when the function itself is
-     non-leaf. */
-  if (df_regs_ever_live_p (R13_REGNUM))
-    {
-      rtx r13 = gen_rtx_REG (SImode, R13_REGNUM);
-      emit_insn (gen_movsi_pop (r13));
-    }
+  rtx r13 = gen_rtx_REG (SImode, R13_REGNUM);
+  if (fixed_save_area_p || df_regs_ever_live_p (R13_REGNUM))
+    emit_insn (gen_movsi_pop (r13));
   emit_jump_insn (gen_return ());
 }
 
