@@ -19,7 +19,7 @@ include = ["symphony*"]
 
 [tool.cibuildwheel]
 build = "cp3{10,11,12,13,14,15}-*"
-test-sources = ["tests", "selfhost", "examples", "docs"]
+test-sources = ["tests", "selfhost", "examples", "docs", "tools"]
 test-command = [
     "python -c \"from symphony.emulator import native_available; exit(0 if all(native_available(s) for s in (False, True)) else 1)\"",
     "python -m unittest discover -s tests -v",
