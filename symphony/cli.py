@@ -146,17 +146,32 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
             started = time.perf_counter()
             meter_width = 0
             meter_steps = -1
+            meter_last_steps = 0
+            meter_last_time = started
+            meter_hz = None
 
             def show_meter(machine):
-                nonlocal meter_steps, meter_width
+                nonlocal meter_steps, meter_width, meter_last_steps, meter_last_time, meter_hz
                 if machine.steps == meter_steps:
                     return
                 meter_steps = machine.steps
-                elapsed = time.perf_counter() - started
-                hz = machine.steps / elapsed if elapsed else 0
+                now = time.perf_counter()
+                elapsed = now - meter_last_time
+                instantaneous_hz = (
+                    (machine.steps - meter_last_steps) / elapsed if elapsed else 0
+                )
+                # Smooth per-interval throughput rather than reporting a
+                # lifetime average, which hides a change in emulator speed.
+                meter_hz = (
+                    instantaneous_hz
+                    if meter_hz is None
+                    else meter_hz * 0.99 + instantaneous_hz * 0.01
+                )
+                meter_last_steps = machine.steps
+                meter_last_time = now
                 message = (
                     f"Emulating: {machine.steps:,} instructions; "
-                    f"{hz:,.0f} Hz; PC={machine.pc:#x}"
+                    f"{meter_hz:,.0f} Hz; PC={machine.pc:#x}"
                 )
                 print(
                     "\r" + message.ljust(meter_width),
