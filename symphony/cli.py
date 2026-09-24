@@ -165,7 +165,7 @@ def main(argv=None, *, default_target="symphony", prog="scc"):
                 meter_hz = (
                     instantaneous_hz
                     if meter_hz is None
-                    else meter_hz * 0.95 + instantaneous_hz * 0.05
+                    else meter_hz * 0.99 + instantaneous_hz * 0.01
                 )
                 meter_last_steps = machine.steps
                 meter_last_time = now
