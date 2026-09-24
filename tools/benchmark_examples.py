@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "gcc-backend" / "symphony-gcc" / "tests")]
+sys.path[:0] = [str(ROOT)]
 
 from symphony import Target, compile_source
 from symphony.benchmark_cases import (
@@ -28,7 +28,6 @@ from symphony.emulator import Machine, native_available, native_run
 from symphony.project import decode_control, make_persistent_image, project_from_directory
 from selfhost.tools.bootstrap import STAGE0_SOURCES, build_stage0
 from selfhost.tools.build_stages import compile_stage
-from toolchain import Toolchain, ToolchainNotBuilt
 
 
 # Use one fixed Unix-epoch timestamp so every compiler sees the same seed and
@@ -36,6 +35,13 @@ from toolchain import Toolchain, ToolchainNotBuilt
 # advances at an exact 1 GHz one-instruction-per-cycle clock.
 FRAME_CLOCK_ORIGIN_NS = 1_704_067_200_000_000_000
 FRAME_CLOCK_FREQUENCY_HZ = 1_000_000_000
+
+
+def load_toolchain():
+    """Load GCC-only benchmark support when the benchmark command needs it."""
+    sys.path.insert(0, str(ROOT / "gcc-backend" / "symphony-gcc" / "tests"))
+    from toolchain import Toolchain, ToolchainNotBuilt
+    return Toolchain, ToolchainNotBuilt
 
 
 def validate_cases():
@@ -247,6 +253,7 @@ def run_gcc_selfhost(toolchain, persistent, optimize, max_steps, tmp):
 
 
 def main():
+    Toolchain, ToolchainNotBuilt = load_toolchain()
     validate_cases()
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "docs" / "example-benchmarks.md")
@@ -353,6 +360,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _, ToolchainNotBuilt = load_toolchain()
     try:
         main()
     except ToolchainNotBuilt as exc:
