@@ -79,6 +79,24 @@ class FrameSampleTests(unittest.TestCase):
         self.assertEqual(native.steps, reference.steps)
         self.assertEqual(native.screen_updates, reference.screen_updates)
 
+    @unittest.skipUnless(native_available(), "native emulator is not built")
+    def test_native_progress_keeps_decoder_warm_between_chunks(self):
+        # nop; nop; unconditional branch back to zero.  A meter forces many
+        # run_chunk calls, so its cache must stay attached until the run ends.
+        machine = Machine(bytes((0x00, 0x00, 0x48, 0x00, 0x00, 0x00)))
+        cache_seen = []
+
+        def observe(current):
+            cache_seen.append(hasattr(current, "_native_decode_cache"))
+
+        with self.assertRaisesRegex(RuntimeError, "execution limit exceeded"):
+            native_run(
+                machine, None, 100, progress=observe, progress_interval=10
+            )
+        self.assertTrue(cache_seen)
+        self.assertTrue(all(cache_seen))
+        self.assertFalse(hasattr(machine, "_native_decode_cache"))
+
     @unittest.skipUnless(native_available(True), "native emulator is not built")
     def test_native_callback_cannot_resize_live_memory(self):
         result = compile_source(FRAME_PROGRAM, target=Target(ram_size=1 << 16))

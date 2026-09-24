@@ -114,7 +114,62 @@ typedef struct {
 
     Decoded *decode;
     size_t decode_count;
+    int persistent_decode;
 } State;
+
+#define DECODE_CACHE_CAPSULE "symphony.emulator.decode_cache"
+
+static void free_decode_cache(PyObject *capsule) {
+    PyMem_Free(PyCapsule_GetPointer(capsule, DECODE_CACHE_CAPSULE));
+}
+
+/* The Python wrapper enables this only for a progress-meter session.  This
+ * avoids retaining a 16 MiB-address-space cache on ordinary Machine objects,
+ * while allowing meter chunks to share their warmed decoder. */
+static int load_decode_cache(State *s) {
+    PyObject *keep = PyObject_GetAttrString(s->machine, "_native_keep_decode_cache");
+    PyObject *capsule;
+    void *pointer;
+
+    if (!keep) {
+        PyErr_Clear();
+        return 0;
+    }
+    s->persistent_decode = PyObject_IsTrue(keep);
+    Py_DECREF(keep);
+    if (s->persistent_decode < 0) return -1;
+    if (!s->persistent_decode) return 0;
+
+    capsule = PyObject_GetAttrString(s->machine, "_native_decode_cache");
+    if (capsule) {
+        pointer = PyCapsule_GetPointer(capsule, DECODE_CACHE_CAPSULE);
+        Py_DECREF(capsule);
+        if (!pointer) return -1;
+        s->decode = pointer;
+        return 0;
+    }
+    if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return -1;
+    PyErr_Clear();
+
+    s->decode = PyMem_Calloc(s->decode_count, sizeof(Decoded));
+    if (!s->decode) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    capsule = PyCapsule_New(s->decode, DECODE_CACHE_CAPSULE, free_decode_cache);
+    if (!capsule) {
+        PyMem_Free(s->decode);
+        s->decode = NULL;
+        return -1;
+    }
+    if (PyObject_SetAttrString(s->machine, "_native_decode_cache", capsule) < 0) {
+        Py_DECREF(capsule);
+        s->decode = NULL;  /* The capsule destructor owns it now. */
+        return -1;
+    }
+    Py_DECREF(capsule);
+    return 0;
+}
 
 static inline uint8_t mem8(const uint8_t *m, uint32_t mask, uint32_t a) {
     return m[a & mask];
@@ -303,10 +358,13 @@ static int load_state(State *s, PyObject *machine) {
         PyErr_NoMemory();
         return -1;
     }
-    s->decode = (Decoded *)PyMem_Calloc(s->decode_count, sizeof(Decoded));
+    if (load_decode_cache(s) < 0) return -1;
     if (!s->decode) {
-        PyErr_NoMemory();
-        return -1;
+        s->decode = (Decoded *)PyMem_Calloc(s->decode_count, sizeof(Decoded));
+        if (!s->decode) {
+            PyErr_NoMemory();
+            return -1;
+        }
     }
     return 0;
 }
@@ -320,7 +378,7 @@ static void release_state(State *s) {
      * In particular, older CPython releases may alter the active exception
      * while releasing an exported bytearray buffer. */
     PyErr_Fetch(&error_type, &error_value, &error_traceback);
-    PyMem_Free(s->decode);
+    if (!s->persistent_decode) PyMem_Free(s->decode);
     s->decode = NULL;
     if (s->memory_view.obj) PyBuffer_Release(&s->memory_view);
     if (s->persistent_view.obj) PyBuffer_Release(&s->persistent_view);
@@ -332,6 +390,18 @@ static void release_state(State *s) {
     Py_XDECREF(s->screen_update_callback);
     Py_XDECREF(s->persistent_obj);
     PyErr_Restore(error_type, error_value, error_traceback);
+}
+
+static PyObject *clear_decode_cache(PyObject *self, PyObject *machine) {
+    int result;
+    (void)self;
+    result = PyObject_DelAttrString(machine, "_native_decode_cache");
+    if (result < 0 && PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        PyErr_Clear();
+    } else if (result < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static int set_attr_u64(PyObject *object, const char *name, uint64_t value) {
@@ -823,6 +893,7 @@ done:
 
 static PyMethodDef methods[] = {
     {"run_chunk", run_chunk, METH_VARARGS, "Execute a bounded optimized native instruction batch."},
+    {"clear_decode_cache", clear_decode_cache, METH_O, "Release a progress-session decode cache."},
     {NULL, NULL, 0, NULL}
 };
 
